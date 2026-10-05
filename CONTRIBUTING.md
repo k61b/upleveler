@@ -1,6 +1,6 @@
-# Contributing to Logswise CLI
+# Contributing to Upleveler
 
-Thank you for considering contributing to Logswise CLI! We welcome all kinds of contributions, including bug reports, feature requests, and pull requests.
+Thank you for considering contributing to Upleveler! We welcome all kinds of contributions, including bug reports, feature requests, and pull requests.
 
 ## How to Contribute
 
@@ -16,7 +16,7 @@ Please be respectful and considerate in all interactions. For more details, see 
 
 ## Reporting Issues
 
-- Use [GitHub Issues](https://github.com/k61b/logswise-cli/issues) to report bugs or request features.
+- Use [GitHub Issues](https://github.com/k61b/upleveler/issues) to report bugs or request features.
 - Provide as much detail as possible.
 
 ## Pull Requests
@@ -25,4 +25,4 @@ Please be respectful and considerate in all interactions. For more details, see 
 - Reference related issues in your PR description.
 - Ensure all tests pass before submitting.
 
-Thank you for helping improve Logswise CLI!
+Thank you for helping improve Upleveler!

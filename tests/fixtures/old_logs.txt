@@ -1,0 +1,12 @@
+İş günlüğüm - eski notlar
+
+## 2025-09-01
+- checkout servisinde ödeme retry bug'ı fixlendi (PR #812)
+- yeni gelen junior'a local setup'ta yardım ettim
+
+## 02.09.2025
+Payment outage incident: led the incident call, rolled back release 4.2, wrote the postmortem.
+https://wiki.example.com/postmortems/4-2
+
+### 15 Eylül 2025 Pazartesi
+- orders API pagination tasarım dokümanı yazıldı, search ve billing ekipleriyle review edildi
