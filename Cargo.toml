@@ -1,20 +1,28 @@
 [package]
-name = "logswise_cli_rs"
-version = "1.0.0"
+name = "upleveler"
+version = "0.1.0"
+rust-version = "1.82"
 edition = "2021"
+description = "Level up against your own career ladder: a local-first work log and promotion coach for software developers"
+license = "AGPL-3.0-only"
+repository = "https://github.com/k61b/upleveler"
 
 [dependencies]
+anyhow = "1"
+calamine = { version = "0.26", features = ["dates"] }
+chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4", features = ["derive"] }
+csv = "1"
+dialoguer = "0.11"
+dirs = "5"
+regex = "1"
+rust_xlsxwriter = "0.80"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-reqwest = { version = "0.12", features = ["json", "blocking", "stream"] }
-dialoguer = { version = "0.11", features = ["fuzzy-select"] }
-colored = "2"
-figlet-rs = "0.1.5"
-dirs = "5"
-indicatif = "0.17.11"
-chrono = { version = "0.4", features = ["serde"] }
-tokio = { version = "1.0", features = ["full"] }
-futures = "0.3"
-futures-util = "0.3"
-crossterm = "0.27"
+serde_norway = "0.9"
+sha2 = "0.10"
+toml = "0.8"
+ureq = { version = "2", features = ["json"] }
+
+[dev-dependencies]
+tempfile = "3"
