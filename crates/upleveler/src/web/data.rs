@@ -22,6 +22,10 @@ pub struct DashboardData {
     pub gap: Option<GapSummary>,
     /// Newest first.
     pub reports: Vec<Report>,
+    /// The configured model, for "runs on …" hints.
+    pub model: String,
+    /// Whether that model runs on this computer.
+    pub model_local: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -109,6 +113,8 @@ impl DashboardData {
             target: session.cfg.target_level.clone(),
             gap: session.latest_gap(),
             reports,
+            model: session.cfg.llm.model.clone(),
+            model_local: crate::config::is_local_url(&session.cfg.llm.base_url),
         })
     }
 

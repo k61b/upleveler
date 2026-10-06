@@ -64,9 +64,9 @@ Opens the dashboard in your browser (or type `/web` in the app). It runs on your
 | Overview | Entries, streak, a 26-week activity heatmap, readiness from your latest gap analysis, latest reports |
 | Logs | Every entry by day, filtered as you type (text, tag or date); add new entries with a date and tags |
 | Ladder | Each level's expectations with the entries that back them; your target level is marked |
-| Reports | Your gap analyses, promotion documents and summaries, ready to read or copy as Markdown |
+| Reports | Run a gap analysis, promotion document or summary with live progress; read or copy any report as Markdown |
 
-The dashboard reads the same files as the terminal app and shows fresh data on every page load. Running analyses (`/gap`, `/brag`) still happens in the terminal app.
+The dashboard reads and writes the same files as the terminal app and shows fresh data on every page load. Analyses use the model you chose in the setup, one at a time, and keep running if you close the page while `upleveler web` is open.
 
 ## Privacy
 

@@ -8,8 +8,9 @@
 //! without the token so the "open the link" page can render.
 
 use super::data::DashboardData;
+use super::runs::{self, Kind, MakeLlm, Runs, StartError};
 use super::ui::Alert;
-use super::views::AddForm;
+use super::views::{AddForm, RunForm};
 use super::{brand, views, FONTS, SCRIPT};
 use crate::config::Paths;
 use crate::session::Session;
@@ -36,6 +37,9 @@ struct AppState {
     port: u16,
     token: String,
     paths: Paths,
+    /// The analysis started from the browser, if any.
+    runs: Runs,
+    make_llm: MakeLlm,
     /// Per port, because browsers share cookies across ports of one host.
     cookie: String,
 }
@@ -46,6 +50,8 @@ impl AppState {
             port,
             token,
             paths,
+            runs: Runs::default(),
+            make_llm: runs::configured_llm(),
             cookie: format!("upleveler_token_{port}"),
         }
     }
@@ -147,6 +153,8 @@ fn router(state: Arc<AppState>) -> Router {
         .route("/logs", get(logs).post(add_log))
         .route("/ladder", get(ladder))
         .route("/reports", get(reports))
+        .route("/run", get(run_page).post(start_run))
+        .route("/run/cancel", axum::routing::post(cancel_run))
         .route("/reports/{name}", get(report))
         .route("/assets/style.css", get(style))
         .route("/assets/app.js", get(script))
@@ -327,7 +335,76 @@ async fn ladder(State(state): State<Arc<AppState>>, Query(query): Query<LadderQu
 }
 
 async fn reports(State(state): State<Arc<AppState>>) -> Response {
-    with_data(state, |data| page(views::reports(data))).await
+    let run = state.runs.view();
+    with_data(state, move |data| {
+        page(views::reports_with(data, run.as_ref(), &RunForm::default()))
+    })
+    .await
+}
+
+#[derive(Deserialize)]
+struct RunInput {
+    #[serde(default)]
+    kind: String,
+    #[serde(default)]
+    period: String,
+}
+
+fn forbidden_post() -> Response {
+    (
+        StatusCode::FORBIDDEN,
+        "Forbidden: this can only be done from the dashboard itself.\n",
+    )
+        .into_response()
+}
+
+/// Starts an analysis and shows its progress; a bad period shows the form again.
+async fn start_run(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Form(input): Form<RunInput>,
+) -> Response {
+    if !same_origin(&headers, state.port) {
+        return forbidden_post();
+    }
+    let Some(kind) = Kind::parse(&input.kind) else {
+        return (StatusCode::BAD_REQUEST, "Unknown analysis.\n").into_response();
+    };
+    match state.runs.start(
+        state.paths.clone(),
+        state.make_llm.clone(),
+        kind,
+        &input.period,
+    ) {
+        Ok(()) | Err(StartError::Busy) => {
+            (StatusCode::SEE_OTHER, [(header::LOCATION, "/run")]).into_response()
+        }
+        Err(StartError::BadPeriod(message)) => {
+            let run = state.runs.view();
+            with_data(state, move |data| {
+                let form = RunForm {
+                    kind,
+                    period: input.period,
+                    notice: Some((Alert::Error, message)),
+                };
+                let html = views::reports_with(data, run.as_ref(), &form).into_string();
+                (StatusCode::UNPROCESSABLE_ENTITY, Html(html)).into_response()
+            })
+            .await
+        }
+    }
+}
+
+async fn run_page(State(state): State<Arc<AppState>>) -> Response {
+    page(views::run(state.runs.view().as_ref()))
+}
+
+async fn cancel_run(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
+    if !same_origin(&headers, state.port) {
+        return forbidden_post();
+    }
+    state.runs.cancel();
+    (StatusCode::SEE_OTHER, [(header::LOCATION, "/run")]).into_response()
 }
 
 /// Only names of existing reports resolve, so the URL cannot reach other files.
@@ -757,6 +834,96 @@ mod tests {
                 .unwrap()
                 .len(),
             1
+        );
+    }
+
+    async fn send(
+        state: &Arc<AppState>,
+        req: axum::http::request::Builder,
+        body: &str,
+    ) -> Response {
+        let req = req
+            .header(header::HOST, HOST.unwrap())
+            .header(header::COOKIE, COOKIE.unwrap())
+            .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded");
+        router(state.clone())
+            .oneshot(req.body(Body::from(body.to_string())).unwrap())
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn analyses_run_from_the_browser() {
+        let home = tempfile::tempdir().unwrap();
+        let paths = Paths::at(home.path().to_path_buf());
+        Session::at(paths.clone())
+            .unwrap()
+            .add_log("Shipped the ledger export", crate::session::today(), vec![])
+            .unwrap();
+        let mut state = AppState::new(4747, TOKEN.into(), paths);
+        state.make_llm = Arc::new(|_: &Session| {
+            Ok(Box::new(crate::llm::FakeLlm {
+                reply: |_: &[crate::llm::Message], _| "- Shipped the ledger export".to_string(),
+            }) as Box<dyn crate::llm::Llm>)
+        });
+        let state = Arc::new(state);
+        let same = |req: axum::http::request::Builder| {
+            req.header("origin", "http://127.0.0.1:4747")
+                .header("sec-fetch-site", "same-origin")
+        };
+
+        let idle = body(send(&state, Request::get("/run"), "").await).await;
+        assert!(idle.contains("Nothing is running."));
+        let start = send(&state, same(Request::post("/run")), "kind=summary&period=").await;
+        assert_eq!(start.status(), StatusCode::SEE_OTHER);
+        assert_eq!(start.headers()[header::LOCATION], "/run");
+        let mut finished = String::new();
+        for _ in 0..200 {
+            let page = body(send(&state, Request::get("/run"), "").await).await;
+            if page.contains("Open the report") {
+                finished = page;
+                break;
+            }
+            assert!(
+                page.contains(r#"http-equiv="refresh""#),
+                "a running page refreshes itself"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert!(finished.contains("/reports/summary-"), "{finished}");
+        assert!(!finished.contains(r#"http-equiv="refresh""#));
+        let reports = body(send(&state, Request::get("/reports"), "").await).await;
+        assert!(reports.contains("/reports/summary-") && reports.contains("Run an analysis"));
+
+        let bad = send(
+            &state,
+            same(Request::post("/run")),
+            "kind=gap&period=someday",
+        )
+        .await;
+        assert_eq!(bad.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(body(bad).await.contains("Unknown period"));
+        assert_eq!(
+            send(&state, same(Request::post("/run")), "kind=poem")
+                .await
+                .status(),
+            StatusCode::BAD_REQUEST
+        );
+        let cross = |req: axum::http::request::Builder| {
+            req.header("origin", "http://evil.example")
+                .header("sec-fetch-site", "cross-site")
+        };
+        assert_eq!(
+            send(&state, cross(Request::post("/run")), "kind=gap")
+                .await
+                .status(),
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            send(&state, cross(Request::post("/run/cancel")), "")
+                .await
+                .status(),
+            StatusCode::FORBIDDEN
         );
     }
 

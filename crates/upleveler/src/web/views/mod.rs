@@ -12,7 +12,7 @@ pub use gallery::gallery;
 pub use ladder::ladder;
 pub use logs::{log_results, logs, logs_with, AddForm};
 pub use overview::{demo_frame, overview, overview_body};
-pub use reports::{render_markdown, report, reports};
+pub use reports::{render_markdown, report, reports, reports_with, run, RunForm};
 
 use super::brand::{self, LockupSize};
 use super::illustrations;
@@ -52,6 +52,16 @@ impl Tab {
 /// The page frame: top bar with the lockup, the tabs and where the data lives,
 /// then the view. `active` is `None` on pages outside the tabs.
 pub fn layout(title: &str, active: Option<Tab>, body: Markup) -> Markup {
+    frame(title, active, None, body)
+}
+
+/// The page frame for a page that reloads itself every `seconds` (a running
+/// analysis), which works without JavaScript.
+pub fn layout_refreshing(title: &str, active: Option<Tab>, seconds: u32, body: Markup) -> Markup {
+    frame(title, active, Some(seconds), body)
+}
+
+fn frame(title: &str, active: Option<Tab>, refresh: Option<u32>, body: Markup) -> Markup {
     html! {
         (DOCTYPE)
         html lang="en" {
@@ -59,6 +69,7 @@ pub fn layout(title: &str, active: Option<Tab>, body: Markup) -> Markup {
                 meta charset="utf-8";
                 meta name="viewport" content="width=device-width, initial-scale=1";
                 meta name="robots" content="noindex";
+                @if let Some(seconds) = refresh { meta http-equiv="refresh" content=(seconds); }
                 title { (title) " · Upleveler" }
                 link rel="icon" href="/favicon.svg" type="image/svg+xml";
                 link rel="stylesheet" href="/assets/style.css";

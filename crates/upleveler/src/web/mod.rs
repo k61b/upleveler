@@ -6,6 +6,7 @@ pub mod brand;
 pub mod data;
 pub mod demo;
 pub mod illustrations;
+pub mod runs;
 #[cfg(feature = "server")]
 pub mod server;
 pub mod tokens;

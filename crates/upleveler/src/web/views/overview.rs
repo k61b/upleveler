@@ -4,7 +4,7 @@ use super::{layout, view_header, Tab};
 use crate::web::brand::{self, LockupSize};
 use crate::web::data::DashboardData;
 use crate::web::illustrations;
-use crate::web::ui::{self, Card, Chip};
+use crate::web::ui::{self, Button, Card, Chip};
 use maud::{html, Markup};
 
 fn plural(n: usize, one: &str, many: &str) -> String {
@@ -25,7 +25,7 @@ fn readiness_card(data: &DashboardData) -> Markup {
         },
         (None, Some(_)) => html! {
             h2.card-title { "Readiness" @if let Some(t) = target { " for " (t) } }
-            (ui::empty_state(None, "No gap analysis yet. Run one to see which expectations your logs already cover.", Some(ui::code_block("upleveler gap"))))
+            (ui::empty_state(None, "No gap analysis yet. Run one to see which expectations your logs already cover.", Some(ui::button(Button::Primary, "Run a gap analysis", Some("/reports")))))
         },
         (None, None) => html! {
             h2.card-title { "Readiness" }

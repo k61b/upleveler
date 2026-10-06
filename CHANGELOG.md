@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- `upleveler web`: opens the dashboard in your browser, served on 127.0.0.1 only and opened with a private link printed in the terminal. Overview (stats, activity heatmap, readiness, latest reports), Logs (filter as you type, add entries), Ladder (expectations with your evidence, target level marked) and Reports (read or copy as Markdown).
+- `upleveler web`: opens the dashboard in your browser, served on 127.0.0.1 only and opened with a private link printed in the terminal. Overview (stats, activity heatmap, readiness, latest reports), Logs (filter as you type, add entries), Ladder (expectations with your evidence, target level marked) and Reports (run analyses with live progress and a stop button; read or copy as Markdown).
 - `/web` in the terminal app opens the browser dashboard; it keeps running while the app is open.
 - [upleveler.dev](https://upleveler.dev): the website, with a live demo of the dashboard built from example data.
 - The repository is now a Cargo workspace and the app lives in `crates/upleveler`. Install or update with `cargo install --path crates/upleveler --locked`.

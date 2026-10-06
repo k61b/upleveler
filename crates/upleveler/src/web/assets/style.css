@@ -1414,6 +1414,75 @@ samp {
   width: 100%;
 }
 
+select.input {
+  appearance: none;
+  padding-right: 36px;
+  background-image: none;
+  cursor: pointer;
+}
+
+.field:has(select) {
+  position: relative;
+}
+
+.field:has(select)::after {
+  content: "▾";
+  position: absolute;
+  right: 14px;
+  bottom: 12px;
+  color: var(--fg-muted);
+  pointer-events: none;
+}
+
+/* ---------- Analyses ---------- */
+
+.run-form {
+  display: grid;
+  gap: 8px;
+}
+
+.run-actions {
+  margin-top: 16px;
+}
+
+.run-step {
+  margin-bottom: 12px;
+  color: var(--fg);
+  font-size: var(--text-lg);
+  font-weight: 600;
+}
+
+.run-meta {
+  margin: 8px 0 20px;
+  font-size: var(--text-base);
+}
+
+.progress {
+  display: block;
+  width: 100%;
+  height: 10px;
+  overflow: hidden;
+  border: 0;
+  border-radius: var(--r-chip);
+  background: var(--bg-well);
+  appearance: none;
+}
+
+.progress::-webkit-progress-bar {
+  border-radius: var(--r-chip);
+  background: var(--bg-well);
+}
+
+.progress::-webkit-progress-value {
+  border-radius: var(--r-chip);
+  background: var(--accent);
+}
+
+.progress::-moz-progress-bar {
+  border-radius: var(--r-chip);
+  background: var(--accent);
+}
+
 /* ---------- Logs ---------- */
 
 .filter {

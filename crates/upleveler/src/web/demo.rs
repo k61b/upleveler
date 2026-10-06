@@ -203,6 +203,8 @@ pub fn data(today: NaiveDate) -> DashboardData {
         target: Some("SD3".into()),
         gap,
         reports: reports(today),
+        model: "gemma3:12b".into(),
+        model_local: true,
     }
 }
 
