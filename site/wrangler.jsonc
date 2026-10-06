@@ -1,0 +1,16 @@
+// Cloudflare Worker that only serves static files: no script, nothing runs on the server.
+// Build the files first with `cargo run -p upleveler-site`, then `npx wrangler deploy` from this folder.
+{
+  "$schema": "https://unpkg.com/wrangler/config-schema.json",
+  "name": "upleveler",
+  "compatibility_date": "2026-10-06",
+  // Cloudflare creates the DNS record and the certificate on deploy.
+  "routes": [{ "pattern": "upleveler.dev", "custom_domain": true }],
+  // upleveler.dev is the only public address; pull requests still get preview URLs.
+  "workers_dev": false,
+  "preview_urls": true,
+  "assets": {
+    "directory": "./dist",
+    "not_found_handling": "404-page"
+  }
+}

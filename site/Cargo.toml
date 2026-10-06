@@ -1,0 +1,13 @@
+[package]
+name = "upleveler-site"
+description = "Generates the Upleveler landing page as static files for Cloudflare"
+version.workspace = true
+rust-version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+anyhow.workspace = true
+maud.workspace = true

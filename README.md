@@ -3,7 +3,7 @@
 [![CI](https://github.com/k61b/upleveler/actions/workflows/ci.yml/badge.svg)](https://github.com/k61b/upleveler/actions/workflows/ci.yml)
 [![License: AGPL-3.0](https://img.shields.io/badge/License-AGPL--3.0-blue.svg)](LICENSE)
 
-**Level up against your own career ladder.**
+**Level up against your own career ladder.** · [upleveler.dev](https://upleveler.dev)
 
 Upleveler is a work log for software developers. You write down what you do. Upleveler compares it with what your company expects at the next level, shows what is missing, and writes your promotion document.
 
@@ -71,6 +71,7 @@ The repository is a Cargo workspace:
 | Path | What it is |
 |---|---|
 | `crates/upleveler` | The app: CLI, interactive terminal app and the core library |
+| `site` | The landing page, built with Rust and served from Cloudflare ([details](site/README.md)) |
 
 Run the checks from the repository root; they cover every crate:
 

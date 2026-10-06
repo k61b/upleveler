@@ -1,0 +1,53 @@
+name: Site
+
+# Builds the landing page (site/) with Rust and serves it from Cloudflare as static
+# files. Pushes to main deploy to production; pull requests from this repository
+# upload a preview version and print its URL. The deploy steps are skipped until the
+# CLOUDFLARE_API_TOKEN and CLOUDFLARE_ACCOUNT_ID secrets exist.
+on:
+  push:
+    branches: [main]
+    paths: ["site/**", "Cargo.toml", "Cargo.lock", ".github/workflows/site.yml"]
+  pull_request:
+    paths: ["site/**", "Cargo.toml", "Cargo.lock", ".github/workflows/site.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: site-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  site:
+    name: Build and deploy
+    runs-on: ubuntu-latest
+    env:
+      HAS_CLOUDFLARE: ${{ secrets.CLOUDFLARE_API_TOKEN != '' && secrets.CLOUDFLARE_ACCOUNT_ID != '' }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo run --locked -p upleveler-site
+
+      - name: Deploy to production
+        if: env.HAS_CLOUDFLARE == 'true' && github.event_name != 'pull_request'
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          workingDirectory: site
+          command: deploy
+
+      - name: Upload a preview
+        if: env.HAS_CLOUDFLARE == 'true' && github.event_name == 'pull_request'
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          workingDirectory: site
+          command: versions upload --message "PR #${{ github.event.pull_request.number }}"
