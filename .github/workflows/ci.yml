@@ -50,7 +50,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@1.82.0
+      # Pass the version as an input: a version-like @ref would be "updated" by Dependabot.
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.82.0"
       - uses: Swatinem/rust-cache@v2
       # The exact command the README tells users to run.
       - run: cargo install --path . --locked --root "$RUNNER_TEMP/upleveler"
