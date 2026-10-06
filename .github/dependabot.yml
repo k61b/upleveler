@@ -1,0 +1,8 @@
+# Keeps the GitHub Actions used by the workflows up to date. Cargo dependencies
+# are updated by hand so the lockfile stays compatible with Rust 1.82.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly

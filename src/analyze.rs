@@ -203,7 +203,7 @@ fn batches<T: Copy>(
 /// Newest-first lines that fit in `budget` characters.
 fn evidence_lines(entries: &[&Entry], budget: usize) -> (String, usize) {
     let mut sorted: Vec<&&Entry> = entries.iter().collect();
-    sorted.sort_by(|a, b| b.date.cmp(&a.date));
+    sorted.sort_by_key(|e| std::cmp::Reverse(e.date));
     let mut out = String::new();
     let mut used = 0;
     for e in sorted {
