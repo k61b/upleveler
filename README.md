@@ -5,39 +5,13 @@
 
 **Level up against your own career ladder.**
 
-Upleveler is a command-line work log for software developers. You write down what you do, and Upleveler compares it with what your company expects at the next level. It then tells you where you are strong, what is missing, and what to do next. It can also write your promotion document.
+Upleveler is a work log for software developers. You write down what you do. Upleveler compares it with what your company expects at the next level, shows what is missing, and writes your promotion document.
 
-Everything stays on your computer. The AI runs locally with [Ollama](https://ollama.com) by default.
-
-## How it works
-
-1. **Give it your career ladder.** This is your company's document that says what an SD1, SD2, SD3... is expected to do.
-2. **Log your work.** Add one line a day, and import your old notes from text or Excel files.
-3. **Ask for a report.** Upleveler matches your logs to each expectation and writes a gap analysis, a promotion document or a summary.
-
-```text
-$ upleveler gap
-
-# Gap analysis: SD2 → SD3
-
-|    | Area      | Expectation                          | Entries | Last evidence |
-|----|-----------|--------------------------------------|---------|---------------|
-| ✅ | Ownership | Leads incidents, follows up actions  | 4       | 2025-08-18    |
-| 🟡 | Technical | Designs solutions across services    | 1       | 2025-07-21    |
-| ❌ | Mentoring | Mentors junior developers            | 0       | —             |
-
-### Priorities
-1. Pair with the new junior developer every week and log it
-...
-```
+Everything stays on your computer. The AI runs locally with [Ollama](https://ollama.com).
 
 ## Install
 
-You need:
-
-- [Rust](https://rustup.rs) 1.82 or newer
-- [Ollama](https://ollama.com), running locally
-- About 16 GB of RAM for the recommended model
+You need [Rust](https://rustup.rs) (1.82+), [Ollama](https://ollama.com) and about 16 GB of RAM.
 
 ```sh
 git clone https://github.com/k61b/upleveler.git
@@ -46,129 +20,57 @@ cargo install --path . --locked
 ollama pull gemma3:12b
 ```
 
-This installs the `upleveler` command into `~/.cargo/bin`. To update later, run `git pull && cargo install --path . --locked --force` inside the cloned folder.
+To update: `git pull && cargo install --path . --locked --force`
 
-## Getting started
+## Use
 
-**1. Set up**
+Run `upleveler`. The first time, a short setup asks for the model, the report language, your company's career ladder and your current and target level.
 
-```sh
-upleveler init
+```text
+› dün PAY-412 circuit breaker'ı prod'a aldım
+✓ Logged for 2026-10-04: PAY-412 circuit breaker'ı prod'a aldım
+
+› /gap
+● Gap analysis SD2 → SD3
+  ● Ownership  Leads incidents, follows up actions until closed   4
+  ◐ Technical  Designs solutions across services                  1
+  ○ Mentoring  Mentors junior developers                          0
 ```
 
-`init` asks for the model (default: `gemma3:12b` on your local Ollama) and the language for reports (English or Turkish).
+**Just type.** Write what you did and it is logged. Ask a question and it is answered from your logs.
 
-**2. Add your career ladder**
-
-```sh
-upleveler ladder import our-levels.md
-upleveler ladder set --current SD2 --target SD3
-```
-
-The ladder file can be any text, Markdown or Excel file that describes your levels. The AI turns it into a structured list, and `upleveler ladder show` displays it. You can also start from [`ladder.example.yaml`](ladder.example.yaml).
-
-**3. Bring in your old notes (optional)**
-
-```sh
-upleveler import old-notes.txt
-upleveler import worklog.xlsx
-```
-
-You see a summary before anything is saved: how many entries were found, which ones are duplicates, and which ones have no date.
-
-**4. Log your work**
-
-```sh
-upleveler log "Led the payment outage call, wrote the postmortem" -t incident
-upleveler log --date yesterday "Reviewed 3 PRs for the billing team"
-```
-
-**5. Get reports**
-
-```sh
-upleveler gap                    # where do I stand against my target level?
-upleveler brag --period 2026-H2  # promotion / self-review document
-upleveler summary --month        # summary for a 1:1
-upleveler ask "which incidents did I handle last month?"
-```
-
-Reports are printed and also saved as Markdown in `~/.upleveler/reports/`.
-
-## Everyday commands
-
-| I want to... | Command |
+| Command | What it does |
 |---|---|
-| Log something I did today | `upleveler log "..."` |
-| Log a longer note in my editor | `upleveler log` |
-| See my recent entries | `upleveler list -n 20` |
-| Find entries | `upleveler list --grep incident --period 2026-Q3` |
-| See where I stand for my next level | `upleveler gap` |
-| Write my self-review | `upleveler brag --period 2026-H2` |
-| Prepare for a 1:1 | `upleveler summary --week` |
-| Ask a question about my work | `upleveler ask "..."` or `upleveler chat` |
-| Get my log as Excel | `upleveler export -f xlsx -o worklog.xlsx` |
-| Check my setup | `upleveler` |
+| `/gap` | Where you stand for your target level |
+| `/brag` | Promotion / self-review document |
+| `/summary week` | Summary for a 1:1 |
+| `/import @file` | Import old notes from txt, md, csv or xlsx |
+| `/dashboard` | Progress, activity heatmap, logs and reports |
+| `/undo` | Undo the last entry you logged |
 
-Run `upleveler <command> --help` for every option.
-
-**Dates** can be written as `2025-10-05`, `05.10.2025`, `5 Ekim 2025`, `Oct 5, 2025`, `today` or `yesterday`.
-
-**Periods** (`--period` / `-p`) can be `2025`, `2025-Q3`, `Q3`, `H1`, `2025-10`, `90d`, `6m`, `this-month`, `last-week` or `last-quarter`. You can also use `--from` and `--to`.
-
-## Importing old notes
-
-- **Text and Markdown:** notes are split at lines that start with a date, for example `## 2025-10-05` or `5 Ekim 2025 Pazartesi`. The AI turns each part into separate entries, keeping your own words and language.
-- **Excel and CSV:** the AI only works out which column holds the date, the description and the category. The rows are then converted as they are.
-- **Nothing is lost or made up.** If the AI skips a note, or writes a number that is not in the original, that note is imported exactly as written and you get a warning.
-- **Review first.** Results are written to a staging file in `~/.upleveler/staging/`. Confirm to save them, or edit the file and run `upleveler import <staging-file>`.
-- **Safe to repeat.** Importing the same file twice does not create duplicates.
-
-Use `--no-ai` to split by dates and bullet points only, or `--into other.jsonl` to write to a separate file.
+Type `/` to see all commands and `?` for keyboard shortcuts. Reports are saved in `~/.upleveler/reports/`.
 
 ## Privacy
 
-- All data is stored as plain files in `~/.upleveler/`: `config.toml`, `ladder.yaml`, `logs.jsonl`, `reports/` and `staging/`. Set `UPLEVELER_HOME` to use another folder.
-- By default, the AI is Ollama on your own machine. Upleveler **refuses** to send your logs anywhere else unless you allow it explicitly.
-- There is no telemetry, no account and no cloud service.
+- Your data is plain files in `~/.upleveler/`.
+- Nothing is sent anywhere. To use your company's own LLM instead of Ollama, choose "OpenAI-compatible endpoint" in the setup (`/init`) and confirm that the endpoint is approved.
+- No account, no cloud, no telemetry.
 
-### Using your company's AI model
+## Scripts
 
-If your company provides an approved, OpenAI-compatible LLM endpoint, you can use it instead of Ollama. Choose it in `upleveler init`, or edit `~/.upleveler/config.toml`:
-
-```toml
-language = "en"
-current_level = "SD2"
-target_level = "SD3"
-
-[llm]
-provider = "openai"
-base_url = "https://llm.internal.example.com/v1"
-model = "company-model"
-api_key_env = "COMPANY_LLM_KEY"   # the key is read from this environment variable
-allow_remote = true               # required for any endpoint that is not localhost
-context_tokens = 32000
-```
+Every feature is also a plain command, for example `upleveler log "..."`, `upleveler gap` or `upleveler export -f xlsx -o worklog.xlsx`. Run `upleveler --help` to see them all.
 
 ## Türkçe
 
-Upleveler, yazılım geliştiricilerin yaptıkları işi **kendi şirketlerinin seviye beklentileriyle** karşılaştıran bir komut satırı aracıdır. Önce şirketin seviye dokümanını yüklersiniz (`ladder import`). Sonra günlük işlerinizi yazarsınız (`log`) ya da eski notlarınızı txt, md veya Excel dosyasından içe aktarırsınız (`import`). Raporlar:
-
-- `gap`: hedef seviyeye göre güçlü ve eksik yönler, kanıtlar ve sonraki adımlar
-- `brag`: terfi dokümanı
-- `summary`: dönem özeti
-- `ask`: log'larınıza soru sorma
-
-Raporların Türkçe olması için `init` sırasında Türkçe'yi seçin. Bütün veriler bilgisayarınızda kalır.
+Upleveler, yaptığınız işi şirketinizin seviye beklentileriyle karşılaştırır. Terminalde `upleveler` yazın. Ne yaptığınızı yazarsanız log'a eklenir, soru sorarsanız cevaplanır. Komutları görmek için `/` yazın. Raporların Türkçe olması için kurulumda Türkçe'yi seçin. Verileriniz bilgisayarınızdan çıkmaz.
 
 ## Development
 
 ```sh
-cargo test                                  # unit and end-to-end tests, no network needed
+cargo test
 cargo clippy --all-targets -- -D warnings
 cargo fmt --all
 ```
-
-The AI prompts are in `src/prompts/*.md`.
 
 ## License
 
