@@ -61,7 +61,7 @@ Opens the dashboard in your browser. It runs on your computer at `127.0.0.1` and
 | Tab | What it shows |
 |---|---|
 | Overview | Entries, streak, a 26-week activity heatmap, readiness from your latest gap analysis, latest reports |
-| Logs | Every entry by day, filtered as you type (text, tag or date) |
+| Logs | Every entry by day, filtered as you type (text, tag or date); add new entries with a date and tags |
 | Ladder | Each level's expectations with the entries that back them; your target level is marked |
 | Reports | Your gap analyses, promotion documents and summaries, ready to read or copy as Markdown |
 

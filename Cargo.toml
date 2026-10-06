@@ -11,7 +11,7 @@ repository = "https://github.com/k61b/upleveler"
 
 [workspace.dependencies]
 anyhow = "1"
-axum = { version = "0.8", default-features = false, features = ["http1", "tokio", "query"] }
+axum = { version = "0.8", default-features = false, features = ["http1", "tokio", "query", "form"] }
 calamine = { version = "0.26", features = ["dates"] }
 chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4", features = ["derive"] }

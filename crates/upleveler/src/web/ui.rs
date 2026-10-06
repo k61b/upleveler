@@ -125,6 +125,24 @@ pub fn card(variant: Card, body: Markup) -> Markup {
     html! { div class=(class) { (body) } }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Alert {
+    Info,
+    Success,
+    Error,
+}
+
+/// A one-line message about what just happened. Errors are announced at once
+/// (`role="alert"`), the others politely (`role="status"`).
+pub fn alert(kind: Alert, text: &str) -> Markup {
+    let (class, role) = match kind {
+        Alert::Info => ("alert", "status"),
+        Alert::Success => ("alert alert--success", "status"),
+        Alert::Error => ("alert alert--error", "alert"),
+    };
+    html! { p class=(class) role=(role) { (text) } }
+}
+
 /// Empty, not found or not ready yet: an optional sticker, one sentence, one action.
 pub fn empty_state(sticker: Option<Markup>, text: &str, action: Option<Markup>) -> Markup {
     html! {

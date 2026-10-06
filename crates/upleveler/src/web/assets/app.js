@@ -38,3 +38,12 @@ document.querySelectorAll("form[data-live]").forEach((form) => {
     timer = setTimeout(refresh, 200);
   });
 });
+
+// Cmd/Ctrl+Enter submits a textarea marked data-submit-shortcut.
+document.addEventListener("keydown", (event) => {
+  const field = event.target.closest?.("textarea[data-submit-shortcut]");
+  if (field && event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
+    event.preventDefault();
+    field.form?.requestSubmit();
+  }
+});

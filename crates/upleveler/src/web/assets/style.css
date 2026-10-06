@@ -1341,6 +1341,79 @@ samp {
   color: var(--on-accent);
 }
 
+/* ---------- Alerts ---------- */
+
+.alert {
+  padding: 10px 14px;
+  border: 1px solid var(--rule-strong);
+  border-radius: var(--r-control);
+  background: var(--tint);
+  color: var(--fg);
+  font-size: var(--text-base);
+  font-weight: 600;
+}
+
+.alert--success {
+  border-color: transparent;
+  background: var(--success-soft);
+  color: var(--success-ink);
+}
+
+.alert--error {
+  border-color: transparent;
+  background: var(--danger-soft);
+  color: var(--danger-ink);
+}
+
+/* ---------- Forms ---------- */
+
+.field {
+  display: grid;
+  gap: 6px;
+}
+
+.field--grow {
+  flex: 1;
+  min-width: 160px;
+}
+
+.field-label {
+  color: var(--fg);
+  font-size: var(--text-base);
+  font-weight: 600;
+}
+
+.textarea {
+  min-height: 88px;
+  padding: 12px 14px;
+  line-height: 1.5;
+  resize: vertical;
+}
+
+.add-entry {
+  display: grid;
+  gap: 8px;
+  margin-bottom: 24px;
+  padding-bottom: 24px;
+  border-bottom: 1px solid var(--rule);
+}
+
+.add-entry .alert {
+  margin-bottom: 8px;
+}
+
+.add-entry-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 12px;
+  margin-top: 4px;
+}
+
+.add-entry-row .input {
+  width: 100%;
+}
+
 /* ---------- Logs ---------- */
 
 .filter {

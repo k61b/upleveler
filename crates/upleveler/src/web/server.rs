@@ -8,11 +8,13 @@
 //! without the token so the "open the link" page can render.
 
 use super::data::DashboardData;
+use super::ui::Alert;
+use super::views::AddForm;
 use super::{brand, views, FONTS, SCRIPT};
 use crate::config::Paths;
 use crate::session::Session;
 use anyhow::{Context, Result};
-use axum::extract::{Path, Query, Request, State};
+use axum::extract::{Form, Path, Query, Request, State};
 use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{Html, IntoResponse, Response};
@@ -97,7 +99,7 @@ fn new_token() -> Result<String> {
 fn router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/", get(overview))
-        .route("/logs", get(logs))
+        .route("/logs", get(logs).post(add_log))
         .route("/ladder", get(ladder))
         .route("/reports", get(reports))
         .route("/reports/{name}", get(report))
@@ -145,7 +147,25 @@ fn error_page(detail: &str) -> Response {
 struct LogsQuery {
     #[serde(default)]
     q: String,
+    /// Set by the redirect after adding an entry: the date it was logged for.
+    logged: Option<String>,
+    /// Set when the same text was already logged that day.
+    duplicate: Option<String>,
 }
+
+#[derive(Deserialize)]
+struct AddLog {
+    #[serde(default)]
+    text: String,
+    #[serde(default)]
+    date: String,
+    #[serde(default)]
+    tags: String,
+}
+
+/// The longest entry the form accepts (the terminal app has no limit, but a
+/// browser form should not post megabytes by accident).
+const MAX_ENTRY: usize = 4000;
 
 #[derive(Deserialize)]
 struct LadderQuery {
@@ -157,7 +177,101 @@ async fn overview(State(state): State<Arc<AppState>>) -> Response {
 }
 
 async fn logs(State(state): State<Arc<AppState>>, Query(query): Query<LogsQuery>) -> Response {
-    with_data(state, move |data| page(views::logs(data, &query.q))).await
+    with_data(state, move |data| {
+        let mut form = AddForm::empty(data.today);
+        form.notice = match (&query.logged, &query.duplicate) {
+            (Some(date), _) => Some((Alert::Success, format!("Logged for {date}."))),
+            (None, Some(date)) => Some((
+                Alert::Info,
+                format!("That entry is already logged for {date}."),
+            )),
+            _ => None,
+        };
+        page(views::logs_with(data, &query.q, &form))
+    })
+    .await
+}
+
+/// A state-changing request must come from this dashboard's own pages. The
+/// SameSite=Strict cookie already stops other sites; this is a second check.
+fn same_origin(headers: &HeaderMap, port: u16) -> bool {
+    let header = |name: &str| headers.get(name).and_then(|v| v.to_str().ok());
+    let origin_ok = header("origin").is_none_or(|origin| {
+        origin == format!("http://127.0.0.1:{port}") || origin == format!("http://localhost:{port}")
+    });
+    let fetch_ok = header("sec-fetch-site").is_none_or(|site| site == "same-origin");
+    origin_ok && fetch_ok
+}
+
+/// Adds an entry from the Logs form, then redirects back (post/redirect/get),
+/// or shows the form again with what was typed and the problem.
+async fn add_log(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Form(input): Form<AddLog>,
+) -> Response {
+    if !same_origin(&headers, state.port) {
+        return (
+            StatusCode::FORBIDDEN,
+            "Forbidden: entries can only be added from this dashboard.\n",
+        )
+            .into_response();
+    }
+    let paths = state.paths.clone();
+    let result = tokio::task::spawn_blocking(move || -> Result<Response> {
+        let session = Session::at(paths)?;
+        let today = crate::session::today();
+        let text = input.text.trim().to_string();
+        let problem = if text.is_empty() {
+            Some("Write what you did first.".to_string())
+        } else if text.chars().count() > MAX_ENTRY {
+            Some(format!(
+                "That is longer than {MAX_ENTRY} characters. Split it into a few entries."
+            ))
+        } else {
+            None
+        };
+        let date = match input.date.trim() {
+            "" => Ok(today),
+            d => crate::dates::parse_date(d, today).ok_or(()),
+        };
+        let (problem, date) = match (problem, date) {
+            (Some(p), _) => (Some(p), None),
+            (None, Err(())) => (Some("Use a date like 2026-10-04.".to_string()), None),
+            (None, Ok(date)) => (None, Some(date)),
+        };
+        let Some(date) = date else {
+            let data = DashboardData::load(&session)?;
+            let form = AddForm {
+                text: input.text,
+                date: input.date,
+                tags: input.tags,
+                notice: problem.map(|p| (Alert::Error, p)),
+            };
+            return Ok((
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Html(views::logs_with(&data, "", &form).into_string()),
+            )
+                .into_response());
+        };
+        let tags = input
+            .tags
+            .split([',', ' '])
+            .filter(|t| !t.trim().is_empty())
+            .map(String::from)
+            .collect();
+        let location = match session.add_log(&text, date, tags)? {
+            Some(_) => format!("/logs?logged={date}"),
+            None => format!("/logs?duplicate={date}"),
+        };
+        Ok((StatusCode::SEE_OTHER, [(header::LOCATION, location)]).into_response())
+    })
+    .await;
+    match result {
+        Ok(Ok(response)) => response,
+        Ok(Err(err)) => error_page(&format!("{err:#}")),
+        Err(err) => error_page(&err.to_string()),
+    }
 }
 
 async fn ladder(State(state): State<Arc<AppState>>, Query(query): Query<LadderQuery>) -> Response {
@@ -276,9 +390,11 @@ async fn guard(State(state): State<Arc<AppState>>, req: Request, next: Next) -> 
         header::CONTENT_SECURITY_POLICY,
         HeaderValue::from_static(CSP),
     );
+    // `same-origin`, not `no-referrer`: with no-referrer browsers send
+    // `Origin: null` on form posts, which the same-origin check must refuse.
     headers.insert(
         header::REFERRER_POLICY,
-        HeaderValue::from_static("no-referrer"),
+        HeaderValue::from_static("same-origin"),
     );
     headers.insert(
         header::X_CONTENT_TYPE_OPTIONS,
@@ -414,7 +530,7 @@ mod tests {
             let res = get(tab.path(), HOST, COOKIE).await;
             assert_eq!(res.status(), StatusCode::OK, "{tab:?}");
             assert_eq!(res.headers()[header::CONTENT_SECURITY_POLICY], CSP);
-            assert_eq!(res.headers()[header::REFERRER_POLICY], "no-referrer");
+            assert_eq!(res.headers()[header::REFERRER_POLICY], "same-origin");
             assert_eq!(res.headers()[header::CACHE_CONTROL], "no-store");
             assert!(body(res).await.contains(tab.title()));
         }
@@ -490,6 +606,112 @@ mod tests {
         assert_eq!(
             get_in(home.path(), "/ladder").await.status(),
             StatusCode::OK
+        );
+    }
+
+    async fn post_in(home: &std::path::Path, body: &str, extra: &[(&str, &str)]) -> Response {
+        let mut req = Request::post("/logs")
+            .header(header::HOST, HOST.unwrap())
+            .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded");
+        for (name, value) in extra {
+            req = req.header(*name, *value);
+        }
+        let app = router(Arc::new(AppState::new(
+            4747,
+            TOKEN.into(),
+            Paths::at(home.to_path_buf()),
+        )));
+        app.oneshot(req.body(Body::from(body.to_string())).unwrap())
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn adding_an_entry_from_the_browser() {
+        let home = tempfile::tempdir().unwrap();
+        let cookie = ("cookie", COOKIE.unwrap());
+        let same = [
+            cookie,
+            ("origin", "http://127.0.0.1:4747"),
+            ("sec-fetch-site", "same-origin"),
+        ];
+
+        let res = post_in(
+            home.path(),
+            "text=Shipped+the+ledger+export&date=2026-10-02&tags=billing%2C+%23Release",
+            &same,
+        )
+        .await;
+        assert_eq!(res.status(), StatusCode::SEE_OTHER);
+        assert_eq!(res.headers()[header::LOCATION], "/logs?logged=2026-10-02");
+        let entries = Session::at(Paths::at(home.path().to_path_buf()))
+            .unwrap()
+            .entries()
+            .unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].tags, vec!["billing", "release"]);
+        let page = body(get_in(home.path(), "/logs?logged=2026-10-02").await).await;
+        assert!(
+            page.contains("Logged for 2026-10-02.") && page.contains("Shipped the ledger export")
+        );
+
+        let again = post_in(
+            home.path(),
+            "text=Shipped+the+ledger+export&date=2026-10-02",
+            &same,
+        )
+        .await;
+        assert_eq!(
+            again.headers()[header::LOCATION],
+            "/logs?duplicate=2026-10-02"
+        );
+
+        for (form, message) in [
+            ("text=++&date=", "Write what you did first."),
+            ("text=Hello&date=not+a+date", "Use a date like"),
+        ] {
+            let res = post_in(home.path(), form, &same).await;
+            assert_eq!(res.status(), StatusCode::UNPROCESSABLE_ENTITY, "{form}");
+            let page = body(res).await;
+            assert!(page.contains(message), "{form}");
+        }
+        let kept = body(post_in(home.path(), "text=Kept+text&date=nope", &same).await).await;
+        assert!(kept.contains(">Kept text</textarea>"));
+
+        // Other sites cannot add entries, even if a request carries the cookie.
+        for extra in [
+            [
+                cookie,
+                ("origin", "http://evil.example"),
+                ("sec-fetch-site", "cross-site"),
+            ],
+            [
+                cookie,
+                ("origin", "http://127.0.0.1:4747"),
+                ("sec-fetch-site", "cross-site"),
+            ],
+            [
+                cookie,
+                ("origin", "null"),
+                ("sec-fetch-site", "same-origin"),
+            ],
+        ] {
+            assert_eq!(
+                post_in(home.path(), "text=x", &extra).await.status(),
+                StatusCode::FORBIDDEN
+            );
+        }
+        assert_eq!(
+            post_in(home.path(), "text=x", &[]).await.status(),
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            Session::at(Paths::at(home.path().to_path_buf()))
+                .unwrap()
+                .entries()
+                .unwrap()
+                .len(),
+            1
         );
     }
 

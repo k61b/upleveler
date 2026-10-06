@@ -10,7 +10,7 @@ mod reports;
 
 pub use gallery::gallery;
 pub use ladder::ladder;
-pub use logs::{log_results, logs};
+pub use logs::{log_results, logs, logs_with, AddForm};
 pub use overview::{demo_frame, overview, overview_body};
 pub use reports::{render_markdown, report, reports};
 
