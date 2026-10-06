@@ -1,34 +1,19 @@
 //! Builds the landing page into `site/dist/` (or the directory given as the first
 //! argument). Cloudflare serves that directory as static assets; see `wrangler.jsonc`.
+//! Styles, fonts, the mark and the components come from the `upleveler` crate,
+//! so the site and the local dashboard share one design system.
 
 use anyhow::{Context, Result};
-use maud::{html, Markup, PreEscaped, DOCTYPE};
+use maud::{html, Markup, DOCTYPE};
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use upleveler::web::brand::{self, LockupSize};
+use upleveler::web::ui::{self, Button};
+use upleveler::web::{self as web, views};
 
 const REPO: &str = "https://github.com/k61b/upleveler";
-const TAGLINE: &str = "Level up against your own career ladder.";
 const DESCRIPTION: &str = "A local-first work log for software developers. Upleveler compares \
                            what you do with what your company expects at the next level.";
-
-const STYLE: &str = r#"
-:root { --bg: #fafaf9; --fg: #1c1917; --muted: #57534e; --accent: #4f46e5; }
-@media (prefers-color-scheme: dark) {
-  :root { --bg: #0c0a09; --fg: #f5f5f4; --muted: #a8a29e; --accent: #818cf8; }
-}
-* { box-sizing: border-box; }
-body {
-  margin: 0; min-height: 100vh; display: grid; place-items: center; padding: 24px 16px;
-  background: var(--bg); color: var(--fg);
-  font: 17px/1.6 system-ui, -apple-system, "Segoe UI", sans-serif;
-}
-main { max-width: 36rem; }
-h1 { font-size: clamp(2rem, 6vw, 3rem); line-height: 1.1; margin: 0 0 .5rem; }
-p { color: var(--muted); margin: 0 0 1.5rem; }
-a { color: var(--accent); font-weight: 600; }
-"#;
-
-const FAVICON: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32"><rect width="32" height="32" rx="7" fill="#4f46e5"/><path d="M9 21l7-7 7 7" stroke="#fff" stroke-width="3.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>"##;
 
 fn page(title: &str, body: Markup) -> Markup {
     html! {
@@ -40,9 +25,21 @@ fn page(title: &str, body: Markup) -> Markup {
                 title { (title) }
                 meta name="description" content=(DESCRIPTION);
                 link rel="icon" href="/favicon.svg" type="image/svg+xml";
-                style { (PreEscaped(STYLE)) }
+                link rel="stylesheet" href="/assets/style.css";
+                script src="/assets/app.js" defer {}
             }
-            body { main { (body) } }
+            body.shell {
+                header.topbar {
+                    div.container.container--wide.topbar-inner {
+                        a.topbar-home href="/" { (brand::lockup(LockupSize::Md)) }
+                        div.topbar-end { (ui::button(Button::Ghost, "GitHub", Some(REPO))) }
+                    }
+                }
+                main { (body) }
+                footer.footer.container.container--wide.muted {
+                    "Your work log, measured against your own ladder. Stays on your computer."
+                }
+            }
         }
     }
 }
@@ -51,9 +48,14 @@ fn index() -> Markup {
     page(
         "Upleveler",
         html! {
-            h1 { "Upleveler" }
-            p { (TAGLINE) " " (DESCRIPTION) " The website is coming soon." }
-            a href=(REPO) { "View on GitHub →" }
+            section.hero.container.stack {
+                (ui::label("In development"))
+                (ui::heading(1, "Level up against", "your own", "career ladder."))
+                p.lead { (DESCRIPTION) " Everything stays on your computer." }
+                div.actions {
+                    (ui::button(Button::Primary, "View on GitHub", Some(REPO)))
+                }
+            }
         },
     )
 }
@@ -62,11 +64,23 @@ fn not_found() -> Markup {
     page(
         "Not found · Upleveler",
         html! {
-            h1 { "Page not found" }
-            p { "This page does not exist." }
-            a href="/" { "← Back to Upleveler" }
+            section.hero.container {
+                (ui::empty_state(
+                    None,
+                    "This page does not exist.",
+                    Some(ui::button(Button::Ghost, "Back to Upleveler", Some("/"))),
+                ))
+            }
         },
     )
+}
+
+fn write(out: &Path, name: &str, content: impl AsRef<[u8]>) -> Result<()> {
+    let path = out.join(name);
+    if let Some(dir) = path.parent() {
+        fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+    }
+    fs::write(&path, content).with_context(|| format!("writing {}", path.display()))
 }
 
 fn main() -> Result<()> {
@@ -74,17 +88,27 @@ fn main() -> Result<()> {
         .nth(1)
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("dist"));
-    fs::create_dir_all(&out).with_context(|| format!("creating {}", out.display()))?;
-    let files = [
-        ("index.html", index().into_string()),
-        ("404.html", not_found().into_string()),
-        ("favicon.svg", FAVICON.to_string()),
-        ("robots.txt", "User-agent: *\nAllow: /\n".to_string()),
-    ];
-    let count = files.len();
-    for (name, content) in files {
-        fs::write(out.join(name), content).with_context(|| format!("writing {name}"))?;
+    let mut count = 0;
+    let mut emit = |name: &str, content: &[u8]| -> Result<()> {
+        count += 1;
+        write(&out, name, content)
+    };
+
+    emit("index.html", index().into_string().as_bytes())?;
+    emit("404.html", not_found().into_string().as_bytes())?;
+    emit(
+        "gallery/index.html",
+        views::gallery().into_string().as_bytes(),
+    )?;
+    emit("favicon.svg", brand::mark_svg(&brand::MAIN, 32).as_bytes())?;
+    emit("robots.txt", b"User-agent: *\nDisallow: /gallery/\n")?;
+    emit("assets/style.css", web::stylesheet().as_bytes())?;
+    emit("assets/app.js", web::SCRIPT.as_bytes())?;
+    for (name, bytes) in web::FONTS {
+        emit(&format!("assets/fonts/{name}"), bytes)?;
     }
+    emit("assets/fonts/OFL.txt", web::FONT_LICENSE.as_bytes())?;
+
     println!("Wrote {count} files to {}", out.display());
     Ok(())
 }

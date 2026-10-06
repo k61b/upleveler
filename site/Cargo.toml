@@ -11,3 +11,4 @@ publish = false
 [dependencies]
 anyhow.workspace = true
 maud.workspace = true
+upleveler = { path = "../crates/upleveler", default-features = false }

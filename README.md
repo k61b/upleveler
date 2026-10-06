@@ -50,11 +50,19 @@ Run `upleveler`. The first time, a short setup asks for the model, the report la
 
 Type `/` to see all commands and `?` for keyboard shortcuts. Reports are saved in `~/.upleveler/reports/`.
 
+### In your browser
+
+```sh
+upleveler web
+```
+
+Opens the dashboard in your browser. It runs on your computer at `127.0.0.1` and only opens from the link printed in the terminal; nothing is put online. Use `--no-open` to only print the link and `--port` to choose a port (default 4747). Press Ctrl+C to stop it. The dashboard is new: its views are being filled in, and `/dashboard` in the terminal app has everything today.
+
 ## Privacy
 
 - Your data is plain files in `~/.upleveler/`.
 - Nothing is sent anywhere. To use your company's own LLM instead of Ollama, choose "OpenAI-compatible endpoint" in the setup (`/init`) and confirm that the endpoint is approved.
-- No account, no cloud, no telemetry.
+- No account, no cloud, no telemetry. The browser dashboard (`upleveler web`) loads nothing from the internet.
 
 ## Scripts
 
@@ -62,7 +70,7 @@ Every feature is also a plain command, for example `upleveler log "..."`, `uplev
 
 ## Türkçe
 
-Upleveler, yaptığınız işi şirketinizin seviye beklentileriyle karşılaştırır. Terminalde `upleveler` yazın. Ne yaptığınızı yazarsanız log'a eklenir, soru sorarsanız cevaplanır. Komutları görmek için `/` yazın. Raporların Türkçe olması için kurulumda Türkçe'yi seçin. Verileriniz bilgisayarınızdan çıkmaz.
+Upleveler, yaptığınız işi şirketinizin seviye beklentileriyle karşılaştırır. Terminalde `upleveler` yazın. Ne yaptığınızı yazarsanız log'a eklenir, soru sorarsanız cevaplanır. Komutları görmek için `/` yazın. Panoyu tarayıcıda açmak için `upleveler web` yazın; yalnızca kendi bilgisayarınızda çalışır. Raporların Türkçe olması için kurulumda Türkçe'yi seçin. Verileriniz bilgisayarınızdan çıkmaz.
 
 ## Development
 
@@ -70,7 +78,7 @@ The repository is a Cargo workspace:
 
 | Path | What it is |
 |---|---|
-| `crates/upleveler` | The app: CLI, interactive terminal app and the core library |
+| `crates/upleveler` | The app: CLI, interactive terminal app, the core library and the web dashboard (`src/web/`) |
 | `site` | The landing page, built with Rust and served from Cloudflare ([details](site/README.md)) |
 
 Run the checks from the repository root; they cover every crate:
@@ -81,6 +89,8 @@ cargo clippy --all-targets -- -D warnings
 cargo fmt --all
 ```
 
+`cargo test` also runs the web design checks: colour contrast (WCAG AA) and a lint for the patterns the design system bans.
+
 ## License
 
-[AGPL v3.0](LICENSE)
+[AGPL v3.0](LICENSE). The bundled Manrope font is under the [SIL Open Font License](crates/upleveler/src/web/assets/fonts/OFL.txt).

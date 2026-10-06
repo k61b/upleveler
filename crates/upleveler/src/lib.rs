@@ -16,6 +16,7 @@ pub mod prompts;
 pub mod session;
 pub mod store;
 pub mod tui;
+pub mod web;
 
 /// Progress callback: `(label, done, total)`. Returning an error (e.g. because the
 /// user pressed Esc) stops the operation at the next step.

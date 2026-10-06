@@ -7,14 +7,22 @@ description = "Level up against your own career ladder: a local-first work log a
 license.workspace = true
 repository.workspace = true
 
+[features]
+default = ["server"]
+# `upleveler web`: the local dashboard server. The site builds the same views without it.
+server = ["dep:axum", "dep:getrandom", "dep:tokio", "dep:webbrowser"]
+
 [dependencies]
 anyhow.workspace = true
+axum = { workspace = true, optional = true }
 calamine.workspace = true
 chrono.workspace = true
 clap.workspace = true
 csv.workspace = true
 dialoguer.workspace = true
 dirs.workspace = true
+getrandom = { workspace = true, optional = true }
+maud.workspace = true
 pulldown-cmark.workspace = true
 ratatui.workspace = true
 regex.workspace = true
@@ -23,10 +31,13 @@ serde.workspace = true
 serde_json.workspace = true
 serde_norway.workspace = true
 sha2.workspace = true
+tokio = { workspace = true, optional = true }
 toml.workspace = true
 tui-textarea.workspace = true
 unicode-width.workspace = true
 ureq.workspace = true
+webbrowser = { workspace = true, optional = true }
 
 [dev-dependencies]
 tempfile.workspace = true
+tower.workspace = true

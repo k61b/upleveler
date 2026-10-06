@@ -125,6 +125,16 @@ enum Command {
     Ask { question: Vec<String> },
     /// Chat about your logs (plain prompt; the interactive app is nicer)
     Chat,
+    /// Open the dashboard in your browser (served on 127.0.0.1 only)
+    #[cfg(feature = "server")]
+    Web {
+        /// Port to listen on (default: 4747, or any free port if it is taken)
+        #[arg(long)]
+        port: Option<u16>,
+        /// Print the link without opening a browser
+        #[arg(long)]
+        no_open: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -274,6 +284,8 @@ fn run(cli: Cli) -> Result<()> {
             answer(&llm, &session, &entries, &question, &mut Vec::new())
         }
         Some(Command::Chat) => chat(&session),
+        #[cfg(feature = "server")]
+        Some(Command::Web { port, no_open }) => upleveler::web::server::run(port, !no_open),
     }
 }
 

@@ -5,7 +5,12 @@ Cloudflare serves the files as a [static-assets Worker](https://developers.cloud
 there is no server code and no user data.
 
 Your work logs are never on this website. The personal dashboard runs on your own
-computer, from the `upleveler` app.
+computer, from the `upleveler` app (`upleveler web`).
+
+The site and the dashboard share one design system: the colour tokens, the mark,
+the Manrope font and the components all come from `crates/upleveler/src/web/`, so
+the site never defines its own colours or styles. `cargo test` checks contrast and
+lints the site's sources together with the dashboard's.
 
 ## Build
 
@@ -16,13 +21,19 @@ cargo run -p upleveler-site            # writes site/dist/
 cargo run -p upleveler-site -- out/    # or another directory
 ```
 
-Open `site/dist/index.html` in a browser, or preview it the way Cloudflare serves it
-(needs [Node.js](https://nodejs.org)):
+Pages use root paths (`/assets/style.css`), so serve the folder instead of opening
+the files directly. Preview it the way Cloudflare serves it (needs
+[Node.js](https://nodejs.org)):
 
 ```sh
 cd site
 npx wrangler dev
 ```
+
+or with any static server, for example `python3 -m http.server -d site/dist`.
+
+The build writes `/gallery/`, a page with every component on both surfaces for
+design review. It is not linked, has `noindex` and is excluded in `robots.txt`.
 
 ## Deploy
 
@@ -30,7 +41,7 @@ The [Site workflow](../.github/workflows/site.yml) builds and deploys automatica
 
 | Event | Result |
 |---|---|
-| Push to `main` that touches `site/` | Deploys to production at `upleveler.dev` |
+| Push to `main` that touches `site/` or `crates/upleveler/src/web/` | Deploys to production at `upleveler.dev` |
 | Pull request from this repository | Uploads a preview version and prints its URL |
 | Pull request from a fork | Builds only |
 
@@ -56,6 +67,6 @@ npx wrangler deploy
 
 | Path | What it is |
 |---|---|
-| `src/main.rs` | Renders every page with [maud](https://maud.lambda.xyz) |
+| `src/main.rs` | Renders the pages with [maud](https://maud.lambda.xyz) and copies the shared assets (styles, script, fonts, favicon) into `dist/` |
 | `wrangler.jsonc` | Cloudflare configuration: Worker name, the `upleveler.dev` domain and the `dist/` directory |
 | `dist/` | Build output, not committed |

@@ -11,12 +11,14 @@ repository = "https://github.com/k61b/upleveler"
 
 [workspace.dependencies]
 anyhow = "1"
+axum = { version = "0.8", default-features = false, features = ["http1", "tokio", "query"] }
 calamine = { version = "0.26", features = ["dates"] }
 chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4", features = ["derive"] }
 csv = "1"
 dialoguer = "0.11"
 dirs = "5"
+getrandom = "0.3"
 maud = "0.27"
 pulldown-cmark = { version = "0.13", default-features = false }
 ratatui = "0.29"
@@ -27,7 +29,10 @@ serde_json = "1"
 serde_norway = "0.9"
 sha2 = "0.10"
 tempfile = "3"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal"] }
 toml = "0.8"
+tower = { version = "0.5", features = ["util"] }
 tui-textarea = "0.7"
 unicode-width = "0.2"
 ureq = { version = "2", features = ["json"] }
+webbrowser = "1"
