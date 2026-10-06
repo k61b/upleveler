@@ -1,6 +1,7 @@
 //! Sticker illustrations, drawn in the mark's hand: thick ink outline, flat
 //! token fills (CSS classes `s-*` in style.css), hard ink shadow, a die-cut edge
 //! so they read on the dark shell. Empty-state stickers use a 120 × 120 canvas.
+//! Step stickers (the landing page's log → gap → brag) use 260 × 180.
 //! Decorative: every sticker is `aria-hidden`.
 
 use maud::{Markup, PreEscaped};
@@ -67,11 +68,101 @@ fn bar(x: i32, y: i32, w: i32, class: &str) -> String {
     format!(r#"<rect class="{class}" x="{x}" y="{y}" width="{w}" height="6" rx="3"/>"#)
 }
 
-fn sticker(id: &str, body: &str) -> Markup {
+fn sticker_on(id: &str, width: u32, height: u32, cut: u32, body: &str) -> Markup {
     PreEscaped(format!(
-        r#"<svg class="sticker" viewBox="0 0 120 120" aria-hidden="true" focusable="false">{defs}<g filter="url(#{id})">{body}</g></svg>"#,
-        defs = die_cut(id, 4),
+        r#"<svg class="sticker" viewBox="0 0 {width} {height}" aria-hidden="true" focusable="false">{defs}<g filter="url(#{id})">{body}</g></svg>"#,
+        defs = die_cut(id, cut),
     ))
+}
+
+/// An empty-state sticker (120 × 120).
+fn sticker(id: &str, body: &str) -> Markup {
+    sticker_on(id, 120, 120, 4, body)
+}
+
+/// A step sticker (260 × 180).
+fn step_sticker(id: &str, body: &str) -> Markup {
+    sticker_on(id, 260, 180, 5, body)
+}
+
+/// A heading bar (taller and solid ink).
+fn heading_bar(x: i32, y: i32, w: i32) -> String {
+    format!(r#"<rect class="s-ink" x="{x}" y="{y}" width="{w}" height="10" rx="5"/>"#)
+}
+
+/// The mark's arrow as a badge glyph.
+fn arrow_glyph(cx: i32, cy: i32) -> String {
+    format!(
+        r#"<path class="s-glyph" d="M{l} {t2}L{cx} {t}L{r} {t2}M{cx} {t}V{b}"/>"#,
+        l = cx - 8,
+        r = cx + 8,
+        t = cy - 9,
+        t2 = cy - 1,
+        b = cy + 10,
+    )
+}
+
+fn check_glyph(cx: i32, cy: i32) -> String {
+    format!(
+        r#"<path class="s-glyph" d="M{a} {cy}L{b} {c}L{d} {e}"/>"#,
+        a = cx - 9,
+        b = cx - 3,
+        c = cy + 7,
+        d = cx + 9,
+        e = cy - 7,
+    )
+}
+
+/// Log: a card with what you did today, and an arrow-up badge.
+pub fn step_log() -> Markup {
+    let body = [
+        r#"<g transform="rotate(-5 122 93)">"#.to_string(),
+        frame(24, 28, 196, 130, "s-paper"),
+        heading_bar(42, 50, 92),
+        bar(42, 76, 150, "s-bar"),
+        bar(42, 94, 128, "s-bar"),
+        bar(42, 112, 140, "s-bar"),
+        bar(42, 130, 84, "s-bar"),
+        "</g>".to_string(),
+        badge(214, 36, 22, &arrow_glyph(214, 36)),
+    ]
+    .concat();
+    step_sticker("sticker-step-log", &body)
+}
+
+/// Gap: the target line with its seam above, three bars of evidence below it
+/// at different heights; only the strong one reaches the line.
+pub fn step_gap() -> Markup {
+    let body = [
+        frame(24, 28, 196, 130, "s-lilac"),
+        level_line(40, 204, 58, 122, 0, 6),
+        r#"<rect class="s-ink" x="40" y="138" width="164" height="4" rx="1"/>"#.to_string(),
+        r#"<rect class="s-ink" x="66" y="70" width="28" height="68" rx="4" transform="translate(3 3)"/>"#.to_string(),
+        r#"<rect class="s-accent s-outline" x="66" y="70" width="28" height="68" rx="4"/>"#.to_string(),
+        r#"<rect class="s-paper s-outline" x="108" y="98" width="28" height="40" rx="4"/>"#.to_string(),
+        r#"<rect class="s-paper s-outline" x="150" y="120" width="28" height="18" rx="4"/>"#.to_string(),
+    ]
+    .concat();
+    step_sticker("sticker-step-gap", &body)
+}
+
+/// Brag: the promotion document, one highlighted row, and a check badge.
+pub fn step_brag() -> Markup {
+    let body = [
+        r#"<g transform="rotate(4 122 93)">"#.to_string(),
+        frame(24, 28, 196, 130, "s-paper"),
+        heading_bar(42, 48, 110),
+        bar(42, 72, 150, "s-bar"),
+        r#"<rect class="s-accent s-outline" x="36" y="86" width="168" height="24" rx="6"/>"#
+            .to_string(),
+        bar(46, 95, 120, "s-ink"),
+        bar(42, 122, 140, "s-bar"),
+        bar(42, 138, 96, "s-bar"),
+        "</g>".to_string(),
+        badge(214, 36, 22, &check_glyph(214, 36)),
+    ]
+    .concat();
+    step_sticker("sticker-step-brag", &body)
 }
 
 /// Nothing logged yet: an empty card with dashed lines waiting to be written.
@@ -133,7 +224,15 @@ mod tests {
 
     #[test]
     fn stickers_are_decorative_and_use_classes_not_colours() {
-        for s in [no_logs(), no_ladder(), nothing_matches(), not_found()] {
+        for s in [
+            no_logs(),
+            no_ladder(),
+            nothing_matches(),
+            not_found(),
+            step_log(),
+            step_gap(),
+            step_brag(),
+        ] {
             let svg = s.into_string();
             assert!(svg.contains(r#"aria-hidden="true""#));
             assert!(

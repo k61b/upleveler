@@ -4,7 +4,7 @@
 use super::layout;
 use crate::web::brand::{self, LockupSize};
 use crate::web::data::DashboardData;
-use crate::web::ui::{self, Button, Card, Chip, Marker};
+use crate::web::ui::{self, Button, Card, Chip, Marker, TermLine};
 use crate::web::{demo, illustrations};
 use maud::{html, Markup};
 
@@ -75,6 +75,22 @@ fn samples(data: &DashboardData) -> Markup {
                 (ui::card(Card::Well, html! { h3 { "Well" } p { "For stickers and the heatmap." } }))
                 (ui::card(Card::Dashed, html! { h3 { "Dashed" } p { "Placeholders." } }))
             }
+            div.steps {
+                (ui::step_card(illustrations::step_log(), "Log what you did", "Just type. A sentence becomes an entry.", html! { "Imports " strong { "txt, md, csv and xlsx" } }))
+                (ui::step_card(illustrations::step_gap(), "See the gap", "Every expectation is checked against your entries.", html! { strong { "Strong, partial or missing" } }))
+                (ui::step_card(illustrations::step_brag(), "Write the document", "Turn the evidence into a promotion document.", html! { "Plain " strong { "Markdown" } }))
+            }
+            (ui::terminal("upleveler", &[
+                TermLine::Prompt("PAY-412: shipped the circuit breaker"),
+                TermLine::Done("Logged for today"),
+                TermLine::Blank,
+                TermLine::Prompt("/gap"),
+                TermLine::Heading("Gap analysis SD2 → SD3"),
+                TermLine::Rating(Marker::Filled, "Ownership", "Leads incidents", 7),
+                TermLine::Rating(Marker::Half, "Technical", "Designs across services", 3),
+                TermLine::Rating(Marker::Outline, "Mentoring", "Mentors juniors", 0),
+                TermLine::Shell("upleveler web"),
+            ], Some("upleveler web")))
             div.gallery-row.gallery-stickers {
                 div.empty-art { (illustrations::no_logs()) }
                 div.empty-art { (illustrations::no_ladder()) }

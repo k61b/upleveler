@@ -11,7 +11,7 @@ mod reports;
 pub use gallery::gallery;
 pub use ladder::ladder;
 pub use logs::{log_results, logs};
-pub use overview::overview;
+pub use overview::{demo_frame, overview, overview_body};
 pub use reports::{render_markdown, report, reports};
 
 use super::brand::{self, LockupSize};

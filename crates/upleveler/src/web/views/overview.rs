@@ -1,6 +1,7 @@
 //! Overview (shell): where you stand, at a glance.
 
 use super::{layout, view_header, Tab};
+use crate::web::brand::{self, LockupSize};
 use crate::web::data::DashboardData;
 use crate::web::illustrations;
 use crate::web::ui::{self, Card, Chip};
@@ -53,7 +54,8 @@ fn reports_card(data: &DashboardData) -> Markup {
     )
 }
 
-pub fn overview(data: &DashboardData) -> Markup {
+/// The Overview content without the page frame (also used by the site demo).
+pub fn overview_body(data: &DashboardData) -> Markup {
     let lead = match data.target.as_deref() {
         Some(target) => {
             html! { "Where you stand for your next level " (ui::levels(data.current.as_deref(), Some(target))) }
@@ -94,14 +96,45 @@ pub fn overview(data: &DashboardData) -> Markup {
             }
         }
     };
+    html! {
+        section.view.container.stack {
+            (view_header(Tab::Overview.title(), lead, aside))
+            (body)
+        }
+    }
+}
+
+pub fn overview(data: &DashboardData) -> Markup {
     layout(
         Tab::Overview.title(),
         Some(Tab::Overview),
-        html! {
-            section.view.container.stack {
-                (view_header(Tab::Overview.title(), lead, aside))
-                (body)
-            }
-        },
+        overview_body(data),
     )
+}
+
+/// The dashboard as a picture of itself: the real Overview in a browser frame,
+/// inert (no focus, no clicks) and with a plain-text description for screen
+/// readers. The site's live demo uses it with example data.
+pub fn demo_frame(data: &DashboardData) -> Markup {
+    html! {
+        figure.browser {
+            div.browser-bar aria-hidden="true" { (ui::chip(Chip::Mono, "127.0.0.1:4747")) }
+            div.browser-view inert aria-hidden="true" {
+                div.topbar.topbar--static {
+                    div.container.container--wide.topbar-inner {
+                        span.topbar-home { (brand::lockup(LockupSize::Md)) }
+                        ul.tabs {
+                            @for tab in Tab::ALL {
+                                li { span.tab aria-current=[(tab == Tab::Overview).then_some("page")] { (tab.title()) } }
+                            }
+                        }
+                    }
+                }
+                (overview_body(data))
+            }
+            figcaption.visually-hidden {
+                "The Upleveler dashboard with example data: entries logged, a streak, strong evidence for the target level, an activity heatmap, readiness by area and the latest reports."
+            }
+        }
+    }
 }

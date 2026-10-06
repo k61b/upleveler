@@ -12,9 +12,15 @@ the Manrope font and the components all come from `crates/upleveler/src/web/`, s
 the site never defines its own colours or styles. `cargo test` checks contrast and
 lints the site's sources together with the dashboard's.
 
+The page has a hero with a terminal session, the three steps (log, gap, brag), a
+live demo, a privacy section and the install commands. The demo is not a
+screenshot: it is the real dashboard Overview (`views::demo_frame`) rendered with
+the made-up data in `crates/upleveler/src/web/demo.rs`.
+
 ## Build
 
-From the repository root:
+The site needs Rust 1.85 or newer (the app itself still builds on 1.82). From the
+repository root:
 
 ```sh
 cargo run -p upleveler-site            # writes site/dist/
@@ -32,8 +38,18 @@ npx wrangler dev
 
 or with any static server, for example `python3 -m http.server -d site/dist`.
 
-The build writes `/gallery/`, a page with every component on both surfaces for
-design review. It is not linked, has `noindex` and is excluded in `robots.txt`.
+Besides the pages, the build writes:
+
+| File | What it is |
+|---|---|
+| `og.png` | The 1200 × 630 link preview, rendered from the tokens and the mark |
+| `favicon.svg`, `apple-touch-icon.png`, `icon-*.png`, `site.webmanifest` | Icons drawn from the mark |
+| `sitemap.xml`, `robots.txt` | For search engines |
+| `gallery/` | Every component on both surfaces, for design review. Not linked, `noindex`, excluded in `robots.txt` |
+
+PNGs are rendered with [resvg](https://github.com/linebender/resvg) and the bundled
+Manrope TTF, so they come out the same on every machine. Generated files are not
+committed.
 
 ## Deploy
 
@@ -67,6 +83,8 @@ npx wrangler deploy
 
 | Path | What it is |
 |---|---|
-| `src/main.rs` | Renders the pages with [maud](https://maud.lambda.xyz) and copies the shared assets (styles, script, fonts, favicon) into `dist/` |
+| `src/main.rs` | Renders the pages with [maud](https://maud.lambda.xyz) and copies the shared assets (styles, script, fonts) into `dist/` |
+| `src/og.rs` | Renders the link preview and the app icons to PNG |
+| `assets/fonts/` | Manrope as TTF for the PNG renderer (SIL Open Font License) |
 | `wrangler.jsonc` | Cloudflare configuration: Worker name, the `upleveler.dev` domain and the `dist/` directory |
 | `dist/` | Build output, not committed |

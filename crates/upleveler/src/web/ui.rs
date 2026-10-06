@@ -342,3 +342,62 @@ pub fn segmented(label: &str, items: &[(String, String, bool)]) -> Markup {
         }
     }
 }
+
+/// One line in a `terminal` window.
+pub enum TermLine<'a> {
+    /// A shell command (`$`).
+    Shell(&'a str),
+    /// Something typed into the Upleveler app (`›`).
+    Prompt(&'a str),
+    /// A confirmation from the app.
+    Done(&'a str),
+    /// A heading line in the app's output.
+    Heading(&'a str),
+    /// A gap row: rating marker, area, expectation, evidence count.
+    Rating(Marker, &'a str, &'a str, usize),
+    Blank,
+}
+
+/// A terminal window (shell-deep) showing a real session or commands.
+/// `copy` adds a copy button for the given text.
+pub fn terminal(title: &str, lines: &[TermLine], copy: Option<&str>) -> Markup {
+    html! {
+        div.terminal {
+            div.terminal-bar {
+                span.terminal-title { (title) }
+                @if let Some(text) = copy {
+                    button.copy type="button" data-copy=(text) aria-label="Copy the commands" { "Copy" }
+                }
+            }
+            div.terminal-body {
+                @for line in lines {
+                    @match line {
+                        TermLine::Shell(cmd) => div.term-line { span.term-prompt aria-hidden="true" { "$ " } (cmd) },
+                        TermLine::Prompt(text) => div.term-line { span.term-prompt aria-hidden="true" { "› " } (text) },
+                        TermLine::Done(text) => div.term-line.term-done { span.term-prompt aria-hidden="true" { "✓ " } (text) },
+                        TermLine::Heading(text) => div.term-line.term-heading { (marker(Marker::Filled)) " " (text) },
+                        TermLine::Rating(state, area, text, count) => div.term-line.term-rating {
+                            (marker(*state))
+                            span.term-area { (area) }
+                            span.term-text { (text) }
+                            span.term-count { (count) }
+                        },
+                        TermLine::Blank => div.term-line { (maud::PreEscaped("&nbsp;")) },
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// A step of the product flow: sticker, title, one sentence, a spec line.
+pub fn step_card(sticker: Markup, title: &str, body: &str, spec: Markup) -> Markup {
+    html! {
+        article.step {
+            div.step-art { (sticker) }
+            h3 { (title) }
+            p { (body) }
+            p.step-spec { (spec) }
+        }
+    }
+}

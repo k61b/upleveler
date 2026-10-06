@@ -2,7 +2,8 @@
 name = "upleveler-site"
 description = "Generates the Upleveler landing page as static files for Cloudflare"
 version.workspace = true
-rust-version.workspace = true
+# resvg needs a newer Rust than the app; the site is built on stable in CI.
+rust-version = "1.85"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -11,4 +12,5 @@ publish = false
 [dependencies]
 anyhow.workspace = true
 maud.workspace = true
+resvg.workspace = true
 upleveler = { path = "../crates/upleveler", default-features = false }
