@@ -137,6 +137,9 @@ pub struct App {
     chat: Vec<Message>,
     logged: Vec<String>,
     wizard: bool,
+    /// The link of the dashboard `/web` started, so a second `/web` reuses it.
+    #[cfg(feature = "server")]
+    web_url: Option<String>,
 }
 
 pub fn new_textarea(placeholder: &str) -> TextArea<'static> {
@@ -196,6 +199,8 @@ impl App {
             chat: Vec::new(),
             logged: Vec::new(),
             wizard: false,
+            #[cfg(feature = "server")]
+            web_url: None,
         };
         app.out.extend(history::welcome(&app.status, width));
         if wizard || !app.session.configured() {
@@ -588,6 +593,7 @@ impl App {
             "undo" => self.undo(),
             "dashboard" => self.request = Some(Request::Dashboard(Tab::Overview)),
             "reports" => self.request = Some(Request::Dashboard(Tab::Reports)),
+            "web" => self.web(),
             "model" => self.start(Job::Models(self.session.cfg.llm.clone())),
             "init" => self.start_wizard(),
             "clear" => self.request = Some(Request::ClearScreen),
@@ -595,6 +601,40 @@ impl App {
             "quit" => self.quit = true,
             _ => {}
         }
+    }
+
+    /// The dashboard's link: starts it on 127.0.0.1 the first time, then reuses it.
+    #[cfg(feature = "server")]
+    fn start_web(&mut self) -> anyhow::Result<String> {
+        if let Some(url) = &self.web_url {
+            return Ok(url.clone());
+        }
+        let url = crate::web::server::spawn(self.session.paths.clone())?;
+        self.web_url = Some(url.clone());
+        Ok(url)
+    }
+
+    /// `/web`: serves the dashboard in the background and opens it.
+    #[cfg(feature = "server")]
+    fn web(&mut self) {
+        let url = match self.start_web() {
+            Ok(url) => url,
+            Err(e) => return self.error(&format!("Could not start the dashboard: {e:#}")),
+        };
+        let opened = webbrowser::open(&url).is_ok();
+        self.success(&format!("Dashboard: {url}"));
+        self.info(if opened {
+            "Opened in your browser. It runs while Upleveler is open; only this computer can reach it."
+        } else {
+            "Open the link above in your browser. It runs while Upleveler is open; only this computer can reach it."
+        });
+    }
+
+    #[cfg(not(feature = "server"))]
+    fn web(&mut self) {
+        self.info(
+            "This build has no web dashboard. Install with the default features to use /web.",
+        );
     }
 
     fn period(&self, args: &str) -> Result<Option<crate::dates::Range>, String> {
@@ -1370,5 +1410,25 @@ fn empty_status(session: &Session) -> Status {
         base_url: session.cfg.llm.base_url.clone(),
         local: is_local_url(&session.cfg.llm.base_url),
         latest_gap: None,
+    }
+}
+
+#[cfg(all(test, feature = "server"))]
+mod tests {
+    use super::*;
+    use crate::config::Paths;
+
+    #[test]
+    fn web_starts_the_dashboard_once() {
+        let home = tempfile::tempdir().unwrap();
+        let session = Session::at(Paths::at(home.path().to_path_buf())).unwrap();
+        let mut app = App::new(session, 100, false);
+        let first = app.start_web().unwrap();
+        assert!(first.starts_with("http://127.0.0.1:") && first.contains("/?token="));
+        assert_eq!(
+            app.start_web().unwrap(),
+            first,
+            "a second /web reuses the server"
+        );
     }
 }

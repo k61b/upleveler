@@ -46,6 +46,7 @@ Run `upleveler`. The first time, a short setup asks for the model, the report la
 | `/summary week` | Summary for a 1:1 |
 | `/import @file` | Import old notes from txt, md, csv or xlsx |
 | `/dashboard` | Progress, activity heatmap, logs and reports |
+| `/web` | The same dashboard in your browser |
 | `/undo` | Undo the last entry you logged |
 
 Type `/` to see all commands and `?` for keyboard shortcuts. Reports are saved in `~/.upleveler/reports/`.
@@ -56,7 +57,7 @@ Type `/` to see all commands and `?` for keyboard shortcuts. Reports are saved i
 upleveler web
 ```
 
-Opens the dashboard in your browser. It runs on your computer at `127.0.0.1` and only opens from the link printed in the terminal; nothing is put online. Use `--no-open` to only print the link and `--port` to choose a port (default 4747). Press Ctrl+C to stop it.
+Opens the dashboard in your browser (or type `/web` in the app). It runs on your computer at `127.0.0.1` and only opens from the link printed in the terminal; nothing is put online. Use `--no-open` to only print the link and `--port` to choose a port (default 4747). Press Ctrl+C to stop it.
 
 | Tab | What it shows |
 |---|---|

@@ -59,9 +59,41 @@ pub fn run(paths: Paths, port: Option<u16>, open: bool) -> Result<()> {
         .block_on(serve(paths, port, open))
 }
 
-async fn serve(paths: Paths, port: Option<u16>, open: bool) -> Result<()> {
+/// Starts the server on a background thread and returns its link once it
+/// listens. It runs until the process exits (the terminal app's `/web`).
+pub fn spawn(paths: Paths) -> Result<String> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::Builder::new()
+        .name("upleveler-web".into())
+        .spawn(move || {
+            let runtime = match tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(2)
+                .enable_all()
+                .build()
+            {
+                Ok(runtime) => runtime,
+                Err(err) => return drop(tx.send(Err(anyhow::Error::from(err)))),
+            };
+            runtime.block_on(async move {
+                let listener = match listen(None).await {
+                    Ok(listener) => listener,
+                    Err(err) => return drop(tx.send(Err(err))),
+                };
+                let state = match state_for(&listener, paths) {
+                    Ok(state) => state,
+                    Err(err) => return drop(tx.send(Err(err))),
+                };
+                let _ = tx.send(Ok(link(&state)));
+                let _ = axum::serve(listener, router(state)).await;
+            });
+        })?;
+    rx.recv().context("the dashboard thread stopped")?
+}
+
+/// Binds 127.0.0.1: the given port, or the default one, or any free port.
+async fn listen(port: Option<u16>) -> Result<TcpListener> {
     let bind = |port: u16| TcpListener::bind((Ipv4Addr::LOCALHOST, port));
-    let listener = match port {
+    Ok(match port {
         Some(port) => bind(port)
             .await
             .with_context(|| format!("port {port} is not available"))?,
@@ -69,10 +101,23 @@ async fn serve(paths: Paths, port: Option<u16>, open: bool) -> Result<()> {
             Ok(listener) => listener,
             Err(_) => bind(0).await.context("could not open a local port")?,
         },
-    };
+    })
+}
+
+fn state_for(listener: &TcpListener, paths: Paths) -> Result<Arc<AppState>> {
     let port = listener.local_addr()?.port();
-    let state = Arc::new(AppState::new(port, new_token()?, paths));
-    let url = format!("http://127.0.0.1:{port}/?token={}", state.token);
+    Ok(Arc::new(AppState::new(port, new_token()?, paths)))
+}
+
+/// The private link: opening it trades the token for the session cookie.
+fn link(state: &AppState) -> String {
+    format!("http://127.0.0.1:{}/?token={}", state.port, state.token)
+}
+
+async fn serve(paths: Paths, port: Option<u16>, open: bool) -> Result<()> {
+    let listener = listen(port).await?;
+    let state = state_for(&listener, paths)?;
+    let url = link(&state);
 
     println!("Upleveler dashboard: {url}");
     println!("Only this computer can open it. Press Ctrl+C to stop.");
@@ -713,6 +758,30 @@ mod tests {
                 .len(),
             1
         );
+    }
+
+    #[test]
+    fn spawn_serves_in_the_background() {
+        let home = tempfile::tempdir().unwrap();
+        let url = spawn(Paths::at(home.path().to_path_buf())).unwrap();
+        let rest = url.strip_prefix("http://127.0.0.1:").unwrap();
+        let (port, token) = rest.split_once("/?token=").unwrap();
+        assert_eq!(token.len(), 48);
+        // The link works: a plain HTTP request with the token is redirected with the cookie.
+        use std::io::{Read, Write};
+        let mut stream =
+            std::net::TcpStream::connect(("127.0.0.1", port.parse::<u16>().unwrap())).unwrap();
+        write!(
+            stream,
+            "GET /?token={token} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n"
+        )
+        .unwrap();
+        let mut response = String::new();
+        stream.read_to_string(&mut response).unwrap();
+        assert!(response.starts_with("HTTP/1.1 303"), "{response}");
+        assert!(response
+            .to_lowercase()
+            .contains("set-cookie: upleveler_token_"));
     }
 
     #[test]

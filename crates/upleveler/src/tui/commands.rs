@@ -83,6 +83,12 @@ pub const COMMANDS: &[Command] = &[
         runs_bare: true,
     },
     Command {
+        name: "web",
+        args: "",
+        help: "open the dashboard in your browser",
+        runs_bare: true,
+    },
+    Command {
         name: "reports",
         args: "",
         help: "browse saved reports",
