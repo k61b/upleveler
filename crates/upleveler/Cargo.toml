@@ -23,7 +23,7 @@ dialoguer.workspace = true
 dirs.workspace = true
 getrandom = { workspace = true, optional = true }
 maud.workspace = true
-pulldown-cmark.workspace = true
+pulldown-cmark = { workspace = true, features = ["html"] }
 ratatui.workspace = true
 regex.workspace = true
 rust_xlsxwriter.workspace = true

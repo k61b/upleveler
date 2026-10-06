@@ -7,14 +7,18 @@
 //! rebinding. Static assets (styles, fonts, favicon) hold no data and are served
 //! without the token so the "open the link" page can render.
 
+use super::data::DashboardData;
 use super::{brand, views, FONTS, SCRIPT};
+use crate::config::Paths;
+use crate::session::Session;
 use anyhow::{Context, Result};
-use axum::extract::{Path, Request, State};
+use axum::extract::{Path, Query, Request, State};
 use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::get;
 use axum::Router;
+use serde::Deserialize;
 use std::net::Ipv4Addr;
 use std::sync::Arc;
 use tokio::net::TcpListener;
@@ -29,29 +33,31 @@ const CSP: &str = "default-src 'none'; style-src 'self'; script-src 'self'; font
 struct AppState {
     port: u16,
     token: String,
+    paths: Paths,
     /// Per port, because browsers share cookies across ports of one host.
     cookie: String,
 }
 
 impl AppState {
-    fn new(port: u16, token: String) -> Self {
+    fn new(port: u16, token: String, paths: Paths) -> Self {
         Self {
             port,
             token,
+            paths,
             cookie: format!("upleveler_token_{port}"),
         }
     }
 }
 
-/// Starts the server and blocks until Ctrl+C.
-pub fn run(port: Option<u16>, open: bool) -> Result<()> {
+/// Starts the server for the data in `paths` and blocks until Ctrl+C.
+pub fn run(paths: Paths, port: Option<u16>, open: bool) -> Result<()> {
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?
-        .block_on(serve(port, open))
+        .block_on(serve(paths, port, open))
 }
 
-async fn serve(port: Option<u16>, open: bool) -> Result<()> {
+async fn serve(paths: Paths, port: Option<u16>, open: bool) -> Result<()> {
     let bind = |port: u16| TcpListener::bind((Ipv4Addr::LOCALHOST, port));
     let listener = match port {
         Some(port) => bind(port)
@@ -63,7 +69,7 @@ async fn serve(port: Option<u16>, open: bool) -> Result<()> {
         },
     };
     let port = listener.local_addr()?.port();
-    let state = Arc::new(AppState::new(port, new_token()?));
+    let state = Arc::new(AppState::new(port, new_token()?, paths));
     let url = format!("http://127.0.0.1:{port}/?token={}", state.token);
 
     println!("Upleveler dashboard: {url}");
@@ -90,10 +96,11 @@ fn new_token() -> Result<String> {
 
 fn router(state: Arc<AppState>) -> Router {
     Router::new()
-        .route("/", get(|| page(views::overview())))
-        .route("/logs", get(|| page(views::logs())))
-        .route("/ladder", get(|| page(views::ladder())))
-        .route("/reports", get(|| page(views::reports())))
+        .route("/", get(overview))
+        .route("/logs", get(logs))
+        .route("/ladder", get(ladder))
+        .route("/reports", get(reports))
+        .route("/reports/{name}", get(report))
         .route("/assets/style.css", get(style))
         .route("/assets/app.js", get(script))
         .route("/assets/fonts/{file}", get(font))
@@ -103,8 +110,78 @@ fn router(state: Arc<AppState>) -> Router {
         .with_state(state)
 }
 
-async fn page(markup: maud::Markup) -> Html<String> {
-    Html(markup.into_string())
+fn page(markup: maud::Markup) -> Response {
+    Html(markup.into_string()).into_response()
+}
+
+/// Loads fresh data from disk (off the async threads) and renders with it.
+async fn with_data<F>(state: Arc<AppState>, render: F) -> Response
+where
+    F: FnOnce(&DashboardData) -> Response + Send + 'static,
+{
+    let paths = state.paths.clone();
+    let loaded = tokio::task::spawn_blocking(move || {
+        Session::at(paths)
+            .and_then(|s| DashboardData::load(&s))
+            .map(|data| render(&data))
+    })
+    .await;
+    match loaded {
+        Ok(Ok(response)) => response,
+        Ok(Err(err)) => error_page(&format!("{err:#}")),
+        Err(err) => error_page(&err.to_string()),
+    }
+}
+
+fn error_page(detail: &str) -> Response {
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        Html(views::server_error(detail).into_string()),
+    )
+        .into_response()
+}
+
+#[derive(Deserialize)]
+struct LogsQuery {
+    #[serde(default)]
+    q: String,
+}
+
+#[derive(Deserialize)]
+struct LadderQuery {
+    level: Option<String>,
+}
+
+async fn overview(State(state): State<Arc<AppState>>) -> Response {
+    with_data(state, |data| page(views::overview(data))).await
+}
+
+async fn logs(State(state): State<Arc<AppState>>, Query(query): Query<LogsQuery>) -> Response {
+    with_data(state, move |data| page(views::logs(data, &query.q))).await
+}
+
+async fn ladder(State(state): State<Arc<AppState>>, Query(query): Query<LadderQuery>) -> Response {
+    with_data(state, move |data| {
+        page(views::ladder(data, query.level.as_deref()))
+    })
+    .await
+}
+
+async fn reports(State(state): State<Arc<AppState>>) -> Response {
+    with_data(state, |data| page(views::reports(data))).await
+}
+
+/// Only names of existing reports resolve, so the URL cannot reach other files.
+async fn report(State(state): State<Arc<AppState>>, Path(name): Path<String>) -> Response {
+    with_data(state, move |data| match data.report(&name) {
+        Some(report) => page(views::report(report)),
+        None => (
+            StatusCode::NOT_FOUND,
+            Html(views::not_found().into_string()),
+        )
+            .into_response(),
+    })
+    .await
 }
 
 async fn not_found() -> Response {
@@ -263,7 +340,20 @@ mod tests {
         if let Some(cookie) = cookie {
             req = req.header(header::COOKIE, cookie);
         }
-        let app = router(Arc::new(AppState::new(4747, TOKEN.into())));
+        let home = std::env::temp_dir().join(format!("upleveler-web-test-{}", std::process::id()));
+        let app = router(Arc::new(AppState::new(4747, TOKEN.into(), Paths::at(home))));
+        app.oneshot(req.body(Body::empty()).unwrap()).await.unwrap()
+    }
+
+    async fn get_in(home: &std::path::Path, path: &str) -> Response {
+        let req = Request::get(path)
+            .header(header::HOST, HOST.unwrap())
+            .header(header::COOKIE, COOKIE.unwrap());
+        let app = router(Arc::new(AppState::new(
+            4747,
+            TOKEN.into(),
+            Paths::at(home.to_path_buf()),
+        )));
         app.oneshot(req.body(Body::empty()).unwrap()).await.unwrap()
     }
 
@@ -356,6 +446,51 @@ mod tests {
         }
         let missing = get("/assets/fonts/../../etc/passwd", HOST, None).await;
         assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn views_show_the_data_on_disk() {
+        let home = tempfile::tempdir().unwrap();
+        let session = Session::at(Paths::at(home.path().to_path_buf())).unwrap();
+        let day = chrono::NaiveDate::from_ymd_opt(2026, 10, 2).unwrap();
+        session
+            .add_log(
+                "Shipped the ledger export #billing",
+                day,
+                vec!["billing".into()],
+            )
+            .unwrap();
+        session
+            .add_log("Reviewed two pull requests", day, vec![])
+            .unwrap();
+        let reports = home.path().join("reports");
+        std::fs::create_dir_all(&reports).unwrap();
+        std::fs::write(
+            reports.join("brag-h2.md"),
+            "# Promotion document\n\n<script>x</script>",
+        )
+        .unwrap();
+
+        let overview = body(get_in(home.path(), "/").await).await;
+        assert!(overview.contains("Entries logged") && overview.contains(">2<"));
+        let logs = body(get_in(home.path(), "/logs?q=ledger").await).await;
+        assert!(logs.contains("1 matching") && logs.contains("Shipped the ledger export"));
+        assert!(!logs.contains("Reviewed two pull requests"));
+        let report = get_in(home.path(), "/reports/brag-h2").await;
+        assert_eq!(report.status(), StatusCode::OK);
+        let report = body(report).await;
+        assert!(report.contains("Promotion document") && !report.contains("<script>x"));
+        for missing in ["/reports/nope", "/reports/..%2Fconfig"] {
+            assert_eq!(
+                get_in(home.path(), missing).await.status(),
+                StatusCode::NOT_FOUND,
+                "{missing}"
+            );
+        }
+        assert_eq!(
+            get_in(home.path(), "/ladder").await.status(),
+            StatusCode::OK
+        );
     }
 
     #[test]

@@ -53,6 +53,13 @@ fn shouting(line: &str) -> bool {
         }
         let found = words
             .find_iter(&text)
+            // Identifiers are not copy: level ids (SD4), ticket ids (PAY-412), path data.
+            .filter(|m| {
+                let next = &text[m.end()..];
+                let ticket =
+                    next.starts_with('-') && next[1..].starts_with(|c: char| c.is_ascii_digit());
+                !ticket && !m.as_str().chars().any(|c| c.is_ascii_digit())
+            })
             .map(|m| m.as_str())
             .filter(|w| {
                 w.len() >= 3 && w.chars().any(|c| c.is_ascii_uppercase()) && *w == w.to_uppercase()

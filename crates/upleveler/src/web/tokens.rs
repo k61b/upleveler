@@ -175,6 +175,15 @@ mod tests {
         (ACCENT_INK, PAPER, 4.5, "accent ink on paper"),
         (ACCENT_INK, PAPER_RAISED, 4.5, "accent ink on paper card"),
         (ACCENT_INK, ACCENT_SOFT, 4.5, "accent ink on soft chip"),
+        (ACCENT_INK, PAPER, 3.0, "rating markers on paper"),
+        (TEXT_MUTED, PAPER, 3.0, "empty rating marker on paper"),
+        (ACCENT, SHELL_RAISED, 3.0, "rating markers on a shell card"),
+        (
+            ON_SHELL_MUTED,
+            SHELL_RAISED,
+            3.0,
+            "empty rating marker on a shell card",
+        ),
         (TEXT_PRIMARY, ACCENT_SUBTLE, 4.5, "text on accent tint"),
         (
             SUCCESS_INK,

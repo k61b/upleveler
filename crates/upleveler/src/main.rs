@@ -285,7 +285,9 @@ fn run(cli: Cli) -> Result<()> {
         }
         Some(Command::Chat) => chat(&session),
         #[cfg(feature = "server")]
-        Some(Command::Web { port, no_open }) => upleveler::web::server::run(port, !no_open),
+        Some(Command::Web { port, no_open }) => {
+            upleveler::web::server::run(session.paths.clone(), port, !no_open)
+        }
     }
 }
 

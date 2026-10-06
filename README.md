@@ -56,7 +56,16 @@ Type `/` to see all commands and `?` for keyboard shortcuts. Reports are saved i
 upleveler web
 ```
 
-Opens the dashboard in your browser. It runs on your computer at `127.0.0.1` and only opens from the link printed in the terminal; nothing is put online. Use `--no-open` to only print the link and `--port` to choose a port (default 4747). Press Ctrl+C to stop it. The dashboard is new: its views are being filled in, and `/dashboard` in the terminal app has everything today.
+Opens the dashboard in your browser. It runs on your computer at `127.0.0.1` and only opens from the link printed in the terminal; nothing is put online. Use `--no-open` to only print the link and `--port` to choose a port (default 4747). Press Ctrl+C to stop it.
+
+| Tab | What it shows |
+|---|---|
+| Overview | Entries, streak, a 26-week activity heatmap, readiness from your latest gap analysis, latest reports |
+| Logs | Every entry by day, filtered as you type (text, tag or date) |
+| Ladder | Each level's expectations with the entries that back them; your target level is marked |
+| Reports | Your gap analyses, promotion documents and summaries, ready to read or copy as Markdown |
+
+The dashboard reads the same files as the terminal app and shows fresh data on every page load. Running analyses (`/gap`, `/brag`) still happens in the terminal app.
 
 ## Privacy
 

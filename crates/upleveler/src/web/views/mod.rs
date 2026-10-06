@@ -1,12 +1,22 @@
 //! Dashboard pages. Each returns a full HTML document; data comes in as
-//! arguments, so the same functions serve the local dashboard and the site.
+//! arguments (`DashboardData`), so the same functions serve the local dashboard
+//! and the site's demo.
 
 mod gallery;
+mod ladder;
+mod logs;
+mod overview;
+mod reports;
 
 pub use gallery::gallery;
+pub use ladder::ladder;
+pub use logs::{log_results, logs};
+pub use overview::overview;
+pub use reports::{render_markdown, report, reports};
 
 use super::brand::{self, LockupSize};
-use super::ui::{self, Button, Card, Chip};
+use super::illustrations;
+use super::ui::{self, Button, Chip};
 use maud::{html, Markup, DOCTYPE};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -79,81 +89,26 @@ pub fn layout(title: &str, active: Option<Tab>, body: Markup) -> Markup {
     }
 }
 
-fn view_header(title: &str, lead: &str) -> Markup {
+/// Title, one line of context, and optional actions on the right.
+fn view_header(title: &str, lead: Markup, aside: Option<Markup>) -> Markup {
     html! {
         header.view-header {
             div {
                 h1 { (title) }
                 p.view-lead { (lead) }
             }
+            @if let Some(aside) = aside { div.view-aside { (aside) } }
         }
     }
 }
 
-/// Until a view is built, it points to the terminal dashboard, which has it.
-fn coming_next() -> Markup {
-    ui::card(
-        Card::Dashed,
-        ui::empty_state(
-            None,
-            "This view arrives in the next update. Until then, run the terminal app and type /dashboard.",
-            Some(ui::code_block("upleveler")),
-        ),
-    )
-}
-
-fn tab_page(tab: Tab, lead: &str, paper: bool) -> Markup {
-    layout(
-        tab.title(),
-        Some(tab),
-        html! {
-            section.view.container {
-                (view_header(tab.title(), lead))
-                @if paper {
-                    div.paper.panel { (coming_next()) }
-                } @else {
-                    (coming_next())
-                }
-            }
-        },
-    )
-}
-
-pub fn overview() -> Markup {
-    tab_page(
-        Tab::Overview,
-        "Activity, streak and readiness for your target level.",
-        false,
-    )
-}
-
-pub fn logs() -> Markup {
-    tab_page(Tab::Logs, "Everything you have logged, newest first.", true)
-}
-
-pub fn ladder() -> Markup {
-    tab_page(
-        Tab::Ladder,
-        "Your company's levels and what each one expects.",
-        true,
-    )
-}
-
-pub fn reports() -> Markup {
-    tab_page(
-        Tab::Reports,
-        "Gap analyses, promotion documents and summaries you have generated.",
-        true,
-    )
-}
-
-fn message_page(title: &str, text: &str, action: Markup) -> Markup {
+fn message_page(title: &str, sticker: Option<Markup>, text: &str, action: Markup) -> Markup {
     layout(
         title,
         None,
         html! {
             section.view.container {
-                (ui::empty_state(None, text, Some(action)))
+                (ui::empty_state(sticker, text, Some(action)))
             }
         },
     )
@@ -163,6 +118,7 @@ fn message_page(title: &str, text: &str, action: Markup) -> Markup {
 pub fn unauthorized() -> Markup {
     message_page(
         "Open the dashboard link",
+        None,
         "This dashboard only opens from the link that upleveler web printed in your terminal. Run it again to get a new link.",
         ui::code_block("upleveler web"),
     )
@@ -171,6 +127,7 @@ pub fn unauthorized() -> Markup {
 pub fn not_found() -> Markup {
     message_page(
         "Not found",
+        Some(illustrations::not_found()),
         "This page does not exist.",
         ui::button(Button::Ghost, "Back to the overview", Some("/")),
     )
@@ -179,6 +136,7 @@ pub fn not_found() -> Markup {
 pub fn server_error(detail: &str) -> Markup {
     message_page(
         "Something went wrong",
+        None,
         &format!("Could not load your data: {detail}"),
         ui::button(Button::Ghost, "Back to the overview", Some("/")),
     )
@@ -187,32 +145,42 @@ pub fn server_error(detail: &str) -> Markup {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::web::demo;
+    use chrono::NaiveDate;
+
+    fn sample() -> crate::web::data::DashboardData {
+        demo::data(NaiveDate::from_ymd_opt(2026, 10, 6).unwrap())
+    }
 
     #[test]
     fn layout_marks_only_the_active_tab() {
-        let html = logs().into_string();
+        let html = logs(&sample(), "").into_string();
         assert_eq!(html.matches(r#"aria-current="page""#).count(), 1);
         assert!(html.contains(r#"<a href="/logs" aria-current="page">"#));
     }
 
     #[test]
     fn pages_load_only_local_assets() {
-        for page in [
-            overview(),
-            logs(),
-            ladder(),
-            reports(),
+        let data = sample();
+        let pages = [
+            overview(&data),
+            logs(&data, ""),
+            ladder(&data, None),
+            reports(&data),
+            report(&data.reports[0]),
             unauthorized(),
+            not_found(),
             gallery(),
-        ] {
-            // The SVG namespace is an identifier, not a request.
+        ];
+        for page in pages {
+            // The SVG namespace is an identifier, not a request; log links are
+            // user content opened on click, not loaded.
             let html = page
                 .into_string()
                 .replace(r#"xmlns="http://www.w3.org/2000/svg""#, "");
-            assert!(
-                !html.contains("http://") && !html.contains("https://"),
-                "{html}"
-            );
+            for needle in [r#"src="http"#, r#"href="http"#] {
+                assert!(!html.contains(needle), "{needle} in {html}");
+            }
         }
     }
 }

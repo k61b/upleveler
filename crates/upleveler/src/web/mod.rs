@@ -3,6 +3,9 @@
 //! site crate renders the same functions into static files.
 
 pub mod brand;
+pub mod data;
+pub mod demo;
+pub mod illustrations;
 #[cfg(feature = "server")]
 pub mod server;
 pub mod tokens;
