@@ -39,7 +39,11 @@ Deploying needs two repository secrets (**Settings → Secrets and variables →
 - `CLOUDFLARE_API_TOKEN`: an API token created from the **Edit Cloudflare Workers** template
 - `CLOUDFLARE_ACCOUNT_ID`: shown on the Workers & Pages overview in the Cloudflare dashboard
 
-Without them the workflow only builds the site. To deploy by hand instead:
+Without them the workflow only builds the site. The workflow pins the Wrangler version
+(`WRANGLER_VERSION` in `site.yml`), because the action otherwise installs Wrangler 3,
+which cannot read `wrangler.jsonc`.
+
+To deploy by hand instead:
 
 ```sh
 cargo run -p upleveler-site

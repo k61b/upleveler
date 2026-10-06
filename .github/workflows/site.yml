@@ -21,6 +21,8 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
+  # wrangler-action installs Wrangler 3 by default, which cannot read wrangler.jsonc.
+  WRANGLER_VERSION: "4.147.0"
 
 jobs:
   site:
@@ -41,6 +43,7 @@ jobs:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           workingDirectory: site
+          wranglerVersion: ${{ env.WRANGLER_VERSION }}
           command: deploy
 
       - name: Upload a preview
@@ -50,4 +53,5 @@ jobs:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           workingDirectory: site
+          wranglerVersion: ${{ env.WRANGLER_VERSION }}
           command: versions upload --message "PR #${{ github.event.pull_request.number }}"
