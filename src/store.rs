@@ -8,6 +8,15 @@ use std::collections::HashSet;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
+
+/// Serializes writes within the process (the TUI logs while analyses run in a
+/// background thread).
+static WRITE_LOCK: Mutex<()> = Mutex::new(());
+
+fn write_lock() -> std::sync::MutexGuard<'static, ()> {
+    WRITE_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Entry {
@@ -98,6 +107,7 @@ pub fn extract_links(text: &str) -> Vec<String> {
         .collect()
 }
 
+#[derive(Debug, Clone)]
 pub struct Store {
     path: PathBuf,
 }
@@ -133,6 +143,7 @@ impl Store {
     }
 
     pub fn append(&self, entries: &[Entry]) -> Result<()> {
+        let _guard = write_lock();
         if let Some(dir) = self.path.parent() {
             fs::create_dir_all(dir)?;
         }
@@ -152,6 +163,21 @@ impl Store {
 
     /// Replaces the whole file atomically (write to a temp file, then rename).
     pub fn rewrite(&self, entries: &[Entry]) -> Result<()> {
+        let _guard = write_lock();
+        self.write_all(entries)
+    }
+
+    /// Loads, changes and rewrites the file under the write lock, so concurrent
+    /// appends are never lost.
+    pub fn update<T>(&self, change: impl FnOnce(&mut Vec<Entry>) -> T) -> Result<T> {
+        let _guard = write_lock();
+        let mut entries = self.load()?;
+        let out = change(&mut entries);
+        self.write_all(&entries)?;
+        Ok(out)
+    }
+
+    fn write_all(&self, entries: &[Entry]) -> Result<()> {
         if let Some(dir) = self.path.parent() {
             fs::create_dir_all(dir)?;
         }
@@ -167,12 +193,20 @@ impl Store {
         Ok(())
     }
 
-    /// Appends entries whose id is not already stored; returns how many were added.
-    pub fn add_new(&self, entries: Vec<Entry>) -> Result<usize> {
+    /// Appends entries whose id is not already stored; returns the ones added.
+    pub fn add_new(&self, entries: Vec<Entry>) -> Result<Vec<Entry>> {
         let existing: HashSet<String> = self.load()?.into_iter().map(|e| e.id).collect();
         let fresh = dedupe(entries, &existing);
         self.append(&fresh)?;
-        Ok(fresh.len())
+        Ok(fresh)
+    }
+
+    /// Removes the entry with `id`; returns it if it existed.
+    pub fn remove(&self, id: &str) -> Result<Option<Entry>> {
+        self.update(|all| {
+            let pos = all.iter().position(|e| e.id == id)?;
+            Some(all.remove(pos))
+        })
     }
 }
 
@@ -256,10 +290,11 @@ mod tests {
         assert_eq!(
             store
                 .add_new(vec![a.clone(), b.clone(), a.clone()])
-                .unwrap(),
+                .unwrap()
+                .len(),
             2
         );
-        assert_eq!(store.add_new(vec![a.clone()]).unwrap(), 0);
+        assert!(store.add_new(vec![a.clone()]).unwrap().is_empty());
 
         let loaded = store.load().unwrap();
         assert_eq!(loaded[0].text, "earlier https://x.io/pr/1.");
@@ -271,6 +306,40 @@ mod tests {
         store.rewrite(&changed).unwrap();
         assert_eq!(store.load().unwrap()[1].expectations, vec!["SD3.x.1"]);
         assert!(!dir.path().join("logs.jsonl.tmp").exists());
+    }
+
+    #[test]
+    fn concurrent_appends_survive_updates() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("logs.jsonl");
+        let d0 = d(2025, 1, 1);
+        let writer = {
+            let path = path.clone();
+            std::thread::spawn(move || {
+                let store = Store::new(path);
+                for i in 0..50 {
+                    let e = Entry::new(d0, &format!("append {i}"), vec![], "manual");
+                    store.append(&[e]).unwrap();
+                }
+            })
+        };
+        let store = Store::new(&path);
+        for i in 0..50 {
+            store
+                .update(|all| {
+                    for e in all.iter_mut() {
+                        e.tagged_with = Some(format!("pass {i}"));
+                    }
+                })
+                .unwrap();
+        }
+        writer.join().unwrap();
+        assert_eq!(store.load().unwrap().len(), 50);
+
+        let first = store.load().unwrap()[0].clone();
+        assert_eq!(store.remove(&first.id).unwrap().unwrap().id, first.id);
+        assert_eq!(store.load().unwrap().len(), 49);
+        assert!(store.remove("missing").unwrap().is_none());
     }
 
     #[test]

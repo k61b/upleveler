@@ -4,6 +4,7 @@
 
 First release.
 
+- Interactive app (`upleveler`): Claude Code–style shell where you just type to log or ask, slash commands with completion, `@` file picker, live progress with Esc to stop, a setup wizard, and a full-screen dashboard with readiness, an activity heatmap, logs, ladder and reports.
 - `ladder import/show/set`: import your company's level expectations from any document or spreadsheet, and set your current and target level.
 - `log` and `list`: keep a daily work log as plain JSONL in `~/.upleveler`.
 - `import`: AI-assisted import of old notes from txt, md, csv and xlsx. Results go to a staging file for review first. Duplicates are skipped, and anything the model drops or changes is imported exactly as written.

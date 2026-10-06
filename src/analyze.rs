@@ -13,10 +13,10 @@ use crate::prompts::{self, render};
 use crate::store::{Entry, Store};
 use anyhow::{bail, Context, Result};
 use chrono::{Datelike, NaiveDate};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 
-pub type Progress<'a> = &'a mut dyn FnMut(&str, usize, usize);
+pub use crate::Progress;
 
 /// The developer's current level (if set) and target level.
 pub struct Levels<'a> {
@@ -119,6 +119,7 @@ pub fn map_entries(
 
     let mut warnings = Vec::new();
     let mut done = 0;
+    progress("Mapping logs to your ladder", 0, todo.len())?;
     for batch in batches(
         &todo,
         |&i| entries[i].line().len() + 8,
@@ -142,14 +143,24 @@ pub fn map_entries(
                         .filter(|id| valid.contains(id.as_str()));
                     found.entry(m.entry).or_default().extend(ids);
                 }
+                let mut updates: HashMap<String, Vec<String>> = HashMap::new();
                 for (n, &i) in batch.iter().enumerate() {
                     let mut ids = found.remove(&(n + 1)).unwrap_or_default();
                     ids.sort();
                     ids.dedup();
-                    entries[i].expectations = ids;
+                    entries[i].expectations = ids.clone();
                     entries[i].tagged_with = Some(hash.clone());
+                    updates.insert(entries[i].id.clone(), ids);
                 }
-                store.rewrite(entries)?;
+                // Merge by id into the current file, so entries added meanwhile survive.
+                store.update(|all| {
+                    for e in all.iter_mut() {
+                        if let Some(ids) = updates.get(&e.id) {
+                            e.expectations = ids.clone();
+                            e.tagged_with = Some(hash.clone());
+                        }
+                    }
+                })?;
             }
             Err(err) => warnings.push(format!(
                 "could not map {} entries ({}..{}): {err}",
@@ -159,7 +170,7 @@ pub fn map_entries(
             )),
         }
         done += batch.len();
-        progress("Mapping logs to your ladder", done, todo.len());
+        progress("Mapping logs to your ladder", done, todo.len())?;
     }
     Ok(warnings)
 }
@@ -231,20 +242,55 @@ struct Overview {
     priorities: Vec<String>,
 }
 
-struct GapRow<'a> {
+struct Assessed<'a> {
     exp: &'a Expectation,
     count: usize,
     last: Option<NaiveDate>,
     result: Result<Assessment, String>,
 }
 
-impl GapRow<'_> {
+impl Assessed<'_> {
     fn rating(&self) -> &str {
         match &self.result {
             Ok(a) => a.rating.as_str(),
             Err(_) => "unknown",
         }
     }
+}
+
+/// One expectation's result in a gap analysis, kept as JSON next to the report.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct GapRow {
+    pub id: String,
+    pub area: String,
+    pub text: String,
+    /// "strong", "partial", "none" or "unknown" (assessment failed).
+    pub rating: String,
+    pub count: usize,
+    pub last: Option<NaiveDate>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct GapSummary {
+    pub date: NaiveDate,
+    pub current: Option<String>,
+    pub target: String,
+    pub rows: Vec<GapRow>,
+    #[serde(default)]
+    pub overview: String,
+    #[serde(default)]
+    pub priorities: Vec<String>,
+}
+
+impl GapSummary {
+    pub fn count(&self, rating: &str) -> usize {
+        self.rows.iter().filter(|r| r.rating == rating).count()
+    }
+}
+
+pub struct GapReport {
+    pub markdown: String,
+    pub summary: GapSummary,
 }
 
 /// Clamps the model's rating to what the evidence can support: no entries means
@@ -330,7 +376,7 @@ pub fn gap(
     entries: &[Entry],
     range: Option<Range>,
     progress: Progress,
-) -> Result<String> {
+) -> Result<GapReport> {
     let scoped = in_range(entries, range);
     let target = levels.target;
     if target.expectations.is_empty() {
@@ -350,6 +396,7 @@ pub fn gap(
         .max(1000);
 
     let mut rows = Vec::new();
+    progress("Assessing expectations", 0, target.expectations.len())?;
     for (i, exp) in target.expectations.iter().enumerate() {
         let matched: Vec<&Entry> = scoped
             .iter()
@@ -376,13 +423,13 @@ pub fn gap(
                     a
                 })
                 .map_err(|e| e.to_string());
-        rows.push(GapRow {
+        rows.push(Assessed {
             exp,
             count: matched.len(),
             last: matched.iter().map(|e| e.date).max(),
             result,
         });
-        progress("Assessing expectations", i + 1, target.expectations.len());
+        progress("Assessing expectations", i + 1, target.expectations.len())?;
     }
 
     let ratings = rows
@@ -416,6 +463,10 @@ pub fn gap(
         &scoped,
         cfg,
     );
+    let (overview_text, priorities) = overview
+        .as_ref()
+        .map(|o| (o.overview.trim().to_string(), o.priorities.clone()))
+        .unwrap_or_default();
     match overview {
         Ok(o) => {
             md.push_str(&format!(
@@ -496,7 +547,28 @@ pub fn gap(
             Err(e) => md.push_str(&format!("_{}: {e}_\n", label(cfg, "Assessment failed"))),
         }
     }
-    Ok(md)
+    let summary = GapSummary {
+        date: chrono::Local::now().date_naive(),
+        current: levels.current.map(|c| c.id.clone()),
+        target: target.id.clone(),
+        rows: rows
+            .iter()
+            .map(|r| GapRow {
+                id: r.exp.id.clone(),
+                area: r.exp.area.clone(),
+                text: r.exp.text.clone(),
+                rating: r.rating().to_string(),
+                count: r.count,
+                last: r.last,
+            })
+            .collect(),
+        overview: overview_text,
+        priorities,
+    };
+    Ok(GapReport {
+        markdown: md,
+        summary,
+    })
 }
 
 #[derive(Deserialize)]
@@ -595,6 +667,7 @@ pub fn brag(
     );
     let mut group = String::new();
     let total = sections.len();
+    progress("Writing impact statements", 0, total)?;
     for (i, (heading, exp_text, matched)) in sections.into_iter().enumerate() {
         if heading != group {
             md.push_str(&format!("\n## {heading}\n"));
@@ -621,7 +694,7 @@ pub fn brag(
                 }
             }
         }
-        progress("Writing impact statements", i + 1, total);
+        progress("Writing impact statements", i + 1, total)?;
     }
     Ok(md)
 }
@@ -680,7 +753,7 @@ pub fn summary(
             let text = clip(&text, budget).to_string();
             let part = llm.complete(&[Message::system(&system), Message::user(text)], false)?;
             partials.push(format!("### {from} – {to}\n{}", part.trim()));
-            progress("Summarizing weeks", n + 1, chunks.len());
+            progress("Summarizing weeks", n + 1, chunks.len())?;
         }
         clip(&partials.join("\n\n"), budget).to_string()
     };
@@ -1028,7 +1101,7 @@ levels:
             &store,
             &mut entries,
             None,
-            &mut |_, _, _| {},
+            &mut crate::no_progress,
         )
         .unwrap();
         assert!(warnings.is_empty());
@@ -1047,7 +1120,7 @@ levels:
             &store,
             &mut entries,
             None,
-            &mut |_, _, _| {},
+            &mut crate::no_progress,
         )
         .unwrap();
         assert_eq!(calls.get(), 1, "cached mappings are not recomputed");
@@ -1069,7 +1142,11 @@ levels:
                 }
             },
         };
-        let md = gap(&llm, &cfg, &levels, &entries, None, &mut |_, _, _| {}).unwrap();
+        let report = gap(&llm, &cfg, &levels, &entries, None, &mut crate::no_progress).unwrap();
+        let md = report.markdown;
+        assert_eq!(report.summary.count("partial"), 1);
+        assert_eq!(report.summary.count("none"), 1);
+        assert_eq!(report.summary.priorities, vec!["Mentor someone"]);
         assert!(md.contains("# Gap analysis: SD2 → SD3"));
         // A single entry is never "strong", whatever the model says.
         assert!(md.contains("| 🟡 | Ownership | Leads incident response | 1 | 2026-09-01 |"));
@@ -1096,7 +1173,7 @@ levels:
                 }
             },
         };
-        let md = brag(&llm, &cfg, &levels, &entries, None, &mut |_, _, _| {}).unwrap();
+        let md = brag(&llm, &cfg, &levels, &entries, None, &mut crate::no_progress).unwrap();
         assert!(md.contains("## SD3 · Ownership"));
         assert!(md.contains("- Led outage response → service restored _(2026-09-01)_"));
         assert!(md.contains("## Other"));
@@ -1129,7 +1206,7 @@ levels:
             &cfg,
             &entries,
             (d(1, 1), d(12, 31)),
-            &mut |_, _, _| {},
+            &mut crate::no_progress,
         )
         .unwrap();
         assert!(

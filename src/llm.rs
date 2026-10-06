@@ -42,8 +42,13 @@ pub trait Llm {
     /// Returns the full reply. `json` asks the backend to constrain output to a JSON object.
     fn complete(&self, messages: &[Message], json: bool) -> Result<String>;
 
-    /// Streams the reply token by token; backends without streaming emit it in one piece.
-    fn stream(&self, messages: &[Message], on_token: &mut dyn FnMut(&str)) -> Result<String> {
+    /// Streams the reply token by token; backends without streaming emit it in one
+    /// piece. `on_token` returns false to stop early (the partial reply is returned).
+    fn stream(
+        &self,
+        messages: &[Message],
+        on_token: &mut dyn FnMut(&str) -> bool,
+    ) -> Result<String> {
         let out = self.complete(messages, false)?;
         on_token(&out);
         Ok(out)
@@ -128,6 +133,41 @@ impl HttpLlm {
             api_key,
             json_mode: Cell::new(true),
         })
+    }
+
+    /// Model names the endpoint offers (Ollama: installed models).
+    pub fn list_models(&self) -> Result<Vec<String>> {
+        let path = match self.cfg.provider {
+            Provider::Ollama => "api/tags",
+            Provider::Openai => "models",
+        };
+        let mut req = self.agent.get(&self.url(path));
+        if let Some(key) = &self.api_key {
+            req = req.set("Authorization", &format!("Bearer {key}"));
+        }
+        let value: Value = req
+            .call()
+            .map_err(|err| self.describe(err))?
+            .into_json()
+            .context("model list was not JSON")?;
+        let (list, field) = match self.cfg.provider {
+            Provider::Ollama => (&value["models"], "name"),
+            Provider::Openai => (&value["data"], "id"),
+        };
+        let mut names: Vec<String> = list
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .filter_map(|m| m[field].as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default();
+        names.sort();
+        Ok(names)
+    }
+
+    pub fn config(&self) -> &LlmConfig {
+        &self.cfg
     }
 
     fn url(&self, path: &str) -> String {
@@ -229,7 +269,11 @@ impl Llm for HttpLlm {
             .with_context(|| format!("unexpected LLM response: {value}"))
     }
 
-    fn stream(&self, messages: &[Message], on_token: &mut dyn FnMut(&str)) -> Result<String> {
+    fn stream(
+        &self,
+        messages: &[Message],
+        on_token: &mut dyn FnMut(&str) -> bool,
+    ) -> Result<String> {
         let resp = self.post(&self.body(messages, false, true))?;
         let reader = BufReader::new(resp.into_reader());
         let mut out = String::new();
@@ -256,8 +300,10 @@ impl Llm for HttpLlm {
                 Provider::Openai => value["choices"][0]["delta"]["content"].as_str(),
             };
             if let Some(token) = token {
-                on_token(token);
                 out.push_str(token);
+                if !on_token(token) {
+                    break;
+                }
             }
             if value["done"].as_bool() == Some(true) {
                 break;

@@ -15,6 +15,8 @@ clap = { version = "4", features = ["derive"] }
 csv = "1"
 dialoguer = "0.11"
 dirs = "5"
+pulldown-cmark = { version = "0.13", default-features = false }
+ratatui = "0.29"
 regex = "1"
 rust_xlsxwriter = "0.80"
 serde = { version = "1", features = ["derive"] }
@@ -22,6 +24,8 @@ serde_json = "1"
 serde_norway = "0.9"
 sha2 = "0.10"
 toml = "0.8"
+tui-textarea = "0.7"
+unicode-width = "0.2"
 ureq = { version = "2", features = ["json"] }
 
 [dev-dependencies]

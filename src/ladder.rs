@@ -231,7 +231,7 @@ pub fn from_document(
     llm: &dyn Llm,
     doc: &str,
     budget: usize,
-    progress: &mut dyn FnMut(usize, usize),
+    progress: crate::Progress,
 ) -> Result<Ladder> {
     let chunks = chunk(doc, budget);
     let mut merged = Ladder { levels: Vec::new() };
@@ -247,7 +247,7 @@ pub fn from_document(
         let found: Ladder = complete_json(llm, messages)
             .with_context(|| format!("extracting levels from part {}", i + 1))?;
         merge(&mut merged, found);
-        progress(i + 1, chunks.len());
+        progress("Extracting levels", i + 1, chunks.len())?;
     }
     merged.normalize();
     merged.validate()?;
@@ -355,7 +355,7 @@ levels:
             },
         };
         let doc = format!("{}\n\n{}", "a".repeat(30), "b".repeat(30));
-        let l = from_document(&llm, &doc, 40, &mut |_, _| {}).unwrap();
+        let l = from_document(&llm, &doc, 40, &mut crate::no_progress).unwrap();
         assert_eq!(l.levels.len(), 2);
         assert_eq!(l.levels[0].expectations.len(), 2);
         assert_eq!(l.levels[1].id, "YG2");

@@ -7,33 +7,33 @@ levels:
     title: Software Developer 1
     summary: Delivers well-defined tasks with guidance.
     expectations:
-      - { area: Delivery, text: Completes well-scoped tasks with guidance from senior engineers }
-      - { area: Technical, text: Writes tested, readable code that follows team conventions }
-      - { area: Learning, text: Learns the codebase, tools and processes quickly and asks for help early }
+      - { area: Delivery, text: "Completes well-scoped tasks with guidance from senior engineers" }
+      - { area: Technical, text: "Writes tested, readable code that follows team conventions" }
+      - { area: Learning, text: "Learns the codebase, tools and processes quickly and asks for help early" }
   - id: SD2
     title: Software Developer 2
     summary: Delivers features independently.
     expectations:
-      - { area: Delivery, text: Delivers medium-sized features end to end with little guidance }
-      - { area: Delivery, text: Breaks down own work and gives reliable estimates }
-      - { area: Technical, text: Debugs production issues in services they work on }
-      - { area: Collaboration, text: Gives useful code reviews to teammates }
+      - { area: Delivery, text: "Delivers medium-sized features end to end with little guidance" }
+      - { area: Delivery, text: "Breaks down own work and gives reliable estimates" }
+      - { area: Technical, text: "Debugs production issues in services they work on" }
+      - { area: Collaboration, text: "Gives useful code reviews to teammates" }
   - id: SD3
     title: Software Developer 3
     summary: Owns a domain and raises the level of the team.
     expectations:
-      - { area: Ownership, text: Owns a service or domain, including its reliability and on-call health }
-      - { area: Ownership, text: Leads incident response and drives follow-up actions to completion }
-      - { area: Technical, text: Designs solutions that span multiple services and documents the trade-offs }
-      - { area: Mentoring, text: Mentors junior developers and helps them grow }
-      - { area: Communication, text: Communicates technical plans and risks clearly to non-engineers }
+      - { area: Ownership, text: "Owns a service or domain, including its reliability and on-call health" }
+      - { area: Ownership, text: "Leads incident response and drives follow-up actions to completion" }
+      - { area: Technical, text: "Designs solutions that span multiple services and documents the trade-offs" }
+      - { area: Mentoring, text: "Mentors junior developers and helps them grow" }
+      - { area: Communication, text: "Communicates technical plans and risks clearly to non-engineers" }
   - id: SD4
     title: Senior Software Developer
     expectations:
-      - { area: Technical, text: Sets technical direction for a team and its roadmap }
-      - { area: Impact, text: Delivers projects with measurable business impact across teams }
+      - { area: Technical, text: "Sets technical direction for a team and its roadmap" }
+      - { area: Impact, text: "Delivers projects with measurable business impact across teams" }
   - id: SD5
     title: Staff Software Developer
     expectations:
-      - { area: Impact, text: Drives technical strategy across multiple teams }
-      - { area: Mentoring, text: Grows senior engineers and technical leaders }
+      - { area: Impact, text: "Drives technical strategy across multiple teams" }
+      - { area: Mentoring, text: "Grows senior engineers and technical leaders" }

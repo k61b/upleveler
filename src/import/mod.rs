@@ -42,7 +42,7 @@ pub fn collect(
     llm: Option<&dyn Llm>,
     cfg: &Config,
     today: NaiveDate,
-    progress: &mut dyn FnMut(&str, usize, usize),
+    progress: crate::Progress,
 ) -> Result<Collected> {
     let source = path
         .file_name()
@@ -93,9 +93,9 @@ pub fn collect(
                 });
             }
             let label = format!("{source}#{}", table.name);
-            let out = text::extract(messy, llm, budget, &source, today, &mut |d, t| {
+            let out = text::extract(messy, llm, budget, &source, today, &mut |_, d, t| {
                 progress(&label, d, t)
-            });
+            })?;
             drafts.extend(out.drafts);
             warnings.extend(out.warnings);
         }
@@ -105,9 +105,9 @@ pub fn collect(
     let content = fs::read_to_string(path)
         .with_context(|| format!("reading {} (expected a UTF-8 text file)", path.display()))?;
     let blocks = text::split_blocks(&content, today);
-    let out = text::extract(blocks, llm, budget, &source, today, &mut |d, t| {
+    let out = text::extract(blocks, llm, budget, &source, today, &mut |_, d, t| {
         progress(&source, d, t)
-    });
+    })?;
     Ok(Collected {
         drafts: out.drafts,
         warnings: out.warnings,

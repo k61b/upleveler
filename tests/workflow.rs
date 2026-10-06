@@ -90,7 +90,8 @@ fn import_map_gap_export() {
 
     // Free-text notes.
     let txt = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/old_logs.txt");
-    let collected = import::collect(&txt, Some(&llm), &cfg, today(), &mut |_, _, _| {}).unwrap();
+    let collected =
+        import::collect(&txt, Some(&llm), &cfg, today(), &mut upleveler::no_progress).unwrap();
     let plan = import::plan(&collected.drafts, &HashSet::new(), None);
     assert_eq!(plan.undated.len(), 0);
     let dates: Vec<String> = plan.new.iter().map(|e| e.date.to_string()).collect();
@@ -109,7 +110,8 @@ fn import_map_gap_export() {
     store.append(&plan.new).unwrap();
 
     // Re-importing the reviewed staging file adds nothing new.
-    let again = import::collect(&staging, None, &cfg, today(), &mut |_, _, _| {}).unwrap();
+    let again =
+        import::collect(&staging, None, &cfg, today(), &mut upleveler::no_progress).unwrap();
     let existing: HashSet<String> = store.load().unwrap().into_iter().map(|e| e.id).collect();
     assert_eq!(import::plan(&again.drafts, &existing, None).new.len(), 0);
 
@@ -139,7 +141,14 @@ fn import_map_gap_export() {
         }
     }
     book.save(&xlsx).unwrap();
-    let collected = import::collect(&xlsx, Some(&llm), &cfg, today(), &mut |_, _, _| {}).unwrap();
+    let collected = import::collect(
+        &xlsx,
+        Some(&llm),
+        &cfg,
+        today(),
+        &mut upleveler::no_progress,
+    )
+    .unwrap();
     let existing: HashSet<String> = store.load().unwrap().into_iter().map(|e| e.id).collect();
     let plan = import::plan(&collected.drafts, &existing, None);
     assert_eq!(plan.duplicates, 1);
@@ -162,7 +171,7 @@ fn import_map_gap_export() {
         &store,
         &mut entries,
         None,
-        &mut |_, _, _| {},
+        &mut upleveler::no_progress,
     )
     .unwrap();
     assert!(warnings.is_empty(), "{warnings:?}");
@@ -171,7 +180,16 @@ fn import_map_gap_export() {
         .iter()
         .all(|e| e.tagged_with == Some(ladder.hash())));
 
-    let md = analyze::gap(&llm, &cfg, &levels, &reloaded, None, &mut |_, _, _| {}).unwrap();
+    let md = analyze::gap(
+        &llm,
+        &cfg,
+        &levels,
+        &reloaded,
+        None,
+        &mut upleveler::no_progress,
+    )
+    .unwrap()
+    .markdown;
     // Only one incident entry, so the model's "strong" is clamped to partial.
     assert!(
         md.contains("| 🟡 | Ownership | Leads incident response"),
@@ -188,7 +206,7 @@ fn import_map_gap_export() {
     let out = dir.path().join("export.xlsx");
     let refs: Vec<_> = reloaded.iter().collect();
     export::write_xlsx(&refs, &out).unwrap();
-    let back = import::collect(&out, None, &cfg, today(), &mut |_, _, _| {}).unwrap();
+    let back = import::collect(&out, None, &cfg, today(), &mut upleveler::no_progress).unwrap();
     assert_eq!(back.drafts.len(), 6);
     let md_export = export::render(&refs, Format::Md).unwrap();
     assert!(md_export.contains("## 2025-10"));

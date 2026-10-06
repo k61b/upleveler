@@ -163,8 +163,8 @@ pub fn extract(
     budget: usize,
     source: &str,
     today: NaiveDate,
-    progress: &mut dyn FnMut(usize, usize),
-) -> Extraction {
+    progress: crate::Progress,
+) -> anyhow::Result<Extraction> {
     let blocks: Vec<Block> = blocks
         .into_iter()
         .flat_map(|b| split_large(b, budget))
@@ -175,7 +175,7 @@ pub fn extract(
         for b in &blocks {
             drafts.extend(verbatim(b, source));
         }
-        return Extraction { drafts, warnings };
+        return Ok(Extraction { drafts, warnings });
     };
 
     let batches = batch(&blocks, budget);
@@ -274,9 +274,9 @@ pub fn extract(
             }
         }
         done += batch.len();
-        progress(done, blocks.len());
+        progress("Normalizing notes", done, blocks.len())?;
     }
-    Extraction { drafts, warnings }
+    Ok(Extraction { drafts, warnings })
 }
 
 /// Digit runs in `s`, used to check that the model did not invent figures.
@@ -436,8 +436,9 @@ Talked about the new search service.
             10_000,
             "notes.md",
             today(),
-            &mut |_, _| {},
-        );
+            &mut crate::no_progress,
+        )
+        .unwrap();
         let first = out
             .drafts
             .iter()
@@ -477,8 +478,9 @@ Talked about the new search service.
             10_000,
             "n.txt",
             today(),
-            &mut |_, _| {},
-        );
+            &mut crate::no_progress,
+        )
+        .unwrap();
         let texts: Vec<&str> = out.drafts.iter().map(|d| d.text.as_str()).collect();
         assert_eq!(
             texts,
