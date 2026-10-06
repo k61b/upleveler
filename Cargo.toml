@@ -1,13 +1,15 @@
-[package]
-name = "upleveler"
+[workspace]
+resolver = "2"
+members = ["crates/*"]
+
+[workspace.package]
 version = "0.1.0"
 rust-version = "1.82"
 edition = "2021"
-description = "Level up against your own career ladder: a local-first work log and promotion coach for software developers"
 license = "AGPL-3.0-only"
 repository = "https://github.com/k61b/upleveler"
 
-[dependencies]
+[workspace.dependencies]
 anyhow = "1"
 calamine = { version = "0.26", features = ["dates"] }
 chrono = { version = "0.4", features = ["serde"] }
@@ -23,10 +25,8 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_norway = "0.9"
 sha2 = "0.10"
+tempfile = "3"
 toml = "0.8"
 tui-textarea = "0.7"
 unicode-width = "0.2"
 ureq = { version = "2", features = ["json"] }
-
-[dev-dependencies]
-tempfile = "3"

@@ -48,7 +48,7 @@ jobs:
             echo '```sh'
             echo "git clone https://github.com/${GITHUB_REPOSITORY}.git && cd ${GITHUB_REPOSITORY#*/}"
             echo "git checkout $GITHUB_REF_NAME"
-            echo "cargo install --path . --locked --force"
+            echo "cargo install --path crates/upleveler --locked --force"
             echo '```'
           } >> notes.md
 

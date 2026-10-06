@@ -56,7 +56,7 @@ jobs:
           toolchain: "1.82.0"
       - uses: Swatinem/rust-cache@v2
       # The exact command the README tells users to run.
-      - run: cargo install --path . --locked --root "$RUNNER_TEMP/upleveler"
+      - run: cargo install --path crates/upleveler --locked --root "$RUNNER_TEMP/upleveler"
       - run: |
           "$RUNNER_TEMP/upleveler/bin/upleveler" --version
           UPLEVELER_HOME="$RUNNER_TEMP/home" "$RUNNER_TEMP/upleveler/bin/upleveler" status

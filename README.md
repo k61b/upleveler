@@ -16,11 +16,11 @@ You need [Rust](https://rustup.rs) (1.82+), [Ollama](https://ollama.com) and abo
 ```sh
 git clone https://github.com/k61b/upleveler.git
 cd upleveler
-cargo install --path . --locked
+cargo install --path crates/upleveler --locked
 ollama pull gemma3:12b
 ```
 
-To update: `git pull && cargo install --path . --locked --force`
+To update: `git pull && cargo install --path crates/upleveler --locked --force`
 
 ## Use
 
@@ -65,6 +65,14 @@ Every feature is also a plain command, for example `upleveler log "..."`, `uplev
 Upleveler, yaptığınız işi şirketinizin seviye beklentileriyle karşılaştırır. Terminalde `upleveler` yazın. Ne yaptığınızı yazarsanız log'a eklenir, soru sorarsanız cevaplanır. Komutları görmek için `/` yazın. Raporların Türkçe olması için kurulumda Türkçe'yi seçin. Verileriniz bilgisayarınızdan çıkmaz.
 
 ## Development
+
+The repository is a Cargo workspace:
+
+| Path | What it is |
+|---|---|
+| `crates/upleveler` | The app: CLI, interactive terminal app and the core library |
+
+Run the checks from the repository root; they cover every crate:
 
 ```sh
 cargo test

@@ -1,0 +1,32 @@
+[package]
+name = "upleveler"
+version.workspace = true
+rust-version.workspace = true
+edition.workspace = true
+description = "Level up against your own career ladder: a local-first work log and promotion coach for software developers"
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+calamine.workspace = true
+chrono.workspace = true
+clap.workspace = true
+csv.workspace = true
+dialoguer.workspace = true
+dirs.workspace = true
+pulldown-cmark.workspace = true
+ratatui.workspace = true
+regex.workspace = true
+rust_xlsxwriter.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+serde_norway.workspace = true
+sha2.workspace = true
+toml.workspace = true
+tui-textarea.workspace = true
+unicode-width.workspace = true
+ureq.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

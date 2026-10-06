@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- The repository is now a Cargo workspace and the app lives in `crates/upleveler`. Install or update with `cargo install --path crates/upleveler --locked`.
+
 ## 0.1.0
 
 First release.
