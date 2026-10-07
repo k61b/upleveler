@@ -244,10 +244,6 @@ struct AddLog {
     tags: String,
 }
 
-/// The longest entry the form accepts (the terminal app has no limit, but a
-/// browser form should not post megabytes by accident).
-const MAX_ENTRY: usize = 4000;
-
 #[derive(Deserialize)]
 struct LadderQuery {
     level: Option<String>,
@@ -291,68 +287,37 @@ async fn add_log(
     headers: HeaderMap,
     Form(input): Form<AddLog>,
 ) -> Response {
-    if !same_origin(&headers, state.port) {
-        return (
-            StatusCode::FORBIDDEN,
-            "Forbidden: entries can only be added from this dashboard.\n",
-        )
-            .into_response();
-    }
-    let paths = state.paths.clone();
-    let result = tokio::task::spawn_blocking(move || -> Result<Response> {
-        let session = Session::at(paths)?;
+    write(state, &headers, move |session| {
         let today = crate::session::today();
-        let text = input.text.trim().to_string();
-        let problem = if text.is_empty() {
-            Some("Write what you did first.".to_string())
-        } else if text.chars().count() > MAX_ENTRY {
-            Some(format!(
-                "That is longer than {MAX_ENTRY} characters. Split it into a few entries."
-            ))
-        } else {
-            None
-        };
-        let date = match input.date.trim() {
-            "" => Ok(today),
-            d => crate::dates::parse_date(d, today).ok_or(()),
-        };
-        let (problem, date) = match (problem, date) {
-            (Some(p), _) => (Some(p), None),
-            (None, Err(())) => (Some("Use a date like 2026-10-04.".to_string()), None),
-            (None, Ok(date)) => (None, Some(date)),
-        };
-        let Some(date) = date else {
-            let data = DashboardData::load(&session)?;
-            let form = AddForm {
-                text: input.text,
-                date: input.date,
-                tags: input.tags,
-                notice: problem.map(|p| (Alert::Error, p)),
-            };
-            return Ok((
-                StatusCode::UNPROCESSABLE_ENTITY,
-                Html(views::logs_with(&data, "", &form).into_string()),
-            )
-                .into_response());
-        };
         let tags = input
             .tags
             .split([',', ' '])
             .filter(|t| !t.trim().is_empty())
             .map(String::from)
             .collect();
-        let location = match session.add_log(&text, date, tags)? {
-            Some(_) => format!("/logs?logged={date}"),
-            None => format!("/logs?duplicate={date}"),
-        };
-        Ok((StatusCode::SEE_OTHER, [(header::LOCATION, location)]).into_response())
+        let added = form_date(&input.date, Some(today))
+            .map_err(crate::limits::invalid)
+            .and_then(|date| {
+                let date = date.unwrap_or(today);
+                session.add_log(&input.text, date, tags).map(|e| (date, e))
+            });
+        match added {
+            Ok((date, Some(_))) => Ok(see_other(format!("/logs?logged={date}"))),
+            Ok((date, None)) => Ok(see_other(format!("/logs?duplicate={date}"))),
+            Err(err) => {
+                let problem = rule(err)?;
+                let data = DashboardData::load(session)?;
+                let form = AddForm {
+                    text: input.text,
+                    date: input.date,
+                    tags: input.tags,
+                    notice: Some((Alert::Error, problem)),
+                };
+                Ok(invalid(views::logs_with(&data, "", &form)))
+            }
+        }
     })
-    .await;
-    match result {
-        Ok(Ok(response)) => response,
-        Ok(Err(err)) => error_page(&format!("{err:#}")),
-        Err(err) => error_page(&err.to_string()),
-    }
+    .await
 }
 
 /// Runs a form handler with a fresh session off the async threads; a refused
@@ -372,6 +337,12 @@ where
         Ok(Err(err)) => error_page(&format!("{err:#}")),
         Err(err) => error_page(&err.to_string()),
     }
+}
+
+/// The message to show next to a form when `err` is a rule the user broke
+/// (`limits::Invalid`); any other error goes on to the error page.
+fn rule(err: anyhow::Error) -> Result<String> {
+    crate::limits::problem(&err).ok_or(err)
 }
 
 fn see_other(location: String) -> Response {
@@ -459,32 +430,22 @@ async fn add_person(
     Form(input): Form<AddPerson>,
 ) -> Response {
     write(state, &headers, move |session| {
-        let handle = crate::people::normalize_handle(&input.handle);
-        let name = input.name.trim();
-        let added = match handle {
-            None => Err("Use letters, numbers, - _ or . for the handle, like ada.".to_string()),
-            Some(_) if name.is_empty() => Err("Write their name.".to_string()),
-            Some(_) if name.chars().count() > 100 || input.role.chars().count() > 100 => {
-                Err("Keep the name and role under 100 characters.".to_string())
-            }
-            Some(handle) => session
-                .add_person(crate::people::Person {
-                    handle,
-                    name: name.to_string(),
-                    role: Some(input.role.trim().to_string()).filter(|r| !r.is_empty()),
-                    team: None,
-                    relation: crate::people::Relation::parse(&input.relation).unwrap_or_default(),
-                    about: None,
-                    since: None,
-                })
-                .map_err(|e| format!("{e:#}")),
-        };
+        let added = session.add_person(crate::people::Person {
+            handle: input.handle.clone(),
+            name: input.name.trim().to_string(),
+            role: Some(input.role.trim().to_string()).filter(|r| !r.is_empty()),
+            team: None,
+            relation: crate::people::Relation::parse(&input.relation).unwrap_or_default(),
+            about: None,
+            since: None,
+        });
         match added {
             Ok(_) => Ok(see_other(format!(
                 "{}?saved=person",
                 views::Tab::People.path()
             ))),
-            Err(problem) => {
+            Err(err) => {
+                let problem = rule(err)?;
                 let data = DashboardData::load(session)?;
                 let form = PersonForm {
                     handle: input.handle,
@@ -536,25 +497,20 @@ async fn add_note(
         let Some(person) = session.people()?.get(&handle).cloned() else {
             return Ok(missing());
         };
-        let text = input.text.trim();
         let kind = crate::people::NoteKind::parse(&input.kind).unwrap_or_default();
-        let checked = if text.is_empty() {
-            Err("Write the note first.".to_string())
-        } else if text.chars().count() > MAX_ENTRY {
-            Err(format!("That is longer than {MAX_ENTRY} characters."))
-        } else {
-            form_date(&input.date, Some(crate::session::today()))
-        };
-        match checked {
-            Ok(date) => {
-                let date = date.unwrap_or_else(crate::session::today);
-                session.add_note(&person.handle, kind, date, text)?;
-                Ok(see_other(format!(
-                    "{}?saved=note",
-                    views::person_path(&person.handle)
-                )))
-            }
-            Err(problem) => {
+        let today = crate::session::today();
+        let added = form_date(&input.date, Some(today))
+            .map_err(crate::limits::invalid)
+            .and_then(|date| {
+                session.add_note(&person.handle, kind, date.unwrap_or(today), &input.text)
+            });
+        match added {
+            Ok(_) => Ok(see_other(format!(
+                "{}?saved=note",
+                views::person_path(&person.handle)
+            ))),
+            Err(err) => {
+                let problem = rule(err)?;
                 let data = DashboardData::load(session)?;
                 let form = NoteForm {
                     kind: input.kind,
@@ -597,27 +553,8 @@ async fn edit_person(
         let Some(person) = session.people()?.get(&handle).cloned() else {
             return Ok(missing());
         };
-        let short = |v: &str| v.chars().count() <= 100;
-        let problem = if input.name.trim().is_empty() {
-            Some("Write their name.")
-        } else if !short(&input.name) || !short(&input.role) || !short(&input.team) {
-            Some("Keep the name, role and team under 100 characters.")
-        } else if input.about.chars().count() > 500 {
-            Some("Keep the description under 500 characters.")
-        } else {
-            None
-        };
-        if let Some(problem) = problem {
-            let data = DashboardData::load(session)?;
-            let mut form = NoteForm::empty(data.today);
-            form.profile = Some(problem.to_string());
-            return Ok(match views::person(&data, &person.handle, &form) {
-                Some(markup) => invalid(markup),
-                None => missing(),
-            });
-        }
         let optional = |v: &str| Some(v.trim().to_string()).filter(|v| !v.is_empty());
-        session.edit_person(&person.handle, |p| {
+        let edited = session.edit_person(&person.handle, |p| {
             p.name = input.name.trim().to_string();
             p.role = optional(&input.role);
             p.team = optional(&input.team);
@@ -625,11 +562,23 @@ async fn edit_person(
             if let Some(relation) = crate::people::Relation::parse(&input.relation) {
                 p.relation = relation;
             }
-        })?;
-        Ok(see_other(format!(
-            "{}?saved=profile",
-            views::person_path(&person.handle)
-        )))
+        });
+        match edited {
+            Ok(_) => Ok(see_other(format!(
+                "{}?saved=profile",
+                views::person_path(&person.handle)
+            ))),
+            Err(err) => {
+                let problem = rule(err)?;
+                let data = DashboardData::load(session)?;
+                let mut form = NoteForm::empty(data.today);
+                form.profile = Some(problem);
+                Ok(match views::person(&data, &person.handle, &form) {
+                    Some(markup) => invalid(markup),
+                    None => missing(),
+                })
+            }
+        }
     })
     .await
 }
@@ -730,24 +679,19 @@ async fn edit_note(
         else {
             return Ok(missing());
         };
-        let text = input.text.trim();
-        let checked = if text.is_empty() {
-            Err("A note needs some text.".to_string())
-        } else if text.chars().count() > MAX_ENTRY {
-            Err(format!("That is longer than {MAX_ENTRY} characters."))
-        } else {
-            form_date(&input.date, Some(note.date))
-        };
-        match checked {
-            Ok(date) => {
-                let kind = crate::people::NoteKind::parse(&input.kind).unwrap_or(note.kind);
-                session.edit_note(&note.id, kind, date.unwrap_or(note.date), text)?;
-                Ok(see_other(format!(
-                    "{}?saved=noteedit",
-                    back_to(&input.back, &handle)
-                )))
-            }
-            Err(problem) => {
+        let kind = crate::people::NoteKind::parse(&input.kind).unwrap_or(note.kind);
+        let edited = form_date(&input.date, Some(note.date))
+            .map_err(crate::limits::invalid)
+            .and_then(|date| {
+                session.edit_note(&note.id, kind, date.unwrap_or(note.date), &input.text)
+            });
+        match edited {
+            Ok(_) => Ok(see_other(format!(
+                "{}?saved=noteedit",
+                back_to(&input.back, &handle)
+            ))),
+            Err(err) => {
+                let problem = rule(err)?;
                 let data = DashboardData::load(session)?;
                 let mut form = NoteForm::empty(data.today);
                 form.notice = Some((Alert::Error, format!("The note was not saved: {problem}")));
@@ -809,24 +753,16 @@ async fn add_goal(
     Form(input): Form<AddGoal>,
 ) -> Response {
     write(state, &headers, move |session| {
-        let text = input.text.trim();
-        let added = if text.is_empty() {
-            Err("Write the goal first.".to_string())
-        } else if text.chars().count() > 400 {
-            Err("Keep a goal under 400 characters.".to_string())
-        } else {
-            form_date(&input.due, None).and_then(|due| {
-                session
-                    .add_goal(text, Some(input.expectation.as_str()), due)
-                    .map_err(|e| format!("{e:#}"))
-            })
-        };
+        let added = form_date(&input.due, None)
+            .map_err(crate::limits::invalid)
+            .and_then(|due| session.add_goal(&input.text, Some(input.expectation.as_str()), due));
         match added {
             Ok(_) => Ok(see_other(format!(
                 "{}?saved=goal",
                 views::Tab::Goals.path()
             ))),
-            Err(problem) => {
+            Err(err) => {
+                let problem = rule(err)?;
                 let data = DashboardData::load(session)?;
                 let form = GoalForm {
                     text: input.text,
@@ -858,21 +794,19 @@ async fn checkin(
         if session.goals()?.get(id).is_none() {
             return Ok(missing());
         }
-        let text = input.text.trim();
-        if text.is_empty() || text.chars().count() > MAX_ENTRY {
-            let data = DashboardData::load(session)?;
-            let mut form = GoalForm::empty();
-            form.notice = Some((
-                Alert::Error,
-                format!("Write what you did for goal #{id} first."),
-            ));
-            return Ok(invalid(views::goals_with(&data, &form)));
+        match session.add_checkin(id, crate::session::today(), &input.text) {
+            Ok(_) => Ok(see_other(format!(
+                "{}?saved=checkin",
+                views::Tab::Goals.path()
+            ))),
+            Err(err) => {
+                let problem = rule(err)?;
+                let data = DashboardData::load(session)?;
+                let mut form = GoalForm::empty();
+                form.notice = Some((Alert::Error, format!("Goal #{id}: {problem}")));
+                Ok(invalid(views::goals_with(&data, &form)))
+            }
         }
-        session.add_checkin(id, crate::session::today(), text)?;
-        Ok(see_other(format!(
-            "{}?saved=checkin",
-            views::Tab::Goals.path()
-        )))
     })
     .await
 }
@@ -887,24 +821,23 @@ async fn edit_goal(
         if session.goals()?.get(id).is_none() {
             return Ok(missing());
         }
-        let text = input.text.trim();
-        let edited = if text.is_empty() {
-            Err("Write the goal first.".to_string())
-        } else if text.chars().count() > 400 {
-            Err("Keep a goal under 400 characters.".to_string())
-        } else {
-            form_date(&input.due, None).and_then(|due| {
-                session
-                    .edit_goal(id, Some(text), Some(input.expectation.as_str()), Some(due))
-                    .map_err(|e| format!("{e:#}"))
-            })
-        };
+        let edited = form_date(&input.due, None)
+            .map_err(crate::limits::invalid)
+            .and_then(|due| {
+                session.edit_goal(
+                    id,
+                    Some(&input.text),
+                    Some(input.expectation.as_str()),
+                    Some(due),
+                )
+            });
         match edited {
             Ok(_) => Ok(see_other(format!(
                 "{}?saved=edited",
                 views::Tab::Goals.path()
             ))),
-            Err(problem) => {
+            Err(err) => {
+                let problem = rule(err)?;
                 let data = DashboardData::load(session)?;
                 let mut form = GoalForm::empty();
                 form.edit = Some((id, problem));
@@ -1627,15 +1560,22 @@ mod tests {
             list.contains("Added.") && list.contains("Ada (Junior developer, mentee)"),
             "{list}"
         );
+        let long_role = format!("handle=bo&name=Bo&role={}", "x".repeat(101));
+        let long_note = format!("text={}", "x".repeat(crate::limits::TEXT + 1));
         for (form, message) in [
             ("handle=ada&name=Ada", "already"),
             ("handle=%21%21&name=X", "Use letters"),
-            ("handle=bo&name=+", "Write their name."),
+            (long_role.as_str(), crate::limits::NAME_LONG),
         ] {
             let res = send(&state, post("/people"), form).await;
             assert_eq!(res.status(), StatusCode::UNPROCESSABLE_ENTITY, "{form}");
             assert!(body(res).await.contains(message), "{form}");
         }
+
+        // The core's rules and messages, the same as in the terminal app.
+        let res = send(&state, post("/people/ada/notes"), &long_note).await;
+        assert_eq!(res.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(body(res).await.contains(crate::limits::NOTE_LONG));
 
         // Notes.
         let noted = send(
@@ -1817,13 +1757,20 @@ mod tests {
                 Some("Likes Rust")
             )
         );
-        let empty = send(&state, post("/people/ada/edit"), "name=+").await;
-        assert_eq!(empty.status(), StatusCode::UNPROCESSABLE_ENTITY);
-        let page = body(empty).await;
+        let long_about = format!("name=Ada+L&about={}", "x".repeat(crate::limits::ABOUT + 1));
+        let too_long = send(&state, post("/people/ada/edit"), &long_about).await;
+        assert_eq!(too_long.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let page = body(too_long).await;
         assert!(
-            page.contains("Write their name.")
+            page.contains(crate::limits::ABOUT_LONG)
                 && page.contains(r#"<details class="profile-edit" open"#),
             "{page}"
+        );
+        let unchanged = session.people().unwrap().get("ada").cloned().unwrap();
+        assert_eq!(
+            unchanged.about.as_deref(),
+            Some("Likes Rust"),
+            "nothing was saved"
         );
         send(&state, post("/people/ada/notes"), "text=A+note").await;
         let confirm = body(send(&state, Request::get("/people/ada/remove"), "").await).await;

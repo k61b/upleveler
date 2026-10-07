@@ -120,9 +120,8 @@ impl Session {
 
     /// Adds an entry; `None` means the same text was already logged that day.
     pub fn add_log(&self, text: &str, date: NaiveDate, tags: Vec<String>) -> Result<Option<Entry>> {
-        if text.trim().is_empty() {
-            bail!("nothing to log");
-        }
+        use crate::limits::{LOG_EMPTY, LOG_LONG, TEXT};
+        let text = crate::limits::text(text, TEXT, LOG_EMPTY, LOG_LONG)?;
         let entry = Entry::new(date, text, tags, "manual");
         Ok(self.store.add_new(vec![entry])?.into_iter().next())
     }
@@ -175,6 +174,7 @@ impl Session {
             if person.name.trim().is_empty() {
                 person.name = person.handle.clone();
             }
+            person.check()?;
             Ok(person.clone())
         })
     }
@@ -221,13 +221,12 @@ impl Session {
         date: NaiveDate,
         text: &str,
     ) -> Result<Option<Note>> {
-        if text.trim().is_empty() {
-            bail!("nothing to note");
-        }
+        use crate::limits::{NOTE_EMPTY, NOTE_LONG, TEXT};
+        let text = crate::limits::text(text, TEXT, NOTE_EMPTY, NOTE_LONG)?;
         let people = self.people()?;
         let Some(person) = people.get(handle) else {
             let handle = normalize_handle(handle).unwrap_or_else(|| handle.to_string());
-            bail!("@{handle} is not in your people yet. Add them first: /people add @{handle} <name> in the app, or upleveler person add {handle} --name \"…\"");
+            return Err(crate::limits::invalid(format!("@{handle} is not in your people yet. Add them first: /people add @{handle} <name> in the app, or upleveler person add {handle} --name \"…\"")));
         };
         self.notes_store()
             .add(Note::new(&person.handle, date, kind, text))
@@ -273,10 +272,8 @@ impl Session {
     /// Changes a note's kind, date and text; returns the note as it was before.
     /// The id stays, so lists and undo keep pointing at it.
     pub fn edit_note(&self, id: &str, kind: NoteKind, date: NaiveDate, text: &str) -> Result<Note> {
-        let text = text.trim();
-        if text.is_empty() {
-            bail!("a note needs some text");
-        }
+        use crate::limits::{NOTE_EMPTY, NOTE_LONG, TEXT};
+        let text = crate::limits::text(text, TEXT, NOTE_EMPTY, NOTE_LONG)?;
         self.notes_store()
             .update(|notes| {
                 let note = notes.iter_mut().find(|n| n.id == id)?;
@@ -332,13 +329,13 @@ impl Session {
         match expectation.map(str::trim).filter(|e| !e.is_empty()) {
             None => Ok(None),
             Some(id) => {
-                let ladder = self
-                    .ladder()?
-                    .context("import a ladder before tying a goal to an expectation")?;
-                let exp = ladder.expectation(id).with_context(|| {
-                    format!(
+                let ladder = self.ladder()?.ok_or_else(|| {
+                    crate::limits::invalid("import a ladder before tying a goal to an expectation")
+                })?;
+                let exp = ladder.expectation(id).ok_or_else(|| {
+                    crate::limits::invalid(format!(
                         "there is no expectation {id} in your ladder (see `upleveler ladder show`)"
-                    )
+                    ))
                 })?;
                 Ok(Some(exp.id.clone()))
             }
@@ -360,11 +357,9 @@ impl Session {
         };
         self.update_goals(|goals| {
             let goal = goals.get_mut(id)?;
-            if let Some(text) = text.map(str::trim) {
-                if text.is_empty() {
-                    bail!("a goal needs some text");
-                }
-                goal.text = text.to_string();
+            if let Some(text) = text {
+                use crate::limits::{GOAL, GOAL_EMPTY, GOAL_LONG};
+                goal.text = crate::limits::text(text, GOAL, GOAL_EMPTY, GOAL_LONG)?.to_string();
             }
             if let Some(expectation) = expectation {
                 goal.expectation = expectation;

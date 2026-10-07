@@ -13,6 +13,7 @@ pub mod goals;
 pub mod import;
 pub mod intent;
 pub mod ladder;
+pub mod limits;
 pub mod llm;
 pub mod people;
 pub mod prompts;

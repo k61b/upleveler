@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- The terminal app, the browser dashboard and the command line now apply the same rules with the same messages: a log entry, note or check-in is at most 4000 characters, a goal 400, a name, role or team 100 and a description 500. Before, only the dashboard checked lengths. A blank name means the handle everywhere, as it already did on the command line.
 - Your data is safe when the terminal app and the browser dashboard (or `upleveler web` in another terminal) change it at the same time. Before, a change made in one could be lost when the other saved; with 12 processes adding to a goal at once, only one check-in was kept. Every write now happens while the data folder is locked (`.lock`), and every file is replaced in one step, so a crash or a full disk can no longer leave `people.yaml`, `goals.yaml`, `ladder.yaml` or `config.toml` half-written.
 
 ## 2.2.0

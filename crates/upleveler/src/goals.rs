@@ -4,7 +4,7 @@
 
 use crate::analyze::GapSummary;
 use crate::store::Entry;
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result};
 use chrono::NaiveDate;
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -153,10 +153,8 @@ impl Goals {
         due: Option<NaiveDate>,
         today: NaiveDate,
     ) -> Result<&Goal> {
-        let text = text.trim();
-        if text.is_empty() {
-            bail!("a goal needs a description");
-        }
+        use crate::limits::{GOAL, GOAL_EMPTY, GOAL_LONG};
+        let text = crate::limits::text(text, GOAL, GOAL_EMPTY, GOAL_LONG)?;
         let id = self.goals.iter().map(|g| g.id).max().unwrap_or(0) + 1;
         self.goals.push(Goal {
             id,
@@ -200,10 +198,8 @@ impl Goals {
     }
 
     pub fn checkin(&mut self, id: u32, date: NaiveDate, text: &str) -> Result<&Goal> {
-        let text = text.trim();
-        if text.is_empty() {
-            bail!("a check-in needs a few words about the progress");
-        }
+        use crate::limits::{CHECKIN_EMPTY, CHECKIN_LONG, TEXT};
+        let text = crate::limits::text(text, TEXT, CHECKIN_EMPTY, CHECKIN_LONG)?;
         let goal = self.get_mut(id)?;
         goal.checkins.push(Checkin {
             date,

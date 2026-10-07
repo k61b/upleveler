@@ -70,6 +70,15 @@ pub struct Person {
 impl Person {
     /// "Ada (junior developer, mentee)": what prompts may say about someone.
     /// Never includes `about` or notes.
+    /// The length rules for a profile (see `limits`).
+    pub fn check(&self) -> Result<()> {
+        use crate::limits::{optional, ABOUT, ABOUT_LONG, NAME, NAME_LONG};
+        optional(Some(&self.name), NAME, NAME_LONG)?;
+        optional(self.role.as_deref(), NAME, NAME_LONG)?;
+        optional(self.team.as_deref(), NAME, NAME_LONG)?;
+        optional(self.about.as_deref(), ABOUT, ABOUT_LONG)
+    }
+
     pub fn label(&self) -> String {
         let mut parts = Vec::new();
         if let Some(role) = &self.role {
@@ -165,14 +174,18 @@ impl People {
 
     /// Adds a profile; a handle can only be used once.
     pub fn add(&mut self, mut person: Person) -> Result<()> {
-        person.handle =
-            normalize_handle(&person.handle).context("a handle needs letters or digits")?;
+        person.handle = normalize_handle(&person.handle)
+            .ok_or_else(|| crate::limits::invalid(crate::limits::HANDLE_BAD))?;
         if self.get(&person.handle).is_some() {
-            bail!("@{} is already in your people", person.handle);
+            return Err(crate::limits::invalid(format!(
+                "@{} is already in your people.",
+                person.handle
+            )));
         }
         if person.name.trim().is_empty() {
             person.name = person.handle.clone();
         }
+        person.check()?;
         self.people.push(person);
         self.people.sort_by(|a, b| a.handle.cmp(&b.handle));
         Ok(())

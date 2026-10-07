@@ -514,6 +514,18 @@ mod tests {
         key(&mut app, KeyCode::Esc);
         assert_eq!(app.composer_text(), "");
 
+        // The same rule and message as in the browser.
+        app.submit(&format!(
+            "/note @ada {}",
+            "x".repeat(crate::limits::TEXT + 1)
+        ));
+        let printed: Vec<String> = app.out.iter().map(markdown::plain).collect();
+        assert!(
+            printed.iter().any(|l| l.contains(crate::limits::NOTE_LONG)),
+            "{printed:?}"
+        );
+        assert!(app.session.notes().unwrap().is_empty());
+
         app.submit("/note @ada 1:1 Talked about her first on-call week");
         let notes = app.session.notes().unwrap();
         assert_eq!((notes.len(), notes[0].kind), (1, NoteKind::OneOnOne));
