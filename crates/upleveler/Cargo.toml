@@ -6,6 +6,8 @@ edition.workspace = true
 description = "Level up against your own career ladder: a local-first work log and promotion coach for software developers"
 license.workspace = true
 repository.workspace = true
+# Shipped as release binaries and installed from source, not from crates.io.
+publish = false
 
 [features]
 default = ["server"]

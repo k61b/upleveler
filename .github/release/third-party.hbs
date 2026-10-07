@@ -1,0 +1,17 @@
+Third-party licenses for Upleveler
+
+Upleveler (AGPL-3.0, see LICENSE) is built with the open source Rust crates
+listed below. Each license is followed by the crates it applies to. The bundled
+Manrope font is under the SIL Open Font License, in LICENSE-Manrope-OFL.txt.
+{{#each licenses}}
+
+================================================================================
+{{{name}}} ({{id}})
+
+Used by:
+{{#each used_by}}
+  - {{crate.name}} {{crate.version}}{{#if crate.repository}} ({{{crate.repository}}}){{/if}}
+{{/each}}
+
+{{{text}}}
+{{/each}}

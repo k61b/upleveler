@@ -51,12 +51,26 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y musl-tools
       - run: cargo build --release --locked -p upleveler --target ${{ matrix.target }}
 
+      # License notices for everything the binary ships: the Rust crates
+      # (rendered by cargo-about) and the bundled Manrope font (SIL OFL).
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-about
+      - name: Third-party notices
+        shell: bash
+        run: |
+          mkdir -p notices
+          cargo about generate --locked -c .github/release/about.toml \
+            --manifest-path crates/upleveler/Cargo.toml \
+            .github/release/third-party.hbs -o notices/THIRD-PARTY-LICENSES.txt
+          cp crates/upleveler/src/web/assets/fonts/OFL.txt notices/LICENSE-Manrope-OFL.txt
+
       - name: Package (macOS, Linux)
         if: runner.os != 'Windows'
         run: |
           name="upleveler-${{ matrix.target }}"
           mkdir -p "dist/$name"
-          cp "target/${{ matrix.target }}/release/upleveler" LICENSE README.md "dist/$name/"
+          cp "target/${{ matrix.target }}/release/upleveler" LICENSE README.md notices/* "dist/$name/"
           tar -czf "dist/$name.tar.gz" -C "dist/$name" .
           "dist/$name/upleveler" --version || true
       - name: Package (Windows)
@@ -65,7 +79,7 @@ jobs:
         run: |
           $name = "upleveler-${{ matrix.target }}"
           New-Item -ItemType Directory -Force "dist/$name" | Out-Null
-          Copy-Item "target/${{ matrix.target }}/release/upleveler.exe", LICENSE, README.md "dist/$name/"
+          Copy-Item "target/${{ matrix.target }}/release/upleveler.exe", LICENSE, README.md, notices/* "dist/$name/"
           Compress-Archive -Path "dist/$name/*" -DestinationPath "dist/$name.zip"
           & "dist/$name/upleveler.exe" --version
 
@@ -124,6 +138,8 @@ jobs:
             echo '```'
             echo
             echo "Windows: download \`upleveler-x86_64-pc-windows-msvc.zip\` below and put \`upleveler.exe\` on your PATH."
+            echo
+            echo "The binaries are not code-signed. The install script avoids the macOS download warning; if you download a macOS archive in a browser instead, run \`xattr -d com.apple.quarantine upleveler\` once. Windows may ask for confirmation (SmartScreen)."
             echo
             echo "From source (Rust 1.82+):"
             echo
