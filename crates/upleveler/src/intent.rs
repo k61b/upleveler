@@ -1,8 +1,10 @@
-//! Deciding whether free text typed into the TUI is a log entry or a question.
+//! Deciding what free text typed into the TUI is: a log entry, a note about a
+//! person, a check-in on a goal, or a question.
 
 use crate::dates::date_prefix;
 use crate::llm::{complete_json, Llm, Message};
-use crate::prompts;
+use crate::people::{normalize_handle, NoteKind};
+use crate::prompts::{self, render};
 use chrono::{Duration, NaiveDate};
 use serde::Deserialize;
 
@@ -14,9 +16,54 @@ pub enum Intent {
         text: String,
         tags: Vec<String>,
     },
+    /// Save a note about a known person.
+    Note {
+        person: String,
+        kind: NoteKind,
+        date: NaiveDate,
+        text: String,
+    },
+    /// Record progress on an active goal.
+    Checkin {
+        goal: u32,
+        date: NaiveDate,
+        text: String,
+    },
     Ask(String),
     /// The model could not tell, or no model was reachable: ask the user.
     Unclear,
+}
+
+/// Who and what the model may route a message to: known people (handle and
+/// how to describe them) and active goals.
+#[derive(Debug, Clone, Default)]
+pub struct RouteContext {
+    pub people: Vec<(String, String)>,
+    pub goals: Vec<(u32, String)>,
+}
+
+impl RouteContext {
+    fn people_list(&self) -> String {
+        if self.people.is_empty() {
+            return "(none)".into();
+        }
+        self.people
+            .iter()
+            .map(|(h, label)| format!("- {h}: {label}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    fn goals_list(&self) -> String {
+        if self.goals.is_empty() {
+            return "(none)".into();
+        }
+        self.goals
+            .iter()
+            .map(|(id, text)| format!("- {id}: {text}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
 }
 
 const QUESTION_STARTS: &[&str] = &[
@@ -137,10 +184,18 @@ struct Route {
     intent: String,
     #[serde(default)]
     tags: Vec<String>,
+    #[serde(default)]
+    person: String,
+    #[serde(default)]
+    kind: String,
+    #[serde(default)]
+    goal: u32,
 }
 
-/// Decides what to do with free text. Obvious questions skip the model.
-pub fn classify(text: &str, llm: Option<&dyn Llm>, today: NaiveDate) -> Intent {
+/// Decides what to do with free text. Obvious questions skip the model. A note
+/// or check-in the model names for someone or something not in `ctx` is unclear
+/// rather than guessed.
+pub fn classify(text: &str, llm: Option<&dyn Llm>, today: NaiveDate, ctx: &RouteContext) -> Intent {
     let text = text.trim();
     if looks_like_question(text) {
         return Intent::Ask(text.to_string());
@@ -148,17 +203,40 @@ pub fn classify(text: &str, llm: Option<&dyn Llm>, today: NaiveDate) -> Intent {
     let Some(llm) = llm else {
         return Intent::Unclear;
     };
-    let messages = vec![Message::system(prompts::ROUTE), Message::user(text)];
-    match complete_json::<Route>(llm, messages) {
-        Ok(r) if r.intent.eq_ignore_ascii_case("log") => {
-            let (date, text) = split_date(text, today);
-            Intent::Log {
-                date,
-                text,
-                tags: r.tags.into_iter().take(3).collect(),
+    let system = render(
+        prompts::ROUTE,
+        &[("people", &ctx.people_list()), ("goals", &ctx.goals_list())],
+    );
+    let messages = vec![Message::system(system), Message::user(text)];
+    let Ok(r) = complete_json::<Route>(llm, messages) else {
+        return Intent::Unclear;
+    };
+    let (date, rest) = split_date(text, today);
+    match r.intent.to_lowercase().as_str() {
+        "log" => Intent::Log {
+            date,
+            text: rest,
+            tags: r.tags.into_iter().take(3).collect(),
+        },
+        "note" => {
+            let person = normalize_handle(&r.person)
+                .filter(|h| ctx.people.iter().any(|(known, _)| known == h));
+            match person {
+                Some(person) => Intent::Note {
+                    person,
+                    kind: NoteKind::parse(&r.kind).unwrap_or_default(),
+                    date,
+                    text: rest,
+                },
+                None => Intent::Unclear,
             }
         }
-        Ok(r) if r.intent.eq_ignore_ascii_case("ask") => Intent::Ask(text.to_string()),
+        "checkin" if ctx.goals.iter().any(|(id, _)| *id == r.goal) => Intent::Checkin {
+            goal: r.goal,
+            date,
+            text: rest,
+        },
+        "ask" => Intent::Ask(text.to_string()),
         _ => Intent::Unclear,
     }
 }
@@ -216,7 +294,12 @@ mod tests {
             reply: |_: &[Message], _| r#"{"intent":"log","tags":["bugfix"]}"#.into(),
         };
         assert_eq!(
-            classify("dün PAY-412'yi bitirdim", Some(&log), t),
+            classify(
+                "dün PAY-412'yi bitirdim",
+                Some(&log),
+                t,
+                &RouteContext::default()
+            ),
             Intent::Log {
                 date: d(10, 4),
                 text: "PAY-412'yi bitirdim".into(),
@@ -225,13 +308,81 @@ mod tests {
         );
         // Obvious questions never reach the model.
         assert_eq!(
-            classify("ne yaptım?", Some(&log), t),
+            classify("ne yaptım?", Some(&log), t, &RouteContext::default()),
             Intent::Ask("ne yaptım?".into())
         );
         let broken = FakeLlm {
             reply: |_: &[Message], _| "nope".into(),
         };
-        assert_eq!(classify("hmm", Some(&broken), t), Intent::Unclear);
-        assert_eq!(classify("hmm", None, t), Intent::Unclear);
+        let none = RouteContext::default();
+        assert_eq!(classify("hmm", Some(&broken), t, &none), Intent::Unclear);
+        assert_eq!(classify("hmm", None, t, &none), Intent::Unclear);
+    }
+
+    #[test]
+    fn notes_and_checkins_only_for_known_people_and_goals() {
+        let t = d(10, 5);
+        let ctx = RouteContext {
+            people: vec![("ada".into(), "Ada (junior developer, mentee)".into())],
+            goals: vec![(2, "Speak at a meetup".into())],
+        };
+        let note = FakeLlm {
+            reply: |m: &[Message], _| {
+                assert!(m[0]
+                    .content
+                    .contains("- ada: Ada (junior developer, mentee)"));
+                assert!(m[0].content.contains("- 2: Speak at a meetup"));
+                r#"{"intent":"note","person":"@Ada","kind":"one-on-one"}"#.into()
+            },
+        };
+        assert_eq!(
+            classify(
+                "dün @ada ile 1:1: kariyer hedeflerini konuştuk",
+                Some(&note),
+                t,
+                &ctx
+            ),
+            Intent::Note {
+                person: "ada".into(),
+                kind: NoteKind::OneOnOne,
+                date: d(10, 4),
+                text: "@ada ile 1:1: kariyer hedeflerini konuştuk".into()
+            }
+        );
+        let stranger = FakeLlm {
+            reply: |_: &[Message], _| r#"{"intent":"note","person":"bo","kind":"note"}"#.into(),
+        };
+        assert_eq!(
+            classify("@bo seemed tired", Some(&stranger), t, &ctx),
+            Intent::Unclear
+        );
+        let checkin = FakeLlm {
+            reply: |_: &[Message], _| r#"{"intent":"checkin","goal":2}"#.into(),
+        };
+        assert_eq!(
+            classify("Sent the talk proposal", Some(&checkin), t, &ctx),
+            Intent::Checkin {
+                goal: 2,
+                date: t,
+                text: "Sent the talk proposal".into()
+            }
+        );
+        let unknown_goal = FakeLlm {
+            reply: |_: &[Message], _| r#"{"intent":"checkin","goal":9}"#.into(),
+        };
+        assert_eq!(
+            classify("Progress", Some(&unknown_goal), t, &ctx),
+            Intent::Unclear
+        );
+        let empty = FakeLlm {
+            reply: |m: &[Message], _| {
+                assert!(m[0].content.contains("(none)"));
+                r#"{"intent":"log","tags":[]}"#.into()
+            },
+        };
+        assert!(matches!(
+            classify("Fixed it", Some(&empty), t, &RouteContext::default()),
+            Intent::Log { .. }
+        ));
     }
 }

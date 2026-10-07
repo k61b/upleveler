@@ -397,6 +397,155 @@ pub fn truncate(s: &str, max: usize) -> String {
     out
 }
 
+/// The people you work with: handle, who they are, note counts.
+pub fn people(people: &crate::people::People, notes: &[crate::people::Note], width: u16) -> Lines {
+    if people.people.is_empty() {
+        return info(
+            "No people yet. Mention someone as @handle and add them: upleveler person add ada --name \"Ada\" --relation mentee",
+            width,
+        );
+    }
+    let mut out = Vec::new();
+    for p in &people.people {
+        let count = notes.iter().filter(|n| n.person == p.handle).count();
+        let open = notes
+            .iter()
+            .filter(|n| n.person == p.handle && n.is_open_follow_up())
+            .count();
+        let mut meta = format!("{count} {}", if count == 1 { "note" } else { "notes" });
+        if open > 0 {
+            meta.push_str(&format!(
+                " · {open} open follow-up{}",
+                if open == 1 { "" } else { "s" }
+            ));
+        }
+        out.push(Line::from(vec![
+            Span::styled(format!("  @{:<12} ", p.handle), theme::accent()),
+            Span::raw(p.label()),
+            Span::styled(format!("  {meta}"), theme::dim()),
+        ]));
+    }
+    out.push(Line::default());
+    out
+}
+
+/// Notes as `date [kind] text`, newest first.
+pub fn notes(notes: &[&crate::people::Note], show_person: bool, width: u16) -> Lines {
+    let mut out = Vec::new();
+    for n in notes.iter().rev() {
+        let who = if show_person {
+            format!("@{} ", n.person)
+        } else {
+            String::new()
+        };
+        let lead = Span::styled(format!("  {} ", n.date), theme::accent());
+        let mut spans = vec![Span::styled(
+            format!("{who}[{}] ", n.kind.label()),
+            theme::dim(),
+        )];
+        spans.push(Span::raw(n.text.replace('\n', " / ")));
+        if n.kind == crate::people::NoteKind::FollowUp && n.done {
+            spans.push(Span::styled(" (done)", theme::dim()));
+        }
+        out.extend(wrap(
+            &spans,
+            width as usize,
+            &lead,
+            &Span::raw("             "),
+        ));
+    }
+    out.push(Line::default());
+    out
+}
+
+/// Someone's profile, your notes about them and the entries that mention them.
+pub fn person(
+    p: &crate::people::Person,
+    notes_about: &[&crate::people::Note],
+    mentioned: &[&Entry],
+    width: u16,
+) -> Lines {
+    let mut out = vec![Line::from(vec![
+        Span::styled(format!("  @{} ", p.handle), theme::accent_bold()),
+        Span::styled(p.label(), theme::bold()),
+    ])];
+    for (label, value) in [("team", p.team.as_deref()), ("about", p.about.as_deref())] {
+        if let Some(value) = value {
+            out.push(Line::from(vec![
+                Span::styled(format!("  {label:<6} "), theme::dim()),
+                Span::raw(value.to_string()),
+            ]));
+        }
+    }
+    out.push(Line::default());
+    out.push(Line::styled(
+        format!("  Notes ({})", notes_about.len()),
+        theme::bold(),
+    ));
+    out.extend(notes(notes_about, false, width));
+    out.push(Line::styled(
+        format!("  Entries that mention @{} ({})", p.handle, mentioned.len()),
+        theme::bold(),
+    ));
+    let recent: Vec<&Entry> = mentioned.iter().rev().take(10).rev().copied().collect();
+    out.extend(entries(&recent, width));
+    out
+}
+
+/// Goals with their progress: rating, entries, check-ins, due date.
+pub fn goals(
+    goals: &[&crate::goals::Goal],
+    all_entries: &[Entry],
+    gap: Option<&GapSummary>,
+    width: u16,
+) -> Lines {
+    if goals.is_empty() {
+        return info("No goals yet. Add one: /goal Speak at a meetup", width);
+    }
+    let mut out = Vec::new();
+    for g in goals {
+        let p = crate::goals::progress(g, all_entries, gap);
+        let mut facts = Vec::new();
+        if let Some(rating) = &p.rating {
+            facts.push(format!("{} {rating}", icon(rating)));
+        }
+        if g.expectation.is_some() || p.tagged > 0 {
+            let n = p.evidence + p.tagged;
+            facts.push(format!("{n} {}", if n == 1 { "entry" } else { "entries" }));
+        }
+        if p.checkins > 0 {
+            facts.push(format!(
+                "{} check-in{}",
+                p.checkins,
+                if p.checkins == 1 { "" } else { "s" }
+            ));
+        }
+        let lead = Span::styled(format!("  #{:<3}", g.id), theme::accent());
+        let mut spans = vec![Span::raw(g.text.clone())];
+        if let Some(exp) = &g.expectation {
+            spans.push(Span::styled(format!(" [{exp}]"), theme::dim()));
+        }
+        if let Some(due) = g.due {
+            spans.push(Span::styled(format!(" due {due}"), theme::dim()));
+        }
+        if g.status != crate::goals::GoalStatus::Active {
+            spans.push(Span::styled(
+                format!(" ({})", g.status.as_str()),
+                theme::dim(),
+            ));
+        }
+        if !facts.is_empty() {
+            spans.push(Span::styled(
+                format!("  · {}", facts.join(" · ")),
+                theme::dim(),
+            ));
+        }
+        out.extend(wrap(&spans, width as usize, &lead, &Span::raw("      ")));
+    }
+    out.push(Line::default());
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -33,37 +33,54 @@ fn panel_lines(app: &App, width: u16) -> Vec<Line<'static>> {
                 }
                 lines.push(Line::default());
                 lines.push(Line::styled("Keys", theme::accent_bold()));
-                for (k, what) in [
-                    ("enter", "send · shift/alt+enter or ctrl+j for a new line"),
-                    ("↑ ↓", "previous inputs · move in lists"),
-                    ("tab", "complete a command or @file"),
-                    ("esc", "close · stop the running task · clear"),
-                    ("ctrl+c ×2", "exit"),
+                for row in [
+                    [
+                        ("enter", "send"),
+                        ("shift+enter", "new line"),
+                        ("↑ ↓", "history, lists"),
+                    ],
+                    [
+                        ("tab", "complete /, @person, @file"),
+                        ("esc", "close, stop, clear"),
+                        ("ctrl+c ×2", "exit"),
+                    ],
                 ] {
-                    lines.push(Line::from(vec![
-                        Span::styled(format!("  {k:<11}"), theme::accent()),
-                        Span::raw(what),
-                    ]));
+                    let mut spans = vec![Span::raw("  ")];
+                    for (k, what) in row {
+                        spans.push(Span::styled(format!("{k} "), theme::accent()));
+                        spans.push(Span::raw(format!("{what}   ")));
+                    }
+                    lines.push(Line::from(fit(spans, w)));
                 }
                 lines.push(Line::styled("  press any key to close", theme::dim()));
             }
             Panel::Choice(text) => {
-                lines.push(Line::styled(
-                    "Should I log this, or answer it?",
-                    theme::bold(),
-                ));
+                let person = app.mentioned_person(text);
+                let title = if person.is_some() {
+                    "Should I log this, note it about them, or answer it?"
+                } else {
+                    "Should I log this, or answer it?"
+                };
+                lines.push(Line::styled(title, theme::bold()));
                 lines.push(Line::styled(
                     format!("  “{}”", truncate(text, w.saturating_sub(4))),
                     theme::dim(),
                 ));
-                lines.push(Line::from(vec![
+                let mut keys = vec![
                     Span::styled("  [l]", theme::accent_bold()),
                     Span::raw(" log it   "),
+                ];
+                if let Some(person) = person {
+                    keys.push(Span::styled("[n]", theme::accent_bold()));
+                    keys.push(Span::raw(format!(" note about @{person}   ")));
+                }
+                keys.extend([
                     Span::styled("[a]", theme::accent_bold()),
                     Span::raw(" ask   "),
                     Span::styled("[esc]", theme::dim()),
                     Span::styled(" cancel", theme::dim()),
-                ]));
+                ]);
+                lines.push(Line::from(keys));
             }
             Panel::Select {
                 title,
@@ -232,6 +249,23 @@ fn panel_lines(app: &App, width: u16) -> Vec<Line<'static>> {
                         ],
                         w,
                     )));
+                }
+            }
+            Popup::People(list) => {
+                for (i, (handle, label)) in list.iter().enumerate() {
+                    let on = i == selected % list.len();
+                    lines.push(Line::from(vec![
+                        Span::styled(if on { "❯ " } else { "  " }, theme::accent()),
+                        Span::styled(
+                            format!("@{handle:<14}"),
+                            if on {
+                                theme::accent_bold()
+                            } else {
+                                theme::accent()
+                            },
+                        ),
+                        Span::styled(label.clone(), theme::dim()),
+                    ]));
                 }
             }
             Popup::Files(list) => {
@@ -452,6 +486,71 @@ mod tests {
 
     fn key(app: &mut App, code: KeyCode) {
         app.on_key(KeyEvent::new(code, KeyModifiers::NONE));
+    }
+
+    #[test]
+    fn people_notes_goals_and_mentions() {
+        use crate::people::{NoteKind, Person, Relation};
+        let (mut app, _dir) = app();
+        app.session
+            .add_person(Person {
+                handle: "ada".into(),
+                name: "Ada".into(),
+                role: Some("Junior developer".into()),
+                team: None,
+                relation: Relation::Mentee,
+                about: None,
+                since: None,
+            })
+            .unwrap();
+
+        // @ completes people outside file commands.
+        for c in "Paired with @a".chars() {
+            key(&mut app, KeyCode::Char(c));
+        }
+        assert!(render(&app).contains("@ada"), "people popup");
+        key(&mut app, KeyCode::Tab);
+        assert_eq!(app.composer_text(), "Paired with @ada ");
+        key(&mut app, KeyCode::Esc);
+        assert_eq!(app.composer_text(), "");
+
+        app.submit("/note @ada 1:1 Talked about her first on-call week");
+        let notes = app.session.notes().unwrap();
+        assert_eq!((notes.len(), notes[0].kind), (1, NoteKind::OneOnOne));
+        assert_eq!(notes[0].text, "Talked about her first on-call week");
+        app.submit("/undo");
+        assert!(app.session.notes().unwrap().is_empty());
+
+        app.submit("/goal Speak at a meetup");
+        app.submit("/checkin 1 Sent the proposal");
+        assert_eq!(
+            app.session.goals().unwrap().get(1).unwrap().checkins.len(),
+            1
+        );
+        app.submit("/undo");
+        assert!(app
+            .session
+            .goals()
+            .unwrap()
+            .get(1)
+            .unwrap()
+            .checkins
+            .is_empty());
+
+        // Unclear text that mentions someone offers a note about them.
+        app.panel = Some(Panel::Choice("@ada seemed unsure about the rollout".into()));
+        assert!(render(&app).contains("note about @ada"));
+        key(&mut app, KeyCode::Char('n'));
+        assert_eq!(app.session.notes().unwrap()[0].person, "ada");
+
+        app.submit("/people @ada");
+        let printed: Vec<String> = app.out.iter().map(markdown::plain).collect();
+        assert!(
+            printed
+                .iter()
+                .any(|l| l.contains("Ada (Junior developer, mentee)")),
+            "{printed:?}"
+        );
     }
 
     #[test]

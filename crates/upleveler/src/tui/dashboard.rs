@@ -38,6 +38,8 @@ pub struct Dashboard {
     report_scroll: u16,
     report_cache: Option<(usize, u16, Vec<Line<'static>>)>,
     today: NaiveDate,
+    /// Active goals: how many, and the nearest due date.
+    goals: (usize, Option<NaiveDate>),
 }
 
 impl Dashboard {
@@ -74,6 +76,9 @@ impl Dashboard {
             report_scroll: 0,
             report_cache: None,
             today: today(),
+            goals: session.goals().map_or((0, None), |g| {
+                (g.active().count(), g.active().filter_map(|x| x.due).min())
+            }),
         }
     }
 
@@ -344,6 +349,14 @@ impl Dashboard {
             stat(
                 "streak",
                 format!("{} days 🔥", streak(&self.days, self.today)),
+            ),
+            stat(
+                "goals",
+                match self.goals {
+                    (0, _) => "none · /goal to add one".to_string(),
+                    (n, Some(due)) => format!("{n} active · next due {due}"),
+                    (n, None) => format!("{n} active"),
+                },
             ),
             stat(
                 "last entry",

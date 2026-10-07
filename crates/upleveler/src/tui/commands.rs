@@ -77,6 +77,42 @@ pub const COMMANDS: &[Command] = &[
         runs_bare: true,
     },
     Command {
+        name: "note",
+        args: "@person [1:1|given|received|followup] <text>",
+        help: "save a note about someone",
+        runs_bare: false,
+    },
+    Command {
+        name: "notes",
+        args: "[@person]",
+        help: "open follow-ups, or your notes about someone",
+        runs_bare: true,
+    },
+    Command {
+        name: "people",
+        args: "[@person]",
+        help: "the people you work with, or one of them",
+        runs_bare: true,
+    },
+    Command {
+        name: "goals",
+        args: "[all]",
+        help: "your goals and their progress",
+        runs_bare: true,
+    },
+    Command {
+        name: "goal",
+        args: "<text> | done <id> | drop <id>",
+        help: "add a goal, or mark one done or dropped",
+        runs_bare: false,
+    },
+    Command {
+        name: "checkin",
+        args: "<id> <text>",
+        help: "note progress on a goal",
+        runs_bare: false,
+    },
+    Command {
         name: "dashboard",
         args: "",
         help: "progress, activity heatmap, logs and reports",

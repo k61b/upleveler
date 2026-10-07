@@ -186,6 +186,22 @@ impl Goals {
         Ok(goal)
     }
 
+    /// Removes a check-in (the newest one matching `date` and `text`); false if none matched.
+    pub fn remove_checkin(&mut self, id: u32, date: NaiveDate, text: &str) -> Result<bool> {
+        let goal = self.get_mut(id)?;
+        match goal
+            .checkins
+            .iter()
+            .rposition(|c| c.date == date && c.text == text.trim())
+        {
+            Some(pos) => {
+                goal.checkins.remove(pos);
+                Ok(true)
+            }
+            None => Ok(false),
+        }
+    }
+
     pub fn checkin(&mut self, id: u32, date: NaiveDate, text: &str) -> Result<&Goal> {
         let text = text.trim();
         if text.is_empty() {

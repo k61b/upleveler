@@ -11,8 +11,10 @@ use crate::export::Format;
 use crate::intent::{self, Intent};
 use crate::ladder::Ladder;
 use crate::llm::Message;
+use crate::people::NoteKind;
 use crate::session::{today, ImportPreview, Session, Status};
 use crate::store::Filter;
+use chrono::NaiveDate;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::style::Style;
 use std::path::PathBuf;
@@ -100,6 +102,17 @@ pub enum Panel {
     },
 }
 
+/// Something saved in this session that `/undo` can take back.
+enum Undo {
+    Entry(String),
+    Note(String),
+    Checkin {
+        goal: u32,
+        date: NaiveDate,
+        text: String,
+    },
+}
+
 pub struct RunningJob {
     pub label: String,
     pub started: Instant,
@@ -112,6 +125,8 @@ pub struct RunningJob {
 pub enum Popup {
     Commands(Vec<&'static commands::Command>),
     Files(Vec<complete::Candidate>),
+    /// People for an `@mention`: (handle, label).
+    People(Vec<(String, String)>),
 }
 
 pub struct App {
@@ -135,7 +150,8 @@ pub struct App {
     rx: Receiver<Event>,
     last_ctrl_c: Option<Instant>,
     chat: Vec<Message>,
-    logged: Vec<String>,
+    /// What this session saved, newest last, for `/undo`.
+    logged: Vec<Undo>,
     wizard: bool,
     /// The link of the dashboard `/web` started, so a second `/web` reuses it.
     #[cfg(feature = "server")]
@@ -266,6 +282,16 @@ impl App {
                 return (!list.is_empty()).then_some(Popup::Commands(list));
             }
         }
+        if let Some(typed) = complete::mention(&text) {
+            let people = self.session.people().unwrap_or_default();
+            let typed = typed.to_lowercase();
+            let list: Vec<_> = complete::people(&typed, &people, 8)
+                .into_iter()
+                // A handle typed in full needs no popup.
+                .filter(|(handle, _)| *handle != typed)
+                .collect();
+            return (!list.is_empty()).then_some(Popup::People(list));
+        }
         let token = complete::token(&text)?;
         let base = std::env::current_dir().unwrap_or_default();
         let list: Vec<_> = complete::candidates(token, &base, 8)
@@ -302,6 +328,7 @@ impl App {
                 let len = match &popup {
                     Some(Popup::Commands(l)) => l.len(),
                     Some(Popup::Files(l)) => l.len(),
+                    Some(Popup::People(l)) => l.len(),
                     None => 1,
                 };
                 self.popup_index = if key.code == KeyCode::Up {
@@ -323,7 +350,7 @@ impl App {
                 if let Some(Popup::Commands(_)) = &popup {
                     return self.accept_popup(popup.as_ref(), true);
                 }
-                if let Some(Popup::Files(_)) = &popup {
+                if let Some(Popup::Files(_) | Popup::People(_)) = &popup {
                     return self.accept_popup(popup.as_ref(), false);
                 }
                 let text = self.composer_text();
@@ -429,6 +456,14 @@ impl App {
                     self.set_composer(&text);
                 }
             }
+            Some(Popup::People(list)) => {
+                if let Some((handle, _)) =
+                    list.get(self.popup_index.min(list.len().saturating_sub(1)))
+                {
+                    let text = complete::apply_mention(&self.composer_text(), handle);
+                    self.set_composer(&text);
+                }
+            }
             None => {}
         }
     }
@@ -477,7 +512,7 @@ impl App {
         let (date, text) = intent::split_date(text, today());
         match self.session.add_log(&text, date, tags) {
             Ok(Some(e)) => {
-                self.logged.push(e.id.clone());
+                self.logged.push(Undo::Entry(e.id.clone()));
                 let when = if e.date == today() {
                     String::new()
                 } else {
@@ -591,6 +626,28 @@ impl App {
             "levels" => self.level_picker(),
             "list" => self.list(args),
             "undo" => self.undo(),
+            "note" => self.note_command(args),
+            "notes" => self.notes_command(args),
+            "people" if !args.is_empty() => self.person_command(args),
+            "people" => match (self.session.people(), self.session.notes()) {
+                (Ok(people), Ok(notes)) => {
+                    let lines = history::people(&people, &notes, self.width);
+                    self.print(lines);
+                }
+                (Err(e), _) | (_, Err(e)) => self.error(&format!("{e:#}")),
+            },
+            "goals" => self.goals_command(args == "all"),
+            "goal" => self.goal_command(args),
+            "checkin" => {
+                let (id, text) = args.split_once(char::is_whitespace).unwrap_or((args, ""));
+                match id.trim_start_matches('#').parse::<u32>() {
+                    Ok(id) if !text.trim().is_empty() => {
+                        let (date, text) = intent::split_date(text, today());
+                        self.checkin(id, date, &text);
+                    }
+                    _ => self.info("Usage: /checkin <goal id> <what you did>  (see /goals)"),
+                }
+            }
             "dashboard" => self.request = Some(Request::Dashboard(Tab::Overview)),
             "reports" => self.request = Some(Request::Dashboard(Tab::Reports)),
             "web" => self.web(),
@@ -695,17 +752,200 @@ impl App {
     }
 
     fn undo(&mut self) {
-        let Some(id) = self.logged.pop() else {
+        let Some(last) = self.logged.pop() else {
             return self.info("Nothing to undo in this session.");
         };
-        match self.session.remove_entry(&id) {
-            Ok(Some(e)) => {
-                self.success(&format!("Removed: {}", e.text));
+        let result = match last {
+            Undo::Entry(id) => self
+                .session
+                .remove_entry(&id)
+                .map(|e| e.map(|e| format!("Removed: {}", e.text))),
+            Undo::Note(id) => self
+                .session
+                .remove_note(&id)
+                .map(|n| n.map(|n| format!("Removed the note about @{}: {}", n.person, n.text))),
+            Undo::Checkin { goal, date, text } => self
+                .session
+                .remove_checkin(goal, date, &text)
+                .map(|done| done.then(|| format!("Removed the check-in on goal #{goal}: {text}"))),
+        };
+        match result {
+            Ok(Some(message)) => {
+                self.success(&message);
                 self.refresh_status();
             }
-            Ok(None) => self.info("That entry was already gone."),
+            Ok(None) => self.info("That was already gone."),
             Err(e) => self.error(&format!("{e:#}")),
         }
+    }
+
+    fn note(&mut self, person: &str, kind: NoteKind, date: NaiveDate, text: &str) {
+        match self.session.add_note(person, kind, date, text) {
+            Ok(Some(n)) => {
+                self.logged.push(Undo::Note(n.id.clone()));
+                let when = if n.date == today() {
+                    String::new()
+                } else {
+                    format!(", {}", n.date)
+                };
+                self.success(&format!(
+                    "Noted for @{} ({}{when}): {}  (/undo to remove)",
+                    n.person,
+                    n.kind.label(),
+                    n.text
+                ));
+            }
+            Ok(None) => self.info("That note is already there."),
+            Err(e) => self.error(&format!("{e:#}")),
+        }
+    }
+
+    fn checkin(&mut self, goal: u32, date: NaiveDate, text: &str) {
+        match self.session.add_checkin(goal, date, text) {
+            Ok(g) => {
+                self.logged.push(Undo::Checkin {
+                    goal,
+                    date,
+                    text: text.trim().to_string(),
+                });
+                self.success(&format!(
+                    "Checked in on goal #{}: {}  (/undo to remove)",
+                    g.id, g.text
+                ));
+            }
+            Err(e) => self.error(&format!("{e:#}")),
+        }
+    }
+
+    /// `/note @ada [kind] text`: the kind word is optional.
+    fn note_command(&mut self, args: &str) {
+        let usage = "Usage: /note @person [1:1|given|received|followup] <text>";
+        let (who, rest) = args.split_once(char::is_whitespace).unwrap_or((args, ""));
+        if who.is_empty() || rest.trim().is_empty() {
+            return self.info(usage);
+        }
+        let (first, after) = rest
+            .trim()
+            .split_once(char::is_whitespace)
+            .unwrap_or((rest.trim(), ""));
+        let alias = match first.to_lowercase().as_str() {
+            "1:1" | "1on1" | "one-on-one" => Some(NoteKind::OneOnOne),
+            "given" | "feedback-given" => Some(NoteKind::FeedbackGiven),
+            "received" | "feedback-received" => Some(NoteKind::FeedbackReceived),
+            "followup" | "follow-up" | "todo" => Some(NoteKind::FollowUp),
+            "note" => Some(NoteKind::Note),
+            _ => None,
+        };
+        let (kind, text) = match alias {
+            Some(kind) if !after.trim().is_empty() => (kind, after),
+            _ => (NoteKind::Note, rest),
+        };
+        let (date, text) = intent::split_date(text, today());
+        self.note(who, kind, date, &text);
+    }
+
+    fn notes_command(&mut self, args: &str) {
+        let notes = match self.session.notes() {
+            Ok(n) => n,
+            Err(e) => return self.error(&format!("{e:#}")),
+        };
+        if args.trim().is_empty() {
+            let open: Vec<_> = notes.iter().filter(|n| n.is_open_follow_up()).collect();
+            if open.is_empty() {
+                return self.info("No open follow-ups. Add one: /note @person followup <text>");
+            }
+            let lines = history::notes(&open, true, self.width);
+            return self.print(lines);
+        }
+        let people = self.session.people().unwrap_or_default();
+        match people.get(args.trim()) {
+            Some(p) => {
+                let about: Vec<_> = notes.iter().filter(|n| n.person == p.handle).collect();
+                let lines = history::notes(&about, false, self.width);
+                self.print(lines);
+            }
+            None => self.info(&format!("{} is not in your people (/people).", args.trim())),
+        }
+    }
+
+    fn person_command(&mut self, args: &str) {
+        let people = match self.session.people() {
+            Ok(p) => p,
+            Err(e) => return self.error(&format!("{e:#}")),
+        };
+        let Some(p) = people.get(args.trim()) else {
+            return self.info(&format!(
+                "{} is not in your people (see /people).",
+                args.trim()
+            ));
+        };
+        let notes = self.session.notes().unwrap_or_default();
+        let about: Vec<_> = notes.iter().filter(|n| n.person == p.handle).collect();
+        let entries = self.session.entries().unwrap_or_default();
+        let mentioned: Vec<_> = entries
+            .iter()
+            .filter(|e| e.mentions().contains(&p.handle))
+            .collect();
+        let lines = history::person(p, &about, &mentioned, self.width);
+        self.print(lines);
+    }
+
+    fn goals_command(&mut self, all: bool) {
+        let goals = match self.session.goals() {
+            Ok(g) => g,
+            Err(e) => return self.error(&format!("{e:#}")),
+        };
+        let shown: Vec<_> = goals
+            .goals
+            .iter()
+            .filter(|g| all || g.status == crate::goals::GoalStatus::Active)
+            .collect();
+        let entries = self.session.entries().unwrap_or_default();
+        let gap = self.session.latest_gap();
+        let lines = history::goals(&shown, &entries, gap.as_ref(), self.width);
+        self.print(lines);
+    }
+
+    /// `/goal <text>` adds a goal; `/goal done 2` and `/goal drop 2` change one.
+    fn goal_command(&mut self, args: &str) {
+        let (first, rest) = args.split_once(char::is_whitespace).unwrap_or((args, ""));
+        let status = match first {
+            "done" => Some(crate::goals::GoalStatus::Done),
+            "drop" => Some(crate::goals::GoalStatus::Dropped),
+            _ => None,
+        };
+        if let Some(status) = status {
+            return match rest.trim().trim_start_matches('#').parse::<u32>() {
+                Ok(id) => match self.session.set_goal_status(id, status) {
+                    Ok(g) => self.success(&format!(
+                        "Goal #{} is {}: {}",
+                        g.id,
+                        status.as_str(),
+                        g.text
+                    )),
+                    Err(e) => self.error(&format!("{e:#}")),
+                },
+                Err(_) => self.info("Usage: /goal done <id> or /goal drop <id>  (see /goals)"),
+            };
+        }
+        if args.trim().is_empty() {
+            return self.info("Usage: /goal <text>. To tie a goal to a ladder expectation, use upleveler goal add … --expectation <id>.");
+        }
+        match self.session.add_goal(args, None, None) {
+            Ok(g) => self.success(&format!(
+                "Added goal #{}: {}. Check in with /checkin {} <progress>, or tag entries goal-{}.",
+                g.id, g.text, g.id, g.id
+            )),
+            Err(e) => self.error(&format!("{e:#}")),
+        }
+    }
+
+    /// The first known person a text mentions, for the "note about" choice.
+    pub fn mentioned_person(&self, text: &str) -> Option<String> {
+        let people = self.session.people().ok()?;
+        crate::people::mentions(text)
+            .into_iter()
+            .find(|h| people.get(h).is_some())
     }
 
     fn level_picker(&mut self) {
@@ -824,6 +1064,13 @@ impl App {
             Panel::Choice(text) => match key.code {
                 KeyCode::Char('l') | KeyCode::Char('L') => self.log(&text, Vec::new()),
                 KeyCode::Char('a') | KeyCode::Char('A') => self.ask(text),
+                KeyCode::Char('n') | KeyCode::Char('N') => match self.mentioned_person(&text) {
+                    Some(person) => {
+                        let (date, rest) = intent::split_date(&text, today());
+                        self.note(&person, NoteKind::Note, date, &rest);
+                    }
+                    None => self.panel = Some(Panel::Choice(text)),
+                },
                 KeyCode::Esc => {}
                 _ => self.panel = Some(Panel::Choice(text)),
             },
@@ -1269,6 +1516,13 @@ impl App {
                 };
                 self.log(&dated, tags);
             }
+            Output::Routed(Intent::Note {
+                person,
+                kind,
+                date,
+                text,
+            }) => self.note(&person, kind, date, &text),
+            Output::Routed(Intent::Checkin { goal, date, text }) => self.checkin(goal, date, &text),
             Output::Routed(Intent::Ask(q)) => self.ask(q),
             Output::Routed(Intent::Unclear) => {
                 if let Some(text) = self.input_history.last().cloned() {

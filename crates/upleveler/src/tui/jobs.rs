@@ -88,6 +88,20 @@ impl Cancel {
     }
 }
 
+/// The people and active goals the router may send a message to.
+fn route_context(session: &Session) -> intent::RouteContext {
+    let people = session.people().unwrap_or_default();
+    let goals = session.goals().unwrap_or_default();
+    intent::RouteContext {
+        people: people
+            .people
+            .iter()
+            .map(|p| (p.handle.clone(), p.label()))
+            .collect(),
+        goals: goals.active().map(|g| (g.id, g.text.clone())).collect(),
+    }
+}
+
 /// Runs `job` on a new thread; events go to `tx`.
 pub fn spawn(session: Session, job: Job, tx: Sender<Event>, cancel: Cancel) {
     std::thread::spawn(move || {
@@ -111,11 +125,13 @@ fn run(session: &Session, job: Job, tx: &Sender<Event>, cancel: &Cancel) -> Resu
     };
     match job {
         Job::Route(text) => {
-            let llm = session.llm().ok();
+            let llm = session.llm().ok().map(|l| l.with_cancel(cancel.flag()));
+            let ctx = route_context(session);
             Ok(Output::Routed(intent::classify(
                 &text,
                 llm.as_ref().map(|l| l as &dyn Llm),
                 today(),
+                &ctx,
             )))
         }
         Job::Ask { question, history } => {

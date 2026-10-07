@@ -49,7 +49,7 @@ Run `upleveler`. The first time, a short setup asks for the model, the report la
   ○ Mentoring  Mentors junior developers                          0
 ```
 
-**Just type.** Write what you did and it is logged. Ask a question and it is answered from your logs.
+**Just type.** Write what you did and it is logged. Write what you want to remember about someone (`@ada ile 1:1 yaptık, …`) and it becomes a note about them; progress on a goal becomes a check-in. Ask a question and it is answered from your logs. If Upleveler is not sure, it asks.
 
 | Command | What it does |
 |---|---|
@@ -57,9 +57,12 @@ Run `upleveler`. The first time, a short setup asks for the model, the report la
 | `/brag` | Promotion / self-review document |
 | `/summary week` | Summary for a 1:1 |
 | `/import @file` | Import old notes from txt, md, csv or xlsx |
+| `/note @ada 1:1 …` | Note about someone: `1:1`, `given`, `received` or `followup` |
+| `/people [@ada]` | The people you work with, or one of them with your notes and shared work |
+| `/goals`, `/goal …`, `/checkin` | Your goals: list, add (`/goal Speak at a meetup`), finish (`/goal done 2`), record progress |
 | `/dashboard` | Progress, activity heatmap, logs and reports |
 | `/web` | The same dashboard in your browser |
-| `/undo` | Undo the last entry you logged |
+| `/undo` | Undo the last entry, note or check-in |
 
 Type `/` to see all commands and `?` for keyboard shortcuts. Reports are saved in `~/.upleveler/reports/`.
 

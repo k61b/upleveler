@@ -254,6 +254,14 @@ impl Session {
         Ok(goal)
     }
 
+    /// Undoes a check-in; false if it was already gone.
+    pub fn remove_checkin(&self, id: u32, date: NaiveDate, text: &str) -> Result<bool> {
+        let mut goals = self.goals()?;
+        let removed = goals.remove_checkin(id, date, text)?;
+        goals.save(&self.paths.goals)?;
+        Ok(removed)
+    }
+
     pub fn add_checkin(&self, id: u32, date: NaiveDate, text: &str) -> Result<Goal> {
         let mut goals = self.goals()?;
         let goal = goals.checkin(id, date, text)?.clone();

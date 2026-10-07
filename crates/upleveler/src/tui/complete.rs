@@ -1,4 +1,5 @@
-//! File path completion for `@file` arguments.
+//! Completion of `@file` arguments (for the commands that take a file) and of
+//! `@person` mentions (everywhere else).
 
 use std::path::{Path, PathBuf};
 
@@ -9,9 +10,18 @@ pub struct Candidate {
     pub is_dir: bool,
 }
 
-/// The token being completed: the last whitespace-separated word if it starts with
-/// `@`, or the argument of a command that takes a file.
+/// True when `input` is a command whose argument is a file.
+fn file_command(input: &str) -> bool {
+    let t = input.trim_start();
+    t.starts_with("/import ") || t.starts_with("/ladder import ")
+}
+
+/// The file being completed: in a command that takes a file, the last word if it
+/// starts with `@`, or the bare argument.
 pub fn token(input: &str) -> Option<&str> {
+    if !file_command(input) {
+        return None;
+    }
     let last = input.rsplit(char::is_whitespace).next()?;
     if let Some(t) = last.strip_prefix('@') {
         return Some(t);
@@ -80,6 +90,36 @@ pub fn candidates(typed: &str, base: &Path, limit: usize) -> Vec<Candidate> {
 }
 
 /// Replaces the token at the end of `input` with `value`.
+/// The person being typed: the last word if it starts with `@`, outside the
+/// commands that take a file.
+pub fn mention(input: &str) -> Option<&str> {
+    if file_command(input) {
+        return None;
+    }
+    input.rsplit(char::is_whitespace).next()?.strip_prefix('@')
+}
+
+/// People whose handle or name starts with `typed`: (handle, label).
+pub fn people(typed: &str, people: &crate::people::People, limit: usize) -> Vec<(String, String)> {
+    let typed = typed.to_lowercase();
+    people
+        .people
+        .iter()
+        .filter(|p| p.handle.starts_with(&typed) || p.name.to_lowercase().starts_with(&typed))
+        .take(limit)
+        .map(|p| (p.handle.clone(), p.label()))
+        .collect()
+}
+
+/// Replaces the `@word` at the end of `input` with `@handle `.
+pub fn apply_mention(input: &str, handle: &str) -> String {
+    let Some(tok) = mention(input) else {
+        return input.to_string();
+    };
+    let cut = input.len() - tok.len();
+    format!("{}{handle} ", &input[..cut])
+}
+
 pub fn apply(input: &str, value: &str) -> String {
     let Some(tok) = token(input) else {
         return input.to_string();
@@ -97,7 +137,13 @@ mod tests {
         assert_eq!(token("/import @no"), Some("no"));
         assert_eq!(token("/import notes/x"), Some("notes/x"));
         assert_eq!(token("/ladder import lev"), Some("lev"));
-        assert_eq!(token("look at @src/ma"), Some("src/ma"));
+        // Outside file commands, @ is a person, not a file.
+        assert_eq!(token("look at @src/ma"), None);
+        assert_eq!(mention("Paired with @ad"), Some("ad"));
+        assert_eq!(mention("/note @"), Some(""));
+        assert_eq!(mention("/import @no"), None);
+        assert_eq!(mention("no mention"), None);
+        assert_eq!(apply_mention("Paired with @ad", "ada"), "Paired with @ada ");
         assert_eq!(token("/import a b"), None);
         assert_eq!(token("plain text"), None);
     }
