@@ -1,0 +1,5 @@
+# Findings gitleaks reports that are not secrets. One fingerprint per line
+# (commit:file:rule:line); add a comment saying why.
+
+# A made-up session token in the dashboard server's tests (0123456789abcdef).
+3364d9e99dcc1ca7a10af9d2e6368463937df088:crates/upleveler/src/web/server.rs:generic-api-key:271

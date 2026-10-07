@@ -596,7 +596,8 @@ mod tests {
     }
 
     const HOST: Option<&str> = Some("127.0.0.1:4747");
-    const COOKIE: Option<&str> = Some("other=1; upleveler_token_4747=0123456789abcdef");
+    // A made-up token for tests, not a secret. gitleaks:allow
+    const COOKIE: Option<&str> = Some("other=1; upleveler_token_4747=0123456789abcdef"); // gitleaks:allow
 
     async fn body(res: Response) -> String {
         String::from_utf8(

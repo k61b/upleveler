@@ -1,28 +1,31 @@
-# Ignore node modules
-/node_modules
-# Ignore environment files
-/.env
-/.env.local
-# Ignore build directories
-/build
-# Ignore system files
-/.DS_Store
-# Ignore configuration files
-/.config
-# Ignore cache directories
-/.cache
-# Ignore configuration files
-/.config.json
-# Ignore build artifacts
+# Build output
 /target
-# Ignore logs
-/logs
-# Ignore coverage reports
-/coverage
-# Ignore temporary files
-/tmp
-# Ignore IDE specific files
+
+# OS and editor files
+.DS_Store
 /.idea
 /.vscode
-# Ignore claude specific files
 /.claude
+
+# Secrets: never commit these
+.env
+.env.*
+*.pem
+*.key
+*.p12
+*.pfx
+id_rsa*
+id_ed25519*
+.netrc
+.npmrc
+
+# Upleveler user data (if UPLEVELER_HOME points into the repo, or files land here).
+# Work logs, career ladders, reports and settings are personal; keep them out.
+/.upleveler/
+logs.jsonl
+logs.jsonl.tmp
+/staging/
+/reports/
+/config.toml
+/ladder.yaml
+upleveler-export-*
