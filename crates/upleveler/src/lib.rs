@@ -8,6 +8,7 @@ pub mod analyze;
 pub mod config;
 pub mod dates;
 pub mod export;
+pub mod fsio;
 pub mod goals;
 pub mod import;
 pub mod intent;

@@ -220,3 +220,44 @@ fn people_notes_and_goals_from_the_command_line() {
     assert_eq!(ok(home, &["notes"]), "");
     assert!(ok(home, &["list"]).contains("Paired with @ada"));
 }
+
+/// The terminal app and `upleveler web` in another terminal are separate
+/// processes; their writes to the same files must not overwrite each other.
+#[test]
+fn processes_writing_at_once_lose_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path();
+    ok(home, &["goal", "add", "Speak at a meetup"]);
+    let children: Vec<_> = (0..12)
+        .map(|i| {
+            Command::new(env!("CARGO_BIN_EXE_upleveler"))
+                .args(["goal", "checkin", "1", &format!("Step {i}")])
+                .env("UPLEVELER_HOME", home)
+                .spawn()
+                .unwrap()
+        })
+        .chain((0..12).map(|i| {
+            Command::new(env!("CARGO_BIN_EXE_upleveler"))
+                .args(["log", &format!("Entry {i}")])
+                .env("UPLEVELER_HOME", home)
+                .spawn()
+                .unwrap()
+        }))
+        .collect();
+    for mut child in children {
+        assert!(child.wait().unwrap().success());
+    }
+    let show = ok(home, &["goal", "show", "1"]);
+    assert_eq!(
+        show.lines().filter(|l| l.contains("Step ")).count(),
+        12,
+        "{show}"
+    );
+    assert_eq!(
+        ok(home, &["list"])
+            .lines()
+            .filter(|l| l.contains("Entry "))
+            .count(),
+        12
+    );
+}

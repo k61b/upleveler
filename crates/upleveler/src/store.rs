@@ -8,15 +8,6 @@ use std::collections::HashSet;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
-
-/// Serializes writes within the process (the TUI logs while analyses run in a
-/// background thread).
-static WRITE_LOCK: Mutex<()> = Mutex::new(());
-
-fn write_lock() -> std::sync::MutexGuard<'static, ()> {
-    WRITE_LOCK.lock().unwrap_or_else(|e| e.into_inner())
-}
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Entry {
@@ -147,55 +138,51 @@ impl Store {
         Ok(entries)
     }
 
+    /// The data folder, whose lock guards every write (see `fsio`).
+    fn dir(&self) -> &Path {
+        self.path.parent().unwrap_or_else(|| Path::new("."))
+    }
+
     pub fn append(&self, entries: &[Entry]) -> Result<()> {
-        let _guard = write_lock();
-        if let Some(dir) = self.path.parent() {
-            fs::create_dir_all(dir)?;
-        }
-        let mut file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&self.path)
-            .with_context(|| format!("opening {}", self.path.display()))?;
-        let mut buf = String::new();
-        for e in entries {
-            buf.push_str(&serde_json::to_string(e)?);
-            buf.push('\n');
-        }
-        file.write_all(buf.as_bytes())?;
-        Ok(())
+        crate::fsio::with_lock(self.dir(), || {
+            let mut file = OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&self.path)
+                .with_context(|| format!("opening {}", self.path.display()))?;
+            let mut buf = String::new();
+            for e in entries {
+                buf.push_str(&serde_json::to_string(e)?);
+                buf.push('\n');
+            }
+            file.write_all(buf.as_bytes())?;
+            Ok(())
+        })
     }
 
-    /// Replaces the whole file atomically (write to a temp file, then rename).
+    /// Replaces the whole file atomically.
     pub fn rewrite(&self, entries: &[Entry]) -> Result<()> {
-        let _guard = write_lock();
-        self.write_all(entries)
+        crate::fsio::with_lock(self.dir(), || self.write_all(entries))
     }
 
-    /// Loads, changes and rewrites the file under the write lock, so concurrent
-    /// appends are never lost.
+    /// Loads, changes and rewrites the file under the lock, so concurrent
+    /// appends (from this process or another) are never lost.
     pub fn update<T>(&self, change: impl FnOnce(&mut Vec<Entry>) -> T) -> Result<T> {
-        let _guard = write_lock();
-        let mut entries = self.load()?;
-        let out = change(&mut entries);
-        self.write_all(&entries)?;
-        Ok(out)
+        crate::fsio::with_lock(self.dir(), || {
+            let mut entries = self.load()?;
+            let out = change(&mut entries);
+            self.write_all(&entries)?;
+            Ok(out)
+        })
     }
 
     fn write_all(&self, entries: &[Entry]) -> Result<()> {
-        if let Some(dir) = self.path.parent() {
-            fs::create_dir_all(dir)?;
-        }
-        let tmp = self.path.with_extension("jsonl.tmp");
         let mut buf = String::new();
         for e in entries {
             buf.push_str(&serde_json::to_string(e)?);
             buf.push('\n');
         }
-        fs::write(&tmp, buf)?;
-        fs::rename(&tmp, &self.path)
-            .with_context(|| format!("replacing {}", self.path.display()))?;
-        Ok(())
+        crate::fsio::write_atomic(&self.path, buf.as_bytes())
     }
 
     /// Appends entries whose id is not already stored; returns the ones added.

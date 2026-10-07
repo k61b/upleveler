@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Your data is safe when the terminal app and the browser dashboard (or `upleveler web` in another terminal) change it at the same time. Before, a change made in one could be lost when the other saved; with 12 processes adding to a goal at once, only one check-in was kept. Every write now happens while the data folder is locked (`.lock`), and every file is replaced in one step, so a crash or a full disk can no longer leave `people.yaml`, `goals.yaml`, `ladder.yaml` or `config.toml` half-written.
+
 ## 2.2.0
 
 Everything about people, notes and goals can now be done inside the terminal app and the browser dashboard, and the recommended model is Gemma 4.

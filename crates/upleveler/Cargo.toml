@@ -23,6 +23,7 @@ clap.workspace = true
 csv.workspace = true
 dialoguer.workspace = true
 dirs.workspace = true
+fs4.workspace = true
 getrandom = { workspace = true, optional = true }
 maud.workspace = true
 pulldown-cmark = { workspace = true, features = ["html"] }

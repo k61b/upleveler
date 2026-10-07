@@ -10,7 +10,6 @@ use std::collections::HashSet;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -152,14 +151,11 @@ impl People {
     }
 
     pub fn save(&self, path: &Path) -> Result<()> {
-        if let Some(dir) = path.parent() {
-            fs::create_dir_all(dir)?;
-        }
         let header =
             "# The people you work with, used by upleveler. You can edit this file by hand.\n\
                       # `handle` is what you type after @ in logs and notes.\n";
-        fs::write(path, format!("{header}{}", serde_norway::to_string(self)?))?;
-        Ok(())
+        let yaml = format!("{header}{}", serde_norway::to_string(self)?);
+        crate::fsio::write_atomic(path, yaml.as_bytes())
     }
 
     pub fn get(&self, handle: &str) -> Option<&Person> {
@@ -295,13 +291,6 @@ impl Note {
     }
 }
 
-/// Serializes writes to `notes.jsonl` within the process.
-static NOTES_LOCK: Mutex<()> = Mutex::new(());
-
-fn lock() -> std::sync::MutexGuard<'static, ()> {
-    NOTES_LOCK.lock().unwrap_or_else(|e| e.into_inner())
-}
-
 /// Notes about people: one JSON object per line in `notes.jsonl`.
 #[derive(Debug, Clone)]
 pub struct NoteStore {
@@ -336,40 +325,37 @@ impl NoteStore {
 
     /// Appends `note` unless the same note exists; returns it if it was added.
     pub fn add(&self, note: Note) -> Result<Option<Note>> {
-        let _guard = lock();
-        if self.load()?.iter().any(|n| n.id == note.id) {
-            return Ok(None);
-        }
-        if let Some(dir) = self.path.parent() {
-            fs::create_dir_all(dir)?;
-        }
-        let mut file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&self.path)
-            .with_context(|| format!("opening {}", self.path.display()))?;
-        writeln!(file, "{}", serde_json::to_string(&note)?)?;
-        Ok(Some(note))
+        crate::fsio::with_lock(self.dir(), || {
+            if self.load()?.iter().any(|n| n.id == note.id) {
+                return Ok(None);
+            }
+            let mut file = OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&self.path)
+                .with_context(|| format!("opening {}", self.path.display()))?;
+            writeln!(file, "{}", serde_json::to_string(&note)?)?;
+            Ok(Some(note))
+        })
+    }
+
+    fn dir(&self) -> &Path {
+        self.path.parent().unwrap_or_else(|| Path::new("."))
     }
 
     /// Loads, changes and rewrites the file atomically under the lock.
     pub fn update<T>(&self, change: impl FnOnce(&mut Vec<Note>) -> T) -> Result<T> {
-        let _guard = lock();
-        let mut notes = self.load()?;
-        let out = change(&mut notes);
-        if let Some(dir) = self.path.parent() {
-            fs::create_dir_all(dir)?;
-        }
-        let tmp = self.path.with_extension("jsonl.tmp");
-        let mut buf = String::new();
-        for n in &notes {
-            buf.push_str(&serde_json::to_string(n)?);
-            buf.push('\n');
-        }
-        fs::write(&tmp, buf)?;
-        fs::rename(&tmp, &self.path)
-            .with_context(|| format!("replacing {}", self.path.display()))?;
-        Ok(out)
+        crate::fsio::with_lock(self.dir(), || {
+            let mut notes = self.load()?;
+            let out = change(&mut notes);
+            let mut buf = String::new();
+            for n in &notes {
+                buf.push_str(&serde_json::to_string(n)?);
+                buf.push('\n');
+            }
+            crate::fsio::write_atomic(&self.path, buf.as_bytes())?;
+            Ok(out)
+        })
     }
 }
 

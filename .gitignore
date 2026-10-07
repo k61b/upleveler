@@ -33,3 +33,5 @@ upleveler-export-*
 notes.jsonl
 notes.jsonl.tmp
 /goals.yaml
+/.lock
+/.*.tmp

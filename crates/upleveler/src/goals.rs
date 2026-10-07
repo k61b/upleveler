@@ -131,13 +131,10 @@ impl Goals {
     }
 
     pub fn save(&self, path: &Path) -> Result<()> {
-        if let Some(dir) = path.parent() {
-            fs::create_dir_all(dir)?;
-        }
         let header = "# Your goals, used by upleveler. You can edit this file by hand.\n\
                       # Tag a log entry with goal-<id> to count it toward a goal.\n";
-        fs::write(path, format!("{header}{}", serde_norway::to_string(self)?))?;
-        Ok(())
+        let yaml = format!("{header}{}", serde_norway::to_string(self)?);
+        crate::fsio::write_atomic(path, yaml.as_bytes())
     }
 
     pub fn get(&self, id: u32) -> Option<&Goal> {

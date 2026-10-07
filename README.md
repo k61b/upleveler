@@ -87,7 +87,7 @@ Opens the dashboard in your browser (or type `/web` in the app). It runs on your
 | Ladder | Each level's expectations with the entries that back them; your target level is marked |
 | Reports | Run a gap analysis, promotion document or summary with live progress; read or copy any report as Markdown |
 
-The dashboard reads and writes the same files as the terminal app and shows fresh data on every page load. Analyses use the model you chose in the setup, one at a time, and keep running if you close the page while `upleveler web` is open.
+The dashboard reads and writes the same files as the terminal app and shows fresh data on every page load. The terminal app and the dashboard can be open at the same time: every change is written in one step while the data folder is locked, so neither overwrites the other. Analyses use the model you chose in the setup, one at a time, and keep running if you close the page while `upleveler web` is open.
 
 ## People and goals
 

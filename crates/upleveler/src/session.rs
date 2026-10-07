@@ -135,44 +135,64 @@ impl Session {
         People::load(&self.paths.people)
     }
 
+    /// Loads `people.yaml`, changes it and saves it, holding the data lock so a
+    /// change from the browser or another process in between is not lost.
+    fn update_people<T>(&self, change: impl FnOnce(&mut People) -> Result<T>) -> Result<T> {
+        crate::fsio::with_lock(&self.paths.root, || {
+            let mut people = self.people()?;
+            let out = change(&mut people)?;
+            people.save(&self.paths.people)?;
+            Ok(out)
+        })
+    }
+
+    /// The same for `goals.yaml`.
+    fn update_goals<T>(&self, change: impl FnOnce(&mut Goals) -> Result<T>) -> Result<T> {
+        crate::fsio::with_lock(&self.paths.root, || {
+            let mut goals = self.goals()?;
+            let out = change(&mut goals)?;
+            goals.save(&self.paths.goals)?;
+            Ok(out)
+        })
+    }
+
     pub fn add_person(&self, person: Person) -> Result<Person> {
-        let mut people = self.people()?;
-        people.add(person.clone())?;
-        people.save(&self.paths.people)?;
         let handle = normalize_handle(&person.handle).unwrap_or_default();
-        Ok(people.get(&handle).cloned().expect("just added"))
+        self.update_people(|people| {
+            people.add(person)?;
+            Ok(people.get(&handle).cloned().expect("just added"))
+        })
     }
 
     /// Changes someone's profile and saves it; errors if no one has `handle`.
     pub fn edit_person(&self, handle: &str, change: impl FnOnce(&mut Person)) -> Result<Person> {
-        let mut people = self.people()?;
         let key = normalize_handle(handle).unwrap_or_else(|| handle.to_string());
-        let Some(person) = people.people.iter_mut().find(|p| p.handle == key) else {
-            bail!("@{key} is not in your people (see `upleveler person list`)");
-        };
-        change(person);
-        if person.name.trim().is_empty() {
-            person.name = person.handle.clone();
-        }
-        let person = person.clone();
-        people.save(&self.paths.people)?;
-        Ok(person)
+        self.update_people(|people| {
+            let Some(person) = people.people.iter_mut().find(|p| p.handle == key) else {
+                bail!("@{key} is not in your people (see `upleveler person list`)");
+            };
+            change(person);
+            if person.name.trim().is_empty() {
+                person.name = person.handle.clone();
+            }
+            Ok(person.clone())
+        })
     }
 
     /// Removes a person and every note about them; returns the profile and how
     /// many notes were deleted. Log entries that mention them stay as they are.
     pub fn remove_person(&self, handle: &str) -> Result<Option<(Person, usize)>> {
-        let mut people = self.people()?;
-        let Some(person) = people.remove(handle) else {
-            return Ok(None);
-        };
-        let removed = self.notes_store().update(|notes| {
-            let before = notes.len();
-            notes.retain(|n| n.person != person.handle);
-            before - notes.len()
-        })?;
-        people.save(&self.paths.people)?;
-        Ok(Some((person, removed)))
+        self.update_people(|people| {
+            let Some(person) = people.remove(handle) else {
+                return Ok(None);
+            };
+            let removed = self.notes_store().update(|notes| {
+                let before = notes.len();
+                notes.retain(|n| n.person != person.handle);
+                before - notes.len()
+            })?;
+            Ok(Some((person, removed)))
+        })
     }
 
     /// The `@handle`s in `text` that are not in your people yet.
@@ -304,10 +324,7 @@ impl Session {
         due: Option<NaiveDate>,
     ) -> Result<Goal> {
         let expectation = self.check_expectation(expectation)?;
-        let mut goals = self.goals()?;
-        let goal = goals.add(text, expectation, due, today())?.clone();
-        goals.save(&self.paths.goals)?;
-        Ok(goal)
+        self.update_goals(|goals| Ok(goals.add(text, expectation, due, today())?.clone()))
     }
 
     /// The ladder's id for an expectation a goal is tied to; `None` for none.
@@ -341,30 +358,26 @@ impl Session {
             Some(e) => Some(self.check_expectation(Some(e))?),
             None => None,
         };
-        let mut goals = self.goals()?;
-        let goal = goals.get_mut(id)?;
-        if let Some(text) = text.map(str::trim) {
-            if text.is_empty() {
-                bail!("a goal needs some text");
+        self.update_goals(|goals| {
+            let goal = goals.get_mut(id)?;
+            if let Some(text) = text.map(str::trim) {
+                if text.is_empty() {
+                    bail!("a goal needs some text");
+                }
+                goal.text = text.to_string();
             }
-            goal.text = text.to_string();
-        }
-        if let Some(expectation) = expectation {
-            goal.expectation = expectation;
-        }
-        if let Some(due) = due {
-            goal.due = due;
-        }
-        let goal = goal.clone();
-        goals.save(&self.paths.goals)?;
-        Ok(goal)
+            if let Some(expectation) = expectation {
+                goal.expectation = expectation;
+            }
+            if let Some(due) = due {
+                goal.due = due;
+            }
+            Ok(goal.clone())
+        })
     }
 
     pub fn set_goal_status(&self, id: u32, status: GoalStatus) -> Result<Goal> {
-        let mut goals = self.goals()?;
-        let goal = goals.set_status(id, status)?.clone();
-        goals.save(&self.paths.goals)?;
-        Ok(goal)
+        self.update_goals(|goals| Ok(goals.set_status(id, status)?.clone()))
     }
 
     /// The `n`th check-in of a goal (1 = the oldest), as `goal show` numbers them.
@@ -386,17 +399,11 @@ impl Session {
 
     /// Undoes a check-in; false if it was already gone.
     pub fn remove_checkin(&self, id: u32, date: NaiveDate, text: &str) -> Result<bool> {
-        let mut goals = self.goals()?;
-        let removed = goals.remove_checkin(id, date, text)?;
-        goals.save(&self.paths.goals)?;
-        Ok(removed)
+        self.update_goals(|goals| goals.remove_checkin(id, date, text))
     }
 
     pub fn add_checkin(&self, id: u32, date: NaiveDate, text: &str) -> Result<Goal> {
-        let mut goals = self.goals()?;
-        let goal = goals.checkin(id, date, text)?.clone();
-        goals.save(&self.paths.goals)?;
-        Ok(goal)
+        self.update_goals(|goals| Ok(goals.checkin(id, date, text)?.clone()))
     }
 
     /// Reads `file` into drafts and works out what would be added, writing a staging
@@ -1054,6 +1061,50 @@ mod tests {
             .ask_about("hedeflerim nasıl gidiyor")
             .unwrap()
             .contains("Speak at a meetup"));
+    }
+
+    /// Separate sessions in separate threads (the terminal app and the browser
+    /// dashboard) change the same files at once without losing anything.
+    #[test]
+    fn concurrent_writers_lose_nothing() {
+        use crate::people::Relation;
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths::at(dir.path().to_path_buf());
+        let s = Session::at(paths.clone()).unwrap();
+        s.add_goal("Speak at a meetup", None, None).unwrap();
+        s.add_person(Person {
+            handle: "ada".into(),
+            name: "Ada".into(),
+            role: None,
+            team: None,
+            relation: Relation::Mentee,
+            about: None,
+            since: None,
+        })
+        .unwrap();
+        std::thread::scope(|scope| {
+            for t in 0..6 {
+                let paths = paths.clone();
+                scope.spawn(move || {
+                    let s = Session::at(paths).unwrap();
+                    for i in 0..15 {
+                        let text = format!("thread {t} step {i}");
+                        s.add_checkin(1, d(10, 1), &text).unwrap();
+                        s.add_log(&text, d(10, 1), vec![]).unwrap();
+                        s.add_note("ada", NoteKind::Note, d(10, 1), &text).unwrap();
+                    }
+                });
+            }
+        });
+        assert_eq!(s.goals().unwrap().get(1).unwrap().checkins.len(), 90);
+        assert_eq!(s.entries().unwrap().len(), 90);
+        assert_eq!(s.notes().unwrap().len(), 90);
+        let stray: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|n| n.ends_with(".tmp"))
+            .collect();
+        assert!(stray.is_empty(), "{stray:?}");
     }
 
     #[test]

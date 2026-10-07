@@ -142,9 +142,7 @@ impl Config {
     }
 
     pub fn save(&self, paths: &Paths) -> Result<()> {
-        fs::create_dir_all(&paths.root)?;
-        fs::write(&paths.config, toml::to_string_pretty(self)?)
-            .with_context(|| format!("writing {}", paths.config.display()))
+        crate::fsio::write_atomic(&paths.config, toml::to_string_pretty(self)?.as_bytes())
     }
 
     pub fn language_name(&self) -> &str {
