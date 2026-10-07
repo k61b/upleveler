@@ -1,12 +1,25 @@
 # Changelog
 
-## Unreleased
+## 2.3.0
 
-- The terminal app no longer re-reads `people.yaml` on every redraw while the `@` list or a choice is open (about 35 times a second); it reads it again only when the file changes.
-- The browser dashboard reads only the title of each report for its lists, and a report's full text only when you open it.
+Your data stays intact when the terminal app and the browser dashboard are open at the same time, and both apply the same rules.
+
+The 2.2.0 release did not finish publishing, so this is the first release since 2.1.0. It also brings everything from [2.2.0](https://github.com/k61b/upleveler/blob/main/CHANGELOG.md#220): editing and removing people, notes, goals and check-ins in the terminal app and the browser, `/undo` for all of it, and `gemma4:12b` as the recommended model.
+
+### Data safety
+
+- Your data is safe when the terminal app and the browser dashboard (or `upleveler web` in another terminal) change it at the same time. Before, a change made in one could be lost when the other saved; with 12 processes adding to a goal at once, only one check-in was kept. Every write now happens while the data folder is locked (`.lock`).
+- Every file is replaced in one step, so a crash or a full disk can no longer leave `people.yaml`, `goals.yaml`, `ladder.yaml` or `config.toml` half-written.
+
+### Same rules everywhere
+
+- The terminal app, the browser dashboard and the command line apply the same rules with the same messages: a log entry, note or check-in is at most 4000 characters, a goal 400, a name, role or team 100 and a description 500. Before, only the dashboard checked lengths. A blank name means the handle everywhere.
+
+### Fixes
+
 - A note written again after its earlier copy was edited is saved, instead of being taken for a duplicate.
-- The terminal app, the browser dashboard and the command line now apply the same rules with the same messages: a log entry, note or check-in is at most 4000 characters, a goal 400, a name, role or team 100 and a description 500. Before, only the dashboard checked lengths. A blank name means the handle everywhere, as it already did on the command line.
-- Your data is safe when the terminal app and the browser dashboard (or `upleveler web` in another terminal) change it at the same time. Before, a change made in one could be lost when the other saved; with 12 processes adding to a goal at once, only one check-in was kept. Every write now happens while the data folder is locked (`.lock`), and every file is replaced in one step, so a crash or a full disk can no longer leave `people.yaml`, `goals.yaml`, `ladder.yaml` or `config.toml` half-written.
+- The terminal app no longer re-reads `people.yaml` on every redraw while the `@` list or a choice is open; it reads it again only when the file changes.
+- The browser dashboard reads only the title of each report for its lists, and a report's full text only when you open it.
 
 ## 2.2.0
 
