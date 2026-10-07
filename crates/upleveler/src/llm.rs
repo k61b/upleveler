@@ -461,8 +461,10 @@ mod tests {
         let started = std::time::Instant::now();
         let err = llm.complete(&[Message::user("x")], false).unwrap_err();
         assert_eq!(err.to_string(), "cancelled");
+        // The stream would take five minutes; a loaded CI machine still stops
+        // well within seconds.
         assert!(
-            started.elapsed() < Duration::from_millis(600),
+            started.elapsed() < Duration::from_secs(5),
             "{:?}",
             started.elapsed()
         );

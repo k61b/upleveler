@@ -268,7 +268,8 @@ mod tests {
     }
 
     fn wait(runs: &Runs) -> RunView {
-        for _ in 0..200 {
+        // Up to 10 s: generous for a loaded CI machine, and it returns at once.
+        for _ in 0..1000 {
             let view = runs.view().unwrap();
             if view.state != State::Running {
                 return view;

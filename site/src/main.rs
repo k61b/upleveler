@@ -171,6 +171,40 @@ fn steps() -> Markup {
     }
 }
 
+fn people_goals() -> Markup {
+    let session = [
+        TermLine::Prompt("1:1 with @ada: nervous about on-call"),
+        TermLine::Done("Noted for @ada (1:1)"),
+        TermLine::Blank,
+        TermLine::Prompt("/goal Speak at a local meetup"),
+        TermLine::Done("Added goal #2"),
+        TermLine::Blank,
+        TermLine::Prompt("/prep @ada"),
+        TermLine::Heading("Open follow-ups"),
+        TermLine::Text("Share the retry design doc"),
+        TermLine::Heading("Topics and questions"),
+        TermLine::Text("What would help you feel ready?"),
+    ];
+    html! {
+        section.band.container.split {
+            div.stack {
+                (ui::label("People and goals"))
+                (ui::heading(2, "Ready for your", "next 1:1", ""))
+                p.lead {
+                    "Keep notes about the people you work with: what you talked about, the feedback you gave and got, "
+                    "what to follow up on. Set goals, free or tied to your ladder, and check in as you go."
+                }
+                ul.proof {
+                    li { (ui::marker(Marker::Filled)) "Mention people in your log as @handle" }
+                    li { (ui::marker(Marker::Filled)) "Prepare a 1:1 from your notes and shared work" }
+                    li { (ui::marker(Marker::Filled)) "Notes never go into your promotion document" }
+                }
+            }
+            (ui::terminal("upleveler", &session, None))
+        }
+    }
+}
+
 fn dashboard_demo() -> Markup {
     let data = demo::data(upleveler::session::today());
     html! {
@@ -273,6 +307,7 @@ fn index() -> Markup {
         html! {
             (hero())
             (steps())
+            (people_goals())
             (dashboard_demo())
             (privacy())
             (install())

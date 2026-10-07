@@ -263,9 +263,21 @@ samp {
   .topbar-end {
     display: none;
   }
+  /* Six tabs do not fit one phone row: two rows of three, all visible. */
   .tabs {
     order: 3;
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
     width: 100%;
+  }
+  .tabs li {
+    display: flex;
+  }
+  .tabs a,
+  .tabs .tab {
+    flex: 1;
+    justify-content: center;
+    padding: 0 8px;
   }
 }
 
@@ -620,6 +632,11 @@ samp {
   color: var(--on-shell-secondary);
 }
 
+.term-text-line {
+  padding-left: 14px;
+  color: var(--on-shell-secondary);
+}
+
 .term-heading {
   display: flex;
   align-items: center;
@@ -929,13 +946,15 @@ samp {
 
 /* ---------- Site: install band and footer ---------- */
 
-.install {
+.install,
+.split {
   display: grid;
   gap: 32px;
 }
 
 @media (min-width: 900px) {
-  .install {
+  .install,
+  .split {
     grid-template-columns: 1fr 1.3fr;
     align-items: center;
   }
@@ -1712,7 +1731,10 @@ select.input {
   overflow-wrap: anywhere;
 }
 
-.overview-list .mono {
+.overview-list .mono,
+.person-row .mono,
+.note-meta .mono,
+.goal .muted .mono {
   white-space: nowrap;
 }
 

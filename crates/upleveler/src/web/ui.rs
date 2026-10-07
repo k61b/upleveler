@@ -371,6 +371,8 @@ pub enum TermLine<'a> {
     Done(&'a str),
     /// A heading line in the app's output.
     Heading(&'a str),
+    /// A plain line of the app's output, indented under a heading.
+    Text(&'a str),
     /// A gap row: rating marker, area, expectation, evidence count.
     Rating(Marker, &'a str, &'a str, usize),
     Blank,
@@ -394,6 +396,7 @@ pub fn terminal(title: &str, lines: &[TermLine], copy: Option<&str>) -> Markup {
                         TermLine::Prompt(text) => div.term-line { span.term-prompt aria-hidden="true" { "› " } (text) },
                         TermLine::Done(text) => div.term-line.term-done { span.term-prompt aria-hidden="true" { "✓ " } (text) },
                         TermLine::Heading(text) => div.term-line.term-heading { (marker(Marker::Filled)) " " (text) },
+                        TermLine::Text(text) => div.term-line.term-text-line { (text) },
                         TermLine::Rating(state, area, text, count) => div.term-line.term-rating {
                             (marker(*state))
                             span.term-area { (area) }

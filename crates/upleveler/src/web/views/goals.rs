@@ -39,15 +39,16 @@ fn plural(n: usize, one: &str, many: &str) -> String {
 }
 
 /// "due in 12 days", "due today", "3 days overdue".
-fn due_text(due: NaiveDate, today: NaiveDate) -> String {
+fn due_text(due: NaiveDate, today: NaiveDate) -> Markup {
     let days = (due - today).num_days();
     match days {
-        0 => "due today".into(),
-        d if d > 0 => format!("due {due}, in {}", plural(d as usize, "day", "days")),
-        d => format!(
-            "was due {due}, {} ago",
-            plural(d.unsigned_abs() as usize, "day", "days")
-        ),
+        0 => html! { "due today" },
+        d if d > 0 => {
+            html! { "due " span.mono { (due) } ", in " (plural(d as usize, "day", "days")) }
+        }
+        d => {
+            html! { "was due " span.mono { (due) } ", " (plural(d.unsigned_abs() as usize, "day", "days")) " ago" }
+        }
     }
 }
 

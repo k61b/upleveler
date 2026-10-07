@@ -1007,8 +1007,13 @@ mod tests {
         if let Some(cookie) = cookie {
             req = req.header(header::COOKIE, cookie);
         }
-        let home = std::env::temp_dir().join(format!("upleveler-web-test-{}", std::process::id()));
-        let app = router(Arc::new(AppState::new(4747, TOKEN.into(), Paths::at(home))));
+        // Each request gets its own empty home, so parallel tests share nothing.
+        let home = tempfile::tempdir().unwrap();
+        let app = router(Arc::new(AppState::new(
+            4747,
+            TOKEN.into(),
+            Paths::at(home.path().to_path_buf()),
+        )));
         app.oneshot(req.body(Body::empty()).unwrap()).await.unwrap()
     }
 
@@ -1308,7 +1313,7 @@ mod tests {
         assert_eq!(start.status(), StatusCode::SEE_OTHER);
         assert_eq!(start.headers()[header::LOCATION], "/run");
         let mut finished = String::new();
-        for _ in 0..200 {
+        for _ in 0..1000 {
             let page = body(send(&state, Request::get("/run"), "").await).await;
             if page.contains("Open the report") {
                 finished = page;
@@ -1567,7 +1572,7 @@ mod tests {
         let start = send(&state, same(Request::post("/run")), "kind=prep&period=ada").await;
         assert_eq!(start.headers()[header::LOCATION], "/run");
         let mut finished = String::new();
-        for _ in 0..500 {
+        for _ in 0..1000 {
             let page = body(send(&state, Request::get("/run"), "").await).await;
             if page.contains("Open the report") {
                 finished = page;

@@ -12,8 +12,9 @@ the Manrope font and the components all come from `crates/upleveler/src/web/`, s
 the site never defines its own colours or styles. `cargo test` checks contrast and
 lints the site's sources together with the dashboard's.
 
-The page has a hero with a terminal session, the three steps (log, gap, brag), a
-live demo, a privacy section and the install commands. The demo is not a
+The page has a hero with a terminal session, the three steps (log, gap, brag),
+people and goals (notes, goals and 1:1 preparation), a live demo, a privacy
+section and the install commands. The demo is not a
 screenshot: it is the real dashboard Overview (`views::demo_frame`) rendered with
 the made-up data in `crates/upleveler/src/web/demo.rs`.
 
