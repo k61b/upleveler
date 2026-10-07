@@ -45,6 +45,7 @@ Besides the pages, the build writes:
 | `og.png` | The 1200 × 630 link preview, rendered from the tokens and the mark |
 | `favicon.svg`, `apple-touch-icon.png`, `icon-*.png`, `site.webmanifest` | Icons drawn from the mark |
 | `sitemap.xml`, `robots.txt` | For search engines |
+| `install.sh` | The installer behind `curl -fsSL https://upleveler.dev/install.sh \| sh`, copied from `site/install.sh`; it installs the latest GitHub release |
 | `gallery/` | Every component on both surfaces, for design review. Not linked, `noindex`, excluded in `robots.txt` |
 
 PNGs are rendered with [resvg](https://github.com/linebender/resvg) and the bundled
@@ -85,6 +86,7 @@ npx wrangler deploy
 |---|---|
 | `src/main.rs` | Renders the pages with [maud](https://maud.lambda.xyz) and copies the shared assets (styles, script, fonts) into `dist/` |
 | `src/og.rs` | Renders the link preview and the app icons to PNG |
+| `install.sh` | The macOS and Linux installer: picks the archive for the system, checks it against the release's `SHA256SUMS`, installs to `~/.local/bin` |
 | `assets/fonts/` | Manrope as TTF for the PNG renderer (SIL Open Font License) |
 | `wrangler.jsonc` | Cloudflare configuration: Worker name, the `upleveler.dev` domain and the `dist/` directory |
 | `dist/` | Build output, not committed |

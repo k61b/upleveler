@@ -1,21 +1,84 @@
 name: Release
 
-# Push a tag like v0.2.0 (matching the version in Cargo.toml) to publish a GitHub
-# release. Users install from source, so the release carries notes, not binaries.
+# Push a tag like v2.0.0 (matching the version in Cargo.toml) to publish a GitHub
+# release with prebuilt binaries for macOS, Linux and Windows, a SHA256SUMS file
+# and the notes from CHANGELOG.md. https://upleveler.dev/install.sh installs the
+# latest release.
+#
+# Pushing a branch that changes this workflow or the install script only builds
+# the binaries (as workflow artifacts), so the build matrix can be checked
+# without publishing anything.
 on:
   push:
     tags: ["v*.*.*"]
+    branches: ["**"]
+    paths: [".github/workflows/release.yml", "site/install.sh"]
+  workflow_dispatch:
 
 permissions:
   contents: read
 
+env:
+  CARGO_TERM_COLOR: always
+
 jobs:
   ci:
+    if: startsWith(github.ref, 'refs/tags/')
     uses: ./.github/workflows/ci.yml
+
+  build:
+    name: Build (${{ matrix.target }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { target: aarch64-apple-darwin, os: macos-latest }
+          - { target: x86_64-apple-darwin, os: macos-latest }
+          - { target: x86_64-unknown-linux-musl, os: ubuntu-latest, musl: true }
+          - { target: aarch64-unknown-linux-musl, os: ubuntu-24.04-arm, musl: true }
+          - { target: x86_64-pc-windows-msvc, os: windows-latest }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+      # Static Linux binaries run on any distribution; musl-gcc builds ring (TLS).
+      - if: matrix.musl
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+      - run: cargo build --release --locked -p upleveler --target ${{ matrix.target }}
+
+      - name: Package (macOS, Linux)
+        if: runner.os != 'Windows'
+        run: |
+          name="upleveler-${{ matrix.target }}"
+          mkdir -p "dist/$name"
+          cp "target/${{ matrix.target }}/release/upleveler" LICENSE README.md "dist/$name/"
+          tar -czf "dist/$name.tar.gz" -C "dist/$name" .
+          "dist/$name/upleveler" --version || true
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $name = "upleveler-${{ matrix.target }}"
+          New-Item -ItemType Directory -Force "dist/$name" | Out-Null
+          Copy-Item "target/${{ matrix.target }}/release/upleveler.exe", LICENSE, README.md "dist/$name/"
+          Compress-Archive -Path "dist/$name/*" -DestinationPath "dist/$name.zip"
+          & "dist/$name/upleveler.exe" --version
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: upleveler-${{ matrix.target }}
+          path: dist/upleveler-${{ matrix.target }}.*
+          if-no-files-found: error
 
   release:
     name: Publish GitHub release
-    needs: ci
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: [ci, build]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -29,6 +92,15 @@ jobs:
             echo "::error::Tag $GITHUB_REF_NAME does not match Cargo.toml version $version"
             exit 1
           fi
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Checksums
+        working-directory: dist
+        run: sha256sum upleveler-* > SHA256SUMS && cat SHA256SUMS
 
       - name: Take the notes from CHANGELOG.md
         run: |
@@ -45,14 +117,28 @@ jobs:
             echo
             echo "### Install or update"
             echo
+            echo "macOS and Linux:"
+            echo
+            echo '```sh'
+            echo "curl -fsSL https://upleveler.dev/install.sh | sh"
+            echo '```'
+            echo
+            echo "Windows: download \`upleveler-x86_64-pc-windows-msvc.zip\` below and put \`upleveler.exe\` on your PATH."
+            echo
+            echo "From source (Rust 1.82+):"
+            echo
             echo '```sh'
             echo "git clone https://github.com/${GITHUB_REPOSITORY}.git && cd ${GITHUB_REPOSITORY#*/}"
             echo "git checkout $GITHUB_REF_NAME"
             echo "cargo install --path crates/upleveler --locked --force"
             echo '```'
+            echo
+            echo "Upleveler needs [Ollama](https://ollama.com) and a model, for example \`ollama pull gemma3:12b\`."
           } >> notes.md
 
       - name: Create the release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --notes-file notes.md --verify-tag
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/* \
+            --title "$GITHUB_REF_NAME" --notes-file notes.md --verify-tag --latest

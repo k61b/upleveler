@@ -21,6 +21,8 @@ const DESCRIPTION: &str = "A work log for software developers. Upleveler compare
                            with what your company expects at the next level, shows what is \
                            missing and writes your promotion document. It runs on your computer.";
 
+const INSTALL_SCRIPT: &str = include_str!("../install.sh");
+
 const INSTALL: &[&str] = &[
     "git clone https://github.com/k61b/upleveler.git",
     "cd upleveler",
@@ -324,6 +326,8 @@ fn main() -> Result<()> {
     )?;
     emit("favicon.svg", brand::mark_svg(&brand::MAIN, 32).as_bytes())?;
     emit("site.webmanifest", manifest().as_bytes())?;
+    // `curl -fsSL https://upleveler.dev/install.sh | sh` installs the latest release.
+    emit("install.sh", INSTALL_SCRIPT.as_bytes())?;
     emit(
         "robots.txt",
         format!("User-agent: *\nDisallow: /gallery/\nSitemap: {SITE}/sitemap.xml\n").as_bytes(),
@@ -380,6 +384,25 @@ mod tests {
             "for free",
         ] {
             assert!(!text.contains(word), "found {word:?}");
+        }
+    }
+
+    #[test]
+    fn install_script_matches_the_release_builds() {
+        // Every target the script can pick must be built by the release workflow,
+        // or the script would download an archive that does not exist.
+        let workflow = include_str!("../../.github/workflows/release.yml");
+        let targets: Vec<&str> = INSTALL_SCRIPT
+            .lines()
+            .filter_map(|l| l.split("target=").nth(1))
+            .map(|t| t.trim_end_matches(" ;;").trim())
+            .collect();
+        assert_eq!(targets.len(), 4, "{targets:?}");
+        for target in targets {
+            assert!(
+                workflow.contains(&format!("target: {target},")),
+                "{target} is not built"
+            );
         }
     }
 
