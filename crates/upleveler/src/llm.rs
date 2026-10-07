@@ -7,6 +7,8 @@ use serde::Serialize;
 use serde_json::{json, Value};
 use std::cell::Cell;
 use std::io::{BufRead, BufReader};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -97,6 +99,8 @@ pub struct HttpLlm {
     api_key: Option<String>,
     /// Cleared if an OpenAI-compatible server rejects `response_format`.
     json_mode: Cell<bool>,
+    /// Set by the caller to stop a reply mid-way (see `with_cancel`).
+    cancel: Option<Arc<AtomicBool>>,
 }
 
 impl HttpLlm {
@@ -132,6 +136,7 @@ impl HttpLlm {
             agent,
             api_key,
             json_mode: Cell::new(true),
+            cancel: None,
         })
     }
 
@@ -241,10 +246,25 @@ impl HttpLlm {
     }
 }
 
-impl Llm for HttpLlm {
-    fn complete(&self, messages: &[Message], json: bool) -> Result<String> {
-        let result = self.post(&self.body(messages, json, false));
-        let resp = match result {
+impl HttpLlm {
+    /// Makes `complete` stop as soon as `cancel` is set: replies are then
+    /// streamed and the connection is dropped at the next token, which also
+    /// stops the model (Ollama ends generation when the client goes away).
+    pub fn with_cancel(mut self, cancel: Arc<AtomicBool>) -> Self {
+        self.cancel = Some(cancel);
+        self
+    }
+
+    fn cancelled(&self) -> bool {
+        self.cancel
+            .as_ref()
+            .is_some_and(|c| c.load(Ordering::Relaxed))
+    }
+
+    /// Posts, retrying once without JSON mode if an OpenAI-compatible server
+    /// rejects `response_format`.
+    fn post_chat(&self, messages: &[Message], json: bool, stream: bool) -> Result<ureq::Response> {
+        match self.post(&self.body(messages, json, stream)) {
             Err(err)
                 if json
                     && self.cfg.provider == Provider::Openai
@@ -252,29 +272,18 @@ impl Llm for HttpLlm {
                     && err.to_string().contains("HTTP 400") =>
             {
                 self.json_mode.set(false);
-                self.post(&self.body(messages, json, false))?
+                self.post(&self.body(messages, json, stream))
             }
-            other => other?,
-        };
-        let value: Value = resp
-            .into_json()
-            .context("LLM returned a non-JSON response")?;
-        let content = match self.cfg.provider {
-            Provider::Ollama => &value["message"]["content"],
-            Provider::Openai => &value["choices"][0]["message"]["content"],
-        };
-        content
-            .as_str()
-            .map(str::to_string)
-            .with_context(|| format!("unexpected LLM response: {value}"))
+            other => other,
+        }
     }
 
-    fn stream(
+    /// Reads a streamed reply; `on_token` returns false to stop early.
+    fn read_stream(
         &self,
-        messages: &[Message],
+        resp: ureq::Response,
         on_token: &mut dyn FnMut(&str) -> bool,
     ) -> Result<String> {
-        let resp = self.post(&self.body(messages, false, true))?;
         let reader = BufReader::new(resp.into_reader());
         let mut out = String::new();
         for line in reader.lines() {
@@ -310,6 +319,43 @@ impl Llm for HttpLlm {
             }
         }
         Ok(out)
+    }
+}
+
+impl Llm for HttpLlm {
+    fn complete(&self, messages: &[Message], json: bool) -> Result<String> {
+        if self.cancel.is_some() {
+            if self.cancelled() {
+                bail!("cancelled");
+            }
+            let resp = self.post_chat(messages, json, true)?;
+            let out = self.read_stream(resp, &mut |_| !self.cancelled())?;
+            if self.cancelled() {
+                bail!("cancelled");
+            }
+            return Ok(out);
+        }
+        let value: Value = self
+            .post_chat(messages, json, false)?
+            .into_json()
+            .context("LLM returned a non-JSON response")?;
+        let content = match self.cfg.provider {
+            Provider::Ollama => &value["message"]["content"],
+            Provider::Openai => &value["choices"][0]["message"]["content"],
+        };
+        content
+            .as_str()
+            .map(str::to_string)
+            .with_context(|| format!("unexpected LLM response: {value}"))
+    }
+
+    fn stream(
+        &self,
+        messages: &[Message],
+        on_token: &mut dyn FnMut(&str) -> bool,
+    ) -> Result<String> {
+        let resp = self.post(&self.body(messages, false, true))?;
+        self.read_stream(resp, &mut |token| on_token(token) && !self.cancelled())
     }
 }
 
@@ -358,6 +404,75 @@ mod tests {
         let out: Out = complete_json(&llm, vec![Message::user("x")]).unwrap();
         assert!(out.ok);
         assert_eq!(*calls.borrow(), 2);
+    }
+
+    /// A fake Ollama that streams `tokens` (then `done`), one every `gap`.
+    fn fake_ollama(tokens: Vec<&'static str>, gap: Duration) -> String {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            let mut buf = [0u8; 8192];
+            let _ = socket.read(&mut buf);
+            let _ = socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: application/x-ndjson\r\nConnection: close\r\n\r\n");
+            for token in tokens {
+                let line = format!(
+                    "{}\n",
+                    json!({ "message": { "content": token }, "done": false })
+                );
+                if socket.write_all(line.as_bytes()).is_err() {
+                    return; // the client hung up: that is the point of cancelling
+                }
+                std::thread::sleep(gap);
+            }
+            let _ = socket.write_all(b"{\"message\":{\"content\":\"\"},\"done\":true}\n");
+        });
+        format!("http://{addr}")
+    }
+
+    fn client(base_url: String) -> HttpLlm {
+        HttpLlm::new(&LlmConfig {
+            base_url,
+            ..LlmConfig::default()
+        })
+        .unwrap()
+    }
+
+    #[test]
+    fn cancellable_complete_reads_the_whole_stream() {
+        let url = fake_ollama(vec!["{\"ok\"", ": ", "true}"], Duration::from_millis(1));
+        let llm = client(url).with_cancel(Arc::new(AtomicBool::new(false)));
+        let out: Out = complete_json(&llm, vec![Message::user("x")]).unwrap();
+        assert!(out.ok);
+    }
+
+    #[test]
+    fn cancel_stops_a_reply_mid_way() {
+        let endless = vec!["word "; 10_000];
+        let url = fake_ollama(endless, Duration::from_millis(30));
+        let cancel = Arc::new(AtomicBool::new(false));
+        let llm = client(url).with_cancel(cancel.clone());
+        let flag = cancel.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(150));
+            flag.store(true, Ordering::Relaxed);
+        });
+        let started = std::time::Instant::now();
+        let err = llm.complete(&[Message::user("x")], false).unwrap_err();
+        assert_eq!(err.to_string(), "cancelled");
+        assert!(
+            started.elapsed() < Duration::from_millis(600),
+            "{:?}",
+            started.elapsed()
+        );
+        // Once cancelled, no new request is even sent.
+        assert_eq!(
+            llm.complete(&[Message::user("y")], false)
+                .unwrap_err()
+                .to_string(),
+            "cancelled"
+        );
     }
 
     #[test]

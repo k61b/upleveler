@@ -77,10 +77,13 @@ struct Run {
 }
 
 /// Makes the model for a run (the configured one, or a fake in tests).
-pub type MakeLlm = Arc<dyn Fn(&Session) -> Result<Box<dyn Llm>> + Send + Sync>;
+/// The flag is the run's cancel flag, so a reply can stop mid-way.
+pub type MakeLlm = Arc<dyn Fn(&Session, Arc<AtomicBool>) -> Result<Box<dyn Llm>> + Send + Sync>;
 
 pub fn configured_llm() -> MakeLlm {
-    Arc::new(|session: &Session| Ok(Box::new(session.llm()?) as Box<dyn Llm>))
+    Arc::new(|session: &Session, cancel: Arc<AtomicBool>| {
+        Ok(Box::new(session.llm()?.with_cancel(cancel)) as Box<dyn Llm>)
+    })
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -203,7 +206,7 @@ impl Runs {
             };
             let result = (|| -> Result<String> {
                 let session = Session::at(paths)?;
-                let llm = make_llm(&session)?;
+                let llm = make_llm(&session, cancel.clone())?;
                 let path = match kind {
                     Kind::Gap => session.gap(llm.as_ref(), range, &mut progress)?.path,
                     Kind::Brag => {
@@ -244,7 +247,7 @@ mod tests {
     use std::time::Duration;
 
     fn fake() -> MakeLlm {
-        Arc::new(|_: &Session| {
+        Arc::new(|_: &Session, _| {
             Ok(Box::new(FakeLlm {
                 reply: |_: &[Message], _| {
                     "- Shipped the ledger export\n- Reviewed pull requests".to_string()
@@ -311,7 +314,7 @@ mod tests {
         // A model that waits until the run is cancelled.
         let gate = Arc::new(AtomicBool::new(false));
         let release = gate.clone();
-        let slow: MakeLlm = Arc::new(move |_: &Session| {
+        let slow: MakeLlm = Arc::new(move |_: &Session, _| {
             let gate = release.clone();
             Ok(Box::new(FakeLlm {
                 reply: move |_: &[Message], _| {

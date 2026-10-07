@@ -861,7 +861,7 @@ mod tests {
             .add_log("Shipped the ledger export", crate::session::today(), vec![])
             .unwrap();
         let mut state = AppState::new(4747, TOKEN.into(), paths);
-        state.make_llm = Arc::new(|_: &Session| {
+        state.make_llm = Arc::new(|_: &Session, _| {
             Ok(Box::new(crate::llm::FakeLlm {
                 reply: |_: &[crate::llm::Message], _| "- Shipped the ledger export".to_string(),
             }) as Box<dyn crate::llm::Llm>)

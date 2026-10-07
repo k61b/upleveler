@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Stopping an analysis (Esc in the terminal app, Stop in the browser) now ends the model's reply at once instead of waiting for it to finish, and mapping entries to your ladder reports progress more often (batches of 8 instead of 15).
 - `upleveler web`: opens the dashboard in your browser, served on 127.0.0.1 only and opened with a private link printed in the terminal. Overview (stats, activity heatmap, readiness, latest reports), Logs (filter as you type, add entries), Ladder (expectations with your evidence, target level marked) and Reports (run analyses with live progress and a stop button; read or copy as Markdown).
 - `/web` in the terminal app opens the browser dashboard; it keeps running while the app is open.
 - [upleveler.dev](https://upleveler.dev): the website, with a live demo of the dashboard built from example data.

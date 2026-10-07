@@ -81,6 +81,11 @@ impl Cancel {
     pub fn is_cancelled(&self) -> bool {
         self.0.load(Ordering::Relaxed)
     }
+
+    /// The flag itself, for a model client that should stop mid-reply.
+    pub fn flag(&self) -> Arc<AtomicBool> {
+        self.0.clone()
+    }
 }
 
 /// Runs `job` on a new thread; events go to `tx`.
@@ -114,7 +119,7 @@ fn run(session: &Session, job: Job, tx: &Sender<Event>, cancel: &Cancel) -> Resu
             )))
         }
         Job::Ask { question, history } => {
-            let llm = session.llm()?;
+            let llm = session.llm()?.with_cancel(cancel.flag());
             let entries = session.entries()?;
             let cfg = &session.cfg;
             let context =
@@ -129,18 +134,18 @@ fn run(session: &Session, job: Job, tx: &Sender<Event>, cancel: &Cancel) -> Resu
             Ok(Output::Answer { question, answer })
         }
         Job::Gap(range) => Ok(Output::Gap(session.gap(
-            &session.llm()?,
+            &session.llm()?.with_cancel(cancel.flag()),
             range,
             &mut progress,
         )?)),
         Job::Brag(range, name) => Ok(Output::Brag(session.brag(
-            &session.llm()?,
+            &session.llm()?.with_cancel(cancel.flag()),
             range,
             &name,
             &mut progress,
         )?)),
         Job::Summary(range) => Ok(Output::Summary(session.summary(
-            &session.llm()?,
+            &session.llm()?.with_cancel(cancel.flag()),
             range,
             &mut progress,
         )?)),
@@ -148,7 +153,7 @@ fn run(session: &Session, job: Job, tx: &Sender<Event>, cancel: &Cancel) -> Resu
             let llm = if crate::import::is_staging(&path) {
                 None
             } else {
-                Some(session.llm()?)
+                Some(session.llm()?.with_cancel(cancel.flag()))
             };
             let preview = session.import_preview(
                 &path,
@@ -160,7 +165,7 @@ fn run(session: &Session, job: Job, tx: &Sender<Event>, cancel: &Cancel) -> Resu
             Ok(Output::Import(Box::new(preview)))
         }
         Job::LadderImport(path) => {
-            let llm = session.llm().ok();
+            let llm = session.llm().ok().map(|l| l.with_cancel(cancel.flag()));
             let ladder = session.ladder_from_file(
                 &path,
                 llm.as_ref().map(|l| l as &dyn Llm),

@@ -80,7 +80,9 @@ struct MappingItem {
     expectations: Vec<String>,
 }
 
-const MAX_ENTRIES_PER_MAPPING: usize = 15;
+/// Small batches keep progress moving on slow local models; the system prompt is
+/// the same for every batch, so the model's prompt cache makes them cheap.
+const MAX_ENTRIES_PER_MAPPING: usize = 8;
 
 /// Maps entries in `range` to expectations of the current and target levels, caching
 /// the result in the store. Returns warnings for batches the model failed on.

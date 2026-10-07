@@ -155,6 +155,9 @@ pub fn run(run: Option<&RunView>) -> Markup {
                             progress.progress aria-label="Progress" {}
                             p.muted.run-meta { span.mono { (duration(run.seconds)) } }
                         }
+                        @if run.done == 0 && run.seconds >= 15 {
+                            p.hint { "The first step also loads the model, which can take a minute or two on a laptop." }
+                        }
                         @if run.stopping {
                             (ui::alert(Alert::Info, "Stopping after the current step. A model call that already started finishes first."))
                         } @else {
