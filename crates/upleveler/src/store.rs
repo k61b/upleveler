@@ -5,8 +5,7 @@ use chrono::{DateTime, NaiveDate, Utc};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;
-use std::fs::{self, OpenOptions};
-use std::io::Write;
+use std::fs;
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -143,21 +142,11 @@ impl Store {
         self.path.parent().unwrap_or_else(|| Path::new("."))
     }
 
+    /// Adds entries. The file is rewritten in one step rather than appended
+    /// to, so a reader (another thread or process) never sees half a line and
+    /// a crash cannot leave one behind.
     pub fn append(&self, entries: &[Entry]) -> Result<()> {
-        crate::fsio::with_lock(self.dir(), || {
-            let mut file = OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(&self.path)
-                .with_context(|| format!("opening {}", self.path.display()))?;
-            let mut buf = String::new();
-            for e in entries {
-                buf.push_str(&serde_json::to_string(e)?);
-                buf.push('\n');
-            }
-            file.write_all(buf.as_bytes())?;
-            Ok(())
-        })
+        self.update(|all| all.extend_from_slice(entries))
     }
 
     /// Replaces the whole file atomically.
@@ -187,10 +176,14 @@ impl Store {
 
     /// Appends entries whose id is not already stored; returns the ones added.
     pub fn add_new(&self, entries: Vec<Entry>) -> Result<Vec<Entry>> {
-        let existing: HashSet<String> = self.load()?.into_iter().map(|e| e.id).collect();
-        let fresh = dedupe(entries, &existing);
-        self.append(&fresh)?;
-        Ok(fresh)
+        // The check and the write happen under one lock, so the same entry
+        // added twice at once is still added once.
+        self.update(|all| {
+            let existing: HashSet<String> = all.iter().map(|e| e.id.clone()).collect();
+            let fresh = dedupe(entries, &existing);
+            all.extend(fresh.iter().cloned());
+            fresh
+        })
     }
 
     /// Removes the entry with `id`; returns it if it existed.

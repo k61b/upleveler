@@ -1077,19 +1077,39 @@ mod tests {
             since: None,
         })
         .unwrap();
+        let writing = std::sync::atomic::AtomicBool::new(true);
         std::thread::scope(|scope| {
-            for t in 0..6 {
-                let paths = paths.clone();
+            // Readers never see a half-written file while the writers work.
+            for _ in 0..2 {
+                let (paths, writing) = (paths.clone(), &writing);
                 scope.spawn(move || {
                     let s = Session::at(paths).unwrap();
-                    for i in 0..15 {
-                        let text = format!("thread {t} step {i}");
-                        s.add_checkin(1, d(10, 1), &text).unwrap();
-                        s.add_log(&text, d(10, 1), vec![]).unwrap();
-                        s.add_note("ada", NoteKind::Note, d(10, 1), &text).unwrap();
+                    while writing.load(std::sync::atomic::Ordering::Relaxed) {
+                        s.entries().unwrap();
+                        s.notes().unwrap();
+                        s.goals().unwrap();
+                        s.people().unwrap();
                     }
                 });
             }
+            let writers: Vec<_> = (0..6)
+                .map(|t| {
+                    let paths = paths.clone();
+                    scope.spawn(move || {
+                        let s = Session::at(paths).unwrap();
+                        for i in 0..15 {
+                            let text = format!("thread {t} step {i}");
+                            s.add_checkin(1, d(10, 1), &text).unwrap();
+                            s.add_log(&text, d(10, 1), vec![]).unwrap();
+                            s.add_note("ada", NoteKind::Note, d(10, 1), &text).unwrap();
+                        }
+                    })
+                })
+                .collect();
+            for w in writers {
+                w.join().unwrap();
+            }
+            writing.store(false, std::sync::atomic::Ordering::Relaxed);
         });
         assert_eq!(s.goals().unwrap().get(1).unwrap().checkins.len(), 90);
         assert_eq!(s.entries().unwrap().len(), 90);

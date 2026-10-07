@@ -1,12 +1,14 @@
 # Changelog
 
-## 2.3.0
+## 2.3.1
 
 Your data stays intact when the terminal app and the browser dashboard are open at the same time, and both apply the same rules.
 
-The 2.2.0 release did not finish publishing, so this is the first release since 2.1.0. It also brings everything from [2.2.0](https://github.com/k61b/upleveler/blob/main/CHANGELOG.md#220): editing and removing people, notes, goals and check-ins in the terminal app and the browser, `/undo` for all of it, and `gemma4:12b` as the recommended model.
+2.2.0 and 2.3.0 were tagged but not published (2.3.0 stopped on the reading bug fixed below), so this is the first release since 2.1.0. It also brings everything from [2.2.0](https://github.com/k61b/upleveler/blob/main/CHANGELOG.md#220): editing and removing people, notes, goals and check-ins in the terminal app and the browser, `/undo` for all of it, and `gemma4:12b` as the recommended model.
 
 ### Data safety
+
+- Reading your logs or notes while another part of Upleveler adds to them no longer fails with "invalid entry". New entries and notes are no longer appended to the end of the file: the whole file is written and swapped in at once, so a reader never sees half a line and a crash cannot leave one. The same entry added twice at the same moment is now stored once.
 
 - Your data is safe when the terminal app and the browser dashboard (or `upleveler web` in another terminal) change it at the same time. Before, a change made in one could be lost when the other saved; with 12 processes adding to a goal at once, only one check-in was kept. Every write now happens while the data folder is locked (`.lock`).
 - Every file is replaced in one step, so a crash or a full disk can no longer leave `people.yaml`, `goals.yaml`, `ladder.yaml` or `config.toml` half-written.

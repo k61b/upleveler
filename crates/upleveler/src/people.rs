@@ -7,8 +7,7 @@ use anyhow::{bail, Context, Result};
 use chrono::{DateTime, NaiveDate, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
-use std::fs::{self, OpenOptions};
-use std::io::Write;
+use std::fs;
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -367,12 +366,8 @@ impl NoteStore {
                     ),
                 );
             }
-            let mut file = OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(&self.path)
-                .with_context(|| format!("opening {}", self.path.display()))?;
-            writeln!(file, "{}", serde_json::to_string(&note)?)?;
+            // Rewritten in one step, not appended to (see `Store::append`).
+            self.update(|all| all.push(note.clone()))?;
             Ok(Some(note))
         })
     }
