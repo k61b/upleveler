@@ -17,6 +17,8 @@ pub struct GoalForm {
     /// `YYYY-MM-DD` or empty.
     pub due: String,
     pub notice: Option<(Alert, String)>,
+    /// A problem with one goal's "Edit goal" form: (goal id, message).
+    pub edit: Option<(u32, String)>,
 }
 
 impl GoalForm {
@@ -26,6 +28,7 @@ impl GoalForm {
             expectation: String::new(),
             due: String::new(),
             notice: None,
+            edit: None,
         }
     }
 }
@@ -60,7 +63,36 @@ fn expectation_text<'a>(data: &'a DashboardData, id: &str) -> Option<&'a str> {
         .map(|e| e.text.as_str())
 }
 
-fn goal_card(data: &DashboardData, g: &Goal) -> Markup {
+/// "Edit goal", folded away until opened (or open with a problem).
+fn edit_goal_form(data: &DashboardData, g: &Goal, problem: Option<&str>) -> Markup {
+    let field = |name: &str| format!("goal-{}-{name}", g.id);
+    html! {
+        details.profile-edit open[problem.is_some()] {
+            summary { "Edit goal" }
+            form.add-entry method="post" action=(format!("{}/edit", goal_path(g.id))) {
+                @if let Some(problem) = problem { (ui::alert(Alert::Error, problem)) }
+                label.field-label for=(field("text")) { "Goal" }
+                input.input type="text" id=(field("text")) name="text" value=(g.text) maxlength="400" required autocomplete="off";
+                div.add-entry-row {
+                    div.field.field--grow {
+                        label.field-label for=(field("expectation")) { "Ladder expectation" }
+                        select.input id=(field("expectation")) name="expectation" disabled[data.ladder.is_none()] {
+                            option value="" { "None, a free goal" }
+                            (expectation_options(data, g.expectation.as_deref().unwrap_or_default()))
+                        }
+                    }
+                    div.field {
+                        label.field-label for=(field("due")) { "Due" }
+                        input.input type="date" id=(field("due")) name="due" value=[g.due.map(|d| d.to_string())];
+                    }
+                    button.btn.btn--outline type="submit" { "Save goal" }
+                }
+            }
+        }
+    }
+}
+
+fn goal_card(data: &DashboardData, g: &Goal, problem: Option<&str>) -> Markup {
     let p = data.goal_progress(g);
     let entries = p.evidence + p.tagged;
     let active = g.status == GoalStatus::Active;
@@ -86,10 +118,15 @@ fn goal_card(data: &DashboardData, g: &Goal) -> Markup {
             }
             @if !g.checkins.is_empty() {
                 ul.note-list {
-                    @for c in g.checkins.iter().rev().take(5) {
+                    @for c in g.checkins.iter().rev() {
                         li.note {
                             p.note-meta.muted { span.mono { (c.date) } " · check-in" }
                             p.note-text { (c.text) }
+                            form.note-actions method="post" action=(format!("{}/checkins/delete", goal_path(g.id))) {
+                                input type="hidden" name="date" value=(c.date);
+                                input type="hidden" name="text" value=(c.text);
+                                button.btn.btn--outline type="submit" { "Delete" }
+                            }
                         }
                     }
                 }
@@ -115,6 +152,7 @@ fn goal_card(data: &DashboardData, g: &Goal) -> Markup {
             @if g.expectation.is_none() {
                 p.muted { "Tag entries " span.mono { (g.tag()) } " to count them here." }
             }
+            (edit_goal_form(data, g, problem))
         }
     }
 }
@@ -205,13 +243,13 @@ pub fn goals_with(data: &DashboardData, form: &GoalForm) -> Markup {
                             None,
                         ))
                     } @else {
-                        ul.goal-list { @for g in &active { (goal_card(data, g)) } }
+                        ul.goal-list { @for g in &active { (goal_card(data, g, form.edit.as_ref().filter(|(id, _)| *id == g.id).map(|(_, p)| p.as_str()))) } }
                     }
                     (add_goal_form(data, form))
                     @if !closed.is_empty() {
                         section {
                             h2.card-title { "Done and dropped" }
-                            ul.goal-list { @for g in closed.iter().rev() { (goal_card(data, g)) } }
+                            ul.goal-list { @for g in closed.iter().rev() { (goal_card(data, g, form.edit.as_ref().filter(|(id, _)| *id == g.id).map(|(_, p)| p.as_str()))) } }
                         }
                     }
                 }

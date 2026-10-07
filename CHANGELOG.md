@@ -1,5 +1,19 @@
 # Changelog
 
+## Unreleased
+
+- The recommended model is now `gemma4:12b` (`ollama pull gemma4:12b`); it is the default for new setups and comes first in the model picker. Existing setups keep the model they chose, and `gemma3:12b` still works.
+- Close, reopen or delete a note from the command line (`upleveler notes done|reopen|delete <id>`) and the terminal app (`/notes done <id>`, with `/undo`). Note lists show a short id for this.
+- Change a goal's text, expectation or due date: `upleveler goal edit <id>`, or "Edit goal" on the Goals page in the browser.
+- Delete a check-in: `upleveler goal drop-checkin <id> <n>` (numbers from `upleveler goal show <id>`), `/checkin delete <id> <n>` in the app (with `/undo`), or "Delete" next to it in the browser, which now lists every check-in.
+- Change someone's profile: `upleveler person edit`, or "Edit profile" on their page in the browser, where they can also be removed after a confirmation page.
+- Everything about people, notes and goals can be done inside the terminal app and the browser:
+  - `/people add @ada Ada, Junior developer, mentee`, `/people edit @ada role: Developer, team: Payments` and `/people remove @ada`;
+  - `/notes edit <id> [kind] <text>`, and "Edit" under each note in the browser;
+  - `/goal edit 2 text: …, due: …, expectation: …`;
+  - `/undo` takes each of these back.
+- `/goal` in the terminal app ties the goal to a ladder expectation when its last word is one (`/goal Mentor a junior developer SD3.mentoring.1`).
+
 ## 2.1.0
 
 Notes about the people you work with, personal goals and 1:1 preparation, in the command line, the terminal app and the browser dashboard. They are plain files in `~/.upleveler`, like your logs.

@@ -440,7 +440,7 @@ pub fn notes(notes: &[&crate::people::Note], show_person: bool, width: u16) -> L
         };
         let lead = Span::styled(format!("  {} ", n.date), theme::accent());
         let mut spans = vec![Span::styled(
-            format!("{who}[{}] ", n.kind.label()),
+            format!("{} {who}[{}] ", n.short_id(), n.kind.label()),
             theme::dim(),
         )];
         spans.push(Span::raw(n.text.replace('\n', " / ")));
@@ -489,6 +489,34 @@ pub fn person(
     ));
     let recent: Vec<&Entry> = mentioned.iter().rev().take(10).rev().copied().collect();
     out.extend(entries(&recent, width));
+    out
+}
+
+/// One goal: its line from `goals`, then every check-in, numbered from the oldest.
+pub fn goal(
+    g: &crate::goals::Goal,
+    all_entries: &[Entry],
+    gap: Option<&GapSummary>,
+    width: u16,
+) -> Lines {
+    let mut out = goals(&[g], all_entries, gap, width);
+    out.pop();
+    if g.checkins.is_empty() {
+        out.push(Line::styled(
+            format!("      No check-ins yet: /checkin {} <what you did>", g.id),
+            theme::dim(),
+        ));
+    }
+    for (i, c) in g.checkins.iter().enumerate() {
+        let lead = Span::styled(format!("      {:>2}. {} ", i + 1, c.date), theme::dim());
+        out.extend(wrap(
+            &[Span::raw(c.text.clone())],
+            width as usize,
+            &lead,
+            &Span::raw("                    "),
+        ));
+    }
+    out.push(Line::default());
     out
 }
 
@@ -595,7 +623,7 @@ mod tests {
             ladder_levels: Some(5),
             current: Some("SD2".into()),
             target: Some("SD3".into()),
-            model: "gemma3:12b".into(),
+            model: "gemma4:12b".into(),
             base_url: "http://localhost:11434".into(),
             local: true,
             latest_gap: Some(summary()),

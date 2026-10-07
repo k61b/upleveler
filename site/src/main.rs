@@ -25,7 +25,7 @@ const INSTALL_SCRIPT: &str = include_str!("../install.sh");
 
 const INSTALL: &[&str] = &[
     "curl -fsSL https://upleveler.dev/install.sh | sh",
-    "ollama pull gemma3:12b",
+    "ollama pull gemma4:12b",
     "upleveler",
 ];
 

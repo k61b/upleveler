@@ -154,6 +154,11 @@ fn router(state: Arc<AppState>) -> Router {
         .route("/people", get(people).post(add_person))
         .route("/people/{handle}", get(person))
         .route("/people/{handle}/notes", axum::routing::post(add_note))
+        .route("/people/{handle}/edit", axum::routing::post(edit_person))
+        .route(
+            "/people/{handle}/remove",
+            get(confirm_remove).post(remove_person),
+        )
         .route(
             "/people/{handle}/notes/{id}/done",
             axum::routing::post(note_done),
@@ -162,8 +167,17 @@ fn router(state: Arc<AppState>) -> Router {
             "/people/{handle}/notes/{id}/delete",
             axum::routing::post(delete_note),
         )
+        .route(
+            "/people/{handle}/notes/{id}/edit",
+            axum::routing::post(edit_note),
+        )
         .route("/goals", get(goals).post(add_goal))
         .route("/goals/{id}/checkin", axum::routing::post(checkin))
+        .route("/goals/{id}/edit", axum::routing::post(edit_goal))
+        .route(
+            "/goals/{id}/checkins/delete",
+            axum::routing::post(delete_checkin),
+        )
         .route("/goals/{id}/status", axum::routing::post(goal_status))
         .route("/ladder", get(ladder))
         .route("/reports", get(reports))
@@ -402,9 +416,14 @@ impl Saved {
             "note" => "Note saved.",
             "done" => "Follow-up updated.",
             "deleted" => "Note deleted.",
+            "profile" => "Profile saved.",
+            "noteedit" => "Note saved.",
+            "removed" => "Removed, with their notes. Log entries that mention them stay.",
             "goal" => "Goal added.",
             "checkin" => "Check-in saved.",
             "status" => "Goal updated.",
+            "edited" => "Goal saved.",
+            "uncheckin" => "Check-in deleted.",
             _ => return None,
         };
         Some((Alert::Success, text.to_string()))
@@ -542,6 +561,7 @@ async fn add_note(
                     date: input.date,
                     text: input.text,
                     notice: Some((Alert::Error, problem)),
+                    profile: None,
                 };
                 Ok(match views::person(&data, &person.handle, &form) {
                     Some(markup) => invalid(markup),
@@ -549,6 +569,94 @@ async fn add_note(
                 })
             }
         }
+    })
+    .await
+}
+
+#[derive(Deserialize)]
+struct EditPerson {
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    role: String,
+    #[serde(default)]
+    team: String,
+    #[serde(default)]
+    relation: String,
+    #[serde(default)]
+    about: String,
+}
+
+async fn edit_person(
+    State(state): State<Arc<AppState>>,
+    Path(handle): Path<String>,
+    headers: HeaderMap,
+    Form(input): Form<EditPerson>,
+) -> Response {
+    write(state, &headers, move |session| {
+        let Some(person) = session.people()?.get(&handle).cloned() else {
+            return Ok(missing());
+        };
+        let short = |v: &str| v.chars().count() <= 100;
+        let problem = if input.name.trim().is_empty() {
+            Some("Write their name.")
+        } else if !short(&input.name) || !short(&input.role) || !short(&input.team) {
+            Some("Keep the name, role and team under 100 characters.")
+        } else if input.about.chars().count() > 500 {
+            Some("Keep the description under 500 characters.")
+        } else {
+            None
+        };
+        if let Some(problem) = problem {
+            let data = DashboardData::load(session)?;
+            let mut form = NoteForm::empty(data.today);
+            form.profile = Some(problem.to_string());
+            return Ok(match views::person(&data, &person.handle, &form) {
+                Some(markup) => invalid(markup),
+                None => missing(),
+            });
+        }
+        let optional = |v: &str| Some(v.trim().to_string()).filter(|v| !v.is_empty());
+        session.edit_person(&person.handle, |p| {
+            p.name = input.name.trim().to_string();
+            p.role = optional(&input.role);
+            p.team = optional(&input.team);
+            p.about = optional(&input.about);
+            if let Some(relation) = crate::people::Relation::parse(&input.relation) {
+                p.relation = relation;
+            }
+        })?;
+        Ok(see_other(format!(
+            "{}?saved=profile",
+            views::person_path(&person.handle)
+        )))
+    })
+    .await
+}
+
+async fn confirm_remove(
+    State(state): State<Arc<AppState>>,
+    Path(handle): Path<String>,
+) -> Response {
+    with_data(state, move |data| {
+        match views::remove_person(data, &handle) {
+            Some(markup) => page(markup),
+            None => missing(),
+        }
+    })
+    .await
+}
+
+async fn remove_person(
+    State(state): State<Arc<AppState>>,
+    Path(handle): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    write(state, &headers, move |session| {
+        Ok(match session.remove_person(&handle)? {
+            Some(_) => see_other(format!("{}?saved=removed", views::Tab::People.path())),
+            None => missing(),
+        })
     })
     .await
 }
@@ -592,6 +700,63 @@ async fn note_done(
             "{}?saved=done",
             back_to(&input.back, &handle)
         )))
+    })
+    .await
+}
+
+#[derive(Deserialize)]
+struct EditNote {
+    #[serde(default)]
+    text: String,
+    #[serde(default)]
+    kind: String,
+    #[serde(default)]
+    date: String,
+    #[serde(default)]
+    back: String,
+}
+
+async fn edit_note(
+    State(state): State<Arc<AppState>>,
+    Path((handle, id)): Path<(String, String)>,
+    headers: HeaderMap,
+    Form(input): Form<EditNote>,
+) -> Response {
+    write(state, &headers, move |session| {
+        let Some(note) = session
+            .notes()?
+            .into_iter()
+            .find(|n| n.id == id && n.person == handle)
+        else {
+            return Ok(missing());
+        };
+        let text = input.text.trim();
+        let checked = if text.is_empty() {
+            Err("A note needs some text.".to_string())
+        } else if text.chars().count() > MAX_ENTRY {
+            Err(format!("That is longer than {MAX_ENTRY} characters."))
+        } else {
+            form_date(&input.date, Some(note.date))
+        };
+        match checked {
+            Ok(date) => {
+                let kind = crate::people::NoteKind::parse(&input.kind).unwrap_or(note.kind);
+                session.edit_note(&note.id, kind, date.unwrap_or(note.date), text)?;
+                Ok(see_other(format!(
+                    "{}?saved=noteedit",
+                    back_to(&input.back, &handle)
+                )))
+            }
+            Err(problem) => {
+                let data = DashboardData::load(session)?;
+                let mut form = NoteForm::empty(data.today);
+                form.notice = Some((Alert::Error, format!("The note was not saved: {problem}")));
+                Ok(match views::person(&data, &note.person, &form) {
+                    Some(markup) => invalid(markup),
+                    None => missing(),
+                })
+            }
+        }
     })
     .await
 }
@@ -668,6 +833,7 @@ async fn add_goal(
                     expectation: input.expectation,
                     due: input.due,
                     notice: Some((Alert::Error, problem)),
+                    edit: None,
                 };
                 Ok(invalid(views::goals_with(&data, &form)))
             }
@@ -707,6 +873,74 @@ async fn checkin(
             "{}?saved=checkin",
             views::Tab::Goals.path()
         )))
+    })
+    .await
+}
+
+async fn edit_goal(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<u32>,
+    headers: HeaderMap,
+    Form(input): Form<AddGoal>,
+) -> Response {
+    write(state, &headers, move |session| {
+        if session.goals()?.get(id).is_none() {
+            return Ok(missing());
+        }
+        let text = input.text.trim();
+        let edited = if text.is_empty() {
+            Err("Write the goal first.".to_string())
+        } else if text.chars().count() > 400 {
+            Err("Keep a goal under 400 characters.".to_string())
+        } else {
+            form_date(&input.due, None).and_then(|due| {
+                session
+                    .edit_goal(id, Some(text), Some(input.expectation.as_str()), Some(due))
+                    .map_err(|e| format!("{e:#}"))
+            })
+        };
+        match edited {
+            Ok(_) => Ok(see_other(format!(
+                "{}?saved=edited",
+                views::Tab::Goals.path()
+            ))),
+            Err(problem) => {
+                let data = DashboardData::load(session)?;
+                let mut form = GoalForm::empty();
+                form.edit = Some((id, problem));
+                Ok(invalid(views::goals_with(&data, &form)))
+            }
+        }
+    })
+    .await
+}
+
+#[derive(Deserialize)]
+struct DeleteCheckin {
+    #[serde(default)]
+    date: String,
+    #[serde(default)]
+    text: String,
+}
+
+async fn delete_checkin(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<u32>,
+    headers: HeaderMap,
+    Form(input): Form<DeleteCheckin>,
+) -> Response {
+    write(state, &headers, move |session| {
+        let date = chrono::NaiveDate::parse_from_str(input.date.trim(), "%Y-%m-%d").ok();
+        if session.goals()?.get(id).is_none() {
+            return Ok(missing());
+        }
+        match date {
+            Some(date) if session.remove_checkin(id, date, &input.text)? => Ok(see_other(format!(
+                "{}?saved=uncheckin",
+                views::Tab::Goals.path()
+            ))),
+            _ => Ok(missing()),
+        }
     })
     .await
 }
@@ -1447,6 +1681,40 @@ mod tests {
             .status(),
             StatusCode::NOT_FOUND
         );
+        let edited = send(
+            &state,
+            post(&format!("/people/ada/notes/{}/edit", note.id)),
+            "text=Wants+to+own+the+ledger&kind=one-on-one&date=2026-10-01",
+        )
+        .await;
+        assert_eq!(location(&edited), "/people/ada?saved=noteedit");
+        let changed = session.notes().unwrap().remove(0);
+        assert_eq!(
+            (
+                changed.kind,
+                changed.text.as_str(),
+                changed.date.to_string()
+            ),
+            (
+                crate::people::NoteKind::OneOnOne,
+                "Wants to own the ledger",
+                "2026-10-01".to_string()
+            )
+        );
+        let empty = send(
+            &state,
+            post(&format!("/people/ada/notes/{}/edit", note.id)),
+            "text=+",
+        )
+        .await;
+        assert_eq!(empty.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let stranger = send(
+            &state,
+            post(&format!("/people/bo/notes/{}/edit", note.id)),
+            "text=x",
+        )
+        .await;
+        assert_eq!(stranger.status(), StatusCode::NOT_FOUND);
         let deleted = send(
             &state,
             post(&format!("/people/ada/notes/{}/delete", note.id)),
@@ -1491,10 +1759,82 @@ mod tests {
         let goals = session.goals().unwrap();
         assert_eq!(goals.get(1).unwrap().checkins.len(), 1);
         assert_eq!(goals.get(1).unwrap().status, crate::goals::GoalStatus::Done);
+        // A goal can be edited, and a check-in deleted by its date and text.
+        let edited = send(
+            &state,
+            post("/goals/1/edit"),
+            "text=Speak+at+two+meetups&expectation=&due=",
+        )
+        .await;
+        assert_eq!(location(&edited), "/goals?saved=edited");
+        let goal = session.goals().unwrap().get(1).cloned().unwrap();
+        assert_eq!(
+            (goal.text.as_str(), goal.due),
+            ("Speak at two meetups", None)
+        );
+        let bad = send(&state, post("/goals/1/edit"), "text=+").await;
+        assert_eq!(bad.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(body(bad).await.contains("Write the goal first."));
+        let day = goal.checkins[0].date;
+        assert_eq!(
+            send(
+                &state,
+                post("/goals/1/checkins/delete"),
+                &format!("date={day}&text=Not+there")
+            )
+            .await
+            .status(),
+            StatusCode::NOT_FOUND
+        );
+        let gone = send(
+            &state,
+            post("/goals/1/checkins/delete"),
+            &format!("date={day}&text=Sent+the+proposal"),
+        )
+        .await;
+        assert_eq!(location(&gone), "/goals?saved=uncheckin");
+        assert!(session.goals().unwrap().get(1).unwrap().checkins.is_empty());
         let page = body(send(&state, Request::get("/goals?saved=status"), "").await).await;
         assert!(
             page.contains("Goal updated.") && page.contains("Done and dropped"),
             "{page}"
+        );
+
+        // The profile can be changed and the person removed, after a confirmation page.
+        let saved = send(
+            &state,
+            post("/people/ada/edit"),
+            "name=Ada+L&role=Developer&team=&relation=peer&about=Likes+Rust",
+        )
+        .await;
+        assert_eq!(location(&saved), "/people/ada?saved=profile");
+        let ada = session.people().unwrap().get("ada").cloned().unwrap();
+        assert_eq!(
+            (ada.label(), ada.team, ada.about.as_deref()),
+            (
+                "Ada L (Developer, peer)".to_string(),
+                None,
+                Some("Likes Rust")
+            )
+        );
+        let empty = send(&state, post("/people/ada/edit"), "name=+").await;
+        assert_eq!(empty.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let page = body(empty).await;
+        assert!(
+            page.contains("Write their name.")
+                && page.contains(r#"<details class="profile-edit" open"#),
+            "{page}"
+        );
+        send(&state, post("/people/ada/notes"), "text=A+note").await;
+        let confirm = body(send(&state, Request::get("/people/ada/remove"), "").await).await;
+        assert!(
+            confirm.contains("1 note") && confirm.contains("cannot be undone"),
+            "{confirm}"
+        );
+        assert_eq!(
+            session.people().unwrap().people.len(),
+            1,
+            "the confirmation page removes nothing"
         );
 
         // Other sites cannot change anything.
@@ -1505,9 +1845,14 @@ mod tests {
         for path in [
             "/people",
             "/people/ada/notes",
+            "/people/ada/edit",
+            "/people/ada/remove",
+            "/people/ada/notes/x/edit",
             "/goals",
             "/goals/1/checkin",
             "/goals/1/status",
+            "/goals/1/edit",
+            "/goals/1/checkins/delete",
         ] {
             assert_eq!(
                 send(
@@ -1521,6 +1866,13 @@ mod tests {
                 "{path}"
             );
         }
+        let removed = send(&state, post("/people/ada/remove"), "").await;
+        assert_eq!(location(&removed), "/people?saved=removed");
+        assert!(session.people().unwrap().people.is_empty() && session.notes().unwrap().is_empty());
+        assert_eq!(
+            send(&state, post("/people/ada/remove"), "").await.status(),
+            StatusCode::NOT_FOUND
+        );
     }
 
     #[tokio::test]

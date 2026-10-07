@@ -74,6 +74,38 @@ fn people_notes_and_goals_from_the_command_line() {
             "Share the retry design doc",
         ],
     );
+    let edited = ok(
+        home,
+        &[
+            "person",
+            "edit",
+            "ada",
+            "--role",
+            "Developer",
+            "--team",
+            "Payments",
+        ],
+    );
+    assert!(
+        edited.contains("Updated @ada: Ada (Developer, mentee)"),
+        "{edited}"
+    );
+    assert!(
+        !run(home, &["person", "edit", "ada"]).status.success(),
+        "nothing to change"
+    );
+    ok(
+        home,
+        &[
+            "person",
+            "edit",
+            "ada",
+            "--role",
+            "Junior developer",
+            "--team",
+            "",
+        ],
+    );
     let unknown = run(home, &["note", "bo", "Hello"]);
     assert!(!unknown.status.success());
     assert!(String::from_utf8_lossy(&unknown.stderr).contains("person add bo"));
@@ -90,6 +122,26 @@ fn people_notes_and_goals_from_the_command_line() {
         open.contains("Share the retry design doc") && !open.contains("on-call"),
         "{open}"
     );
+    // Close the follow-up by the short id the list shows, then reopen it.
+    let id = open.split_whitespace().next().unwrap().to_string();
+    assert_eq!(id.len(), 8, "{open}");
+    assert!(
+        ok(home, &["notes", "done", &id[..4]]).contains("Done: @ada Share the retry design doc")
+    );
+    assert_eq!(ok(home, &["notes", "--open"]), "");
+    ok(home, &["notes", "reopen", &id]);
+    assert!(ok(home, &["notes", "--open"]).contains(&id));
+    let one_on_one = ok(home, &["notes", "--person", "ada"])
+        .lines()
+        .find(|l| l.contains("on-call"))
+        .unwrap()
+        .split_whitespace()
+        .next()
+        .unwrap()
+        .to_string();
+    let not_follow_up = run(home, &["notes", "done", &one_on_one]);
+    assert!(String::from_utf8_lossy(&not_follow_up.stderr).contains("not a follow-up"));
+    assert!(!run(home, &["notes", "done", "zz"]).status.success());
 
     // Goals.
     ok(
@@ -111,7 +163,42 @@ fn people_notes_and_goals_from_the_command_line() {
         .status
         .success());
     ok(home, &["goal", "add", "Speak at a meetup"]);
+    let edited = ok(home, &["goal", "edit", "1", "--due", "", "-e", ""]);
+    assert!(
+        edited.contains("Updated goal #1 Mentor a junior developer") && !edited.contains("due"),
+        "{edited}"
+    );
+    assert!(!run(home, &["goal", "edit", "1", "-e", "SD9.nope.1"])
+        .status
+        .success());
+    ok(
+        home,
+        &[
+            "goal",
+            "edit",
+            "1",
+            "-e",
+            "SD3.mentoring.1",
+            "--due",
+            "2099-12-31",
+        ],
+    );
     ok(home, &["goal", "checkin", "2", "Sent the proposal"]);
+    ok(home, &["goal", "checkin", "2", "Typo"]);
+    assert!(ok(home, &["goal", "show", "2"]).contains("2. "));
+    let typo = ok(home, &["goal", "show", "2"])
+        .lines()
+        .find(|l| l.ends_with("Typo"))
+        .unwrap()
+        .trim()
+        .split('.')
+        .next()
+        .unwrap()
+        .to_string();
+    assert!(ok(home, &["goal", "drop-checkin", "2", &typo]).contains("Typo"));
+    assert!(!run(home, &["goal", "drop-checkin", "2", "9"])
+        .status
+        .success());
     ok(home, &["log", "-t", "goal-2", "Drafted the talk outline"]);
     let list = ok(home, &["goal", "list"]);
     assert!(
@@ -127,8 +214,9 @@ fn people_notes_and_goals_from_the_command_line() {
     assert!(ok(home, &["goal", "list", "--all"]).contains("#2 Speak at a meetup (done)"));
 
     // Removing a person removes their notes, not the log.
+    ok(home, &["notes", "delete", &one_on_one, "--yes"]);
     let removed = ok(home, &["person", "remove", "ada", "--yes"]);
-    assert!(removed.contains("Removed @ada and 2 notes"), "{removed}");
+    assert!(removed.contains("Removed @ada and 1 note"), "{removed}");
     assert_eq!(ok(home, &["notes"]), "");
     assert!(ok(home, &["list"]).contains("Paired with @ada"));
 }

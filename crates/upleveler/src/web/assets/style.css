@@ -1669,6 +1669,44 @@ select.input {
   font-size: var(--text-sm);
 }
 
+.note-edit {
+  margin-top: 8px;
+}
+
+.note-edit summary {
+  color: var(--fg-muted);
+  font-size: var(--text-sm);
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.note-edit .add-entry {
+  margin: 8px 0 0;
+  padding-bottom: 0;
+  border-bottom: 0;
+}
+
+.profile-edit {
+  padding-top: 16px;
+  border-top: 1px solid var(--rule);
+}
+
+.profile-edit summary {
+  color: var(--fg);
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.profile-edit[open] summary {
+  margin-bottom: 16px;
+}
+
+.profile-edit .add-entry {
+  margin-bottom: 0;
+  padding-bottom: 0;
+  border-bottom: 0;
+}
+
 .person-about {
   color: var(--fg);
   overflow-wrap: anywhere;

@@ -173,7 +173,7 @@ impl Goals {
         Ok(self.goals.last().expect("just pushed"))
     }
 
-    fn get_mut(&mut self, id: u32) -> Result<&mut Goal> {
+    pub(crate) fn get_mut(&mut self, id: u32) -> Result<&mut Goal> {
         self.goals
             .iter_mut()
             .find(|g| g.id == id)

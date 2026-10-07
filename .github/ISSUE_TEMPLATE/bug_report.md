@@ -22,7 +22,7 @@ A clear and concise description of what you expected to happen.
 - OS: [e.g. macOS 15]
 - Rust version (`rustc --version`): [e.g. 1.99.0]
 - Upleveler version (`upleveler --version`):
-- Model (`upleveler status`): [e.g. gemma3:12b on Ollama]
+- Model (`upleveler status`): [e.g. gemma4:12b on Ollama]
 
 **Additional context**
 Add any other context about the problem here.

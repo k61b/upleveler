@@ -26,6 +26,8 @@ pub struct NoteForm {
     pub date: String,
     pub text: String,
     pub notice: Option<(Alert, String)>,
+    /// A problem with the "Edit profile" form; shows it open with the message.
+    pub profile: Option<String>,
 }
 
 impl NoteForm {
@@ -35,6 +37,7 @@ impl NoteForm {
             date: today.to_string(),
             text: String::new(),
             notice: None,
+            profile: None,
         }
     }
 }
@@ -184,6 +187,30 @@ fn note_item(n: &Note, show_person: bool) -> Markup {
                     button.btn.btn--outline type="submit" { "Delete" }
                 }
             }
+            @let field = |name: &str| format!("note-{}-{name}", n.short_id());
+            details.note-edit {
+                summary { "Edit" }
+                form.add-entry method="post" action=(format!("{base}/edit")) {
+                    @if show_person { input type="hidden" name="back" value=(Tab::People.path()); }
+                    label.visually-hidden for=(field("text")) { "Note" }
+                    textarea.input.textarea id=(field("text")) name="text" rows="2" maxlength="4000" required { (n.text) }
+                    div.add-entry-row {
+                        div.field {
+                            label.field-label for=(field("kind")) { "Kind" }
+                            select.input id=(field("kind")) name="kind" {
+                                @for k in NoteKind::ALL {
+                                    option value=(k.as_str()) selected[k == n.kind] { (k.label()) }
+                                }
+                            }
+                        }
+                        div.field {
+                            label.field-label for=(field("date")) { "Date" }
+                            input.input type="date" id=(field("date")) name="date" value=(n.date);
+                        }
+                        button.btn.btn--outline type="submit" { "Save" }
+                    }
+                }
+            }
         }
     }
 }
@@ -214,6 +241,72 @@ fn add_note_form(p: &Person, form: &NoteForm) -> Markup {
             }
         }
     }
+}
+
+/// "Edit profile", folded away until opened (or open with a problem), and the
+/// way to remove someone.
+fn profile_form(p: &Person, problem: Option<&str>) -> Markup {
+    let path = person_path(&p.handle);
+    html! {
+        details.profile-edit open[problem.is_some()] {
+            summary { "Edit profile" }
+            form.add-entry method="post" action=(format!("{path}/edit")) {
+                @if let Some(problem) = problem { (ui::alert(Alert::Error, problem)) }
+                div.add-entry-row {
+                    div.field.field--grow {
+                        label.field-label for="profile-name" { "Name" }
+                        input #profile-name.input type="text" name="name" value=(p.name) required autocomplete="off";
+                    }
+                    div.field.field--grow {
+                        label.field-label for="profile-role" { "Role" }
+                        input #profile-role.input type="text" name="role" value=[p.role.as_deref()] autocomplete="off";
+                    }
+                }
+                div.add-entry-row {
+                    div.field.field--grow {
+                        label.field-label for="profile-team" { "Team" }
+                        input #profile-team.input type="text" name="team" value=[p.team.as_deref()] autocomplete="off";
+                    }
+                    div.field {
+                        label.field-label for="profile-relation" { "They are your" }
+                        select #profile-relation.input name="relation" { (relation_options(p.relation.as_str())) }
+                    }
+                }
+                label.field-label for="profile-about" { "About them " span.muted { "(optional)" } }
+                textarea #profile-about.input.textarea name="about" rows="2" maxlength="500" { (p.about.as_deref().unwrap_or_default()) }
+                div.add-entry-row {
+                    button.btn.btn--outline type="submit" { "Save profile" }
+                    a.btn.btn--ghost href=(format!("{path}/remove")) { "Remove @" (p.handle) }
+                }
+            }
+        }
+    }
+}
+
+/// Asks before removing someone: their profile and notes go, the log stays.
+pub fn remove_person(data: &DashboardData, handle: &str) -> Option<Markup> {
+    let p = data.person(handle)?;
+    let notes = data.notes_about(&p.handle).len();
+    let path = person_path(&p.handle);
+    Some(layout(
+        &format!("Remove {}", p.name),
+        Some(Tab::People),
+        html! {
+            section.view.container {
+                (view_header(&format!("Remove {}?", p.name), html! { span.mono { "@" (p.handle) } " · " (p.label()) }, None))
+                div.paper.panel.stack {
+                    p {
+                        "This deletes " (p.name) "'s profile and " (plural(notes, "note", "notes"))
+                        " about them. Log entries that mention @" (p.handle) " stay as they are. This cannot be undone."
+                    }
+                    form.add-entry-row method="post" action=(format!("{path}/remove")) {
+                        button.btn.btn--danger type="submit" { "Remove " (p.name) }
+                        a.btn.btn--ghost href=(path) { "Cancel" }
+                    }
+                }
+            }
+        },
+    ))
 }
 
 /// One person's page, or `None` if no one has that handle.
@@ -275,6 +368,7 @@ pub fn person(data: &DashboardData, handle: &str, form: &NoteForm) -> Option<Mar
                             ul.log-list { @for e in entries.iter().take(30) { (ui::log_entry(e)) } }
                         }
                     }
+                    (profile_form(p, form.profile.as_deref()))
                 }
             }
         },

@@ -143,6 +143,22 @@ impl Session {
         Ok(people.get(&handle).cloned().expect("just added"))
     }
 
+    /// Changes someone's profile and saves it; errors if no one has `handle`.
+    pub fn edit_person(&self, handle: &str, change: impl FnOnce(&mut Person)) -> Result<Person> {
+        let mut people = self.people()?;
+        let key = normalize_handle(handle).unwrap_or_else(|| handle.to_string());
+        let Some(person) = people.people.iter_mut().find(|p| p.handle == key) else {
+            bail!("@{key} is not in your people (see `upleveler person list`)");
+        };
+        change(person);
+        if person.name.trim().is_empty() {
+            person.name = person.handle.clone();
+        }
+        let person = person.clone();
+        people.save(&self.paths.people)?;
+        Ok(person)
+    }
+
     /// Removes a person and every note about them; returns the profile and how
     /// many notes were deleted. Log entries that mention them stay as they are.
     pub fn remove_person(&self, handle: &str) -> Result<Option<(Person, usize)>> {
@@ -191,7 +207,7 @@ impl Session {
         let people = self.people()?;
         let Some(person) = people.get(handle) else {
             let handle = normalize_handle(handle).unwrap_or_else(|| handle.to_string());
-            bail!("@{handle} is not in your people yet. Add them first: upleveler person add {handle} --name \"…\"");
+            bail!("@{handle} is not in your people yet. Add them first: /people add @{handle} <name> in the app, or upleveler person add {handle} --name \"…\"");
         };
         self.notes_store()
             .add(Note::new(&person.handle, date, kind, text))
@@ -207,6 +223,66 @@ impl Session {
                 }
                 None => false,
             })
+    }
+
+    /// The note a short id (at least 4 characters of it) or a full id picks.
+    pub fn find_note(&self, key: &str) -> Result<Note> {
+        let key = key.trim().trim_start_matches('#').to_lowercase();
+        if key.chars().count() < 4 {
+            bail!("give at least 4 characters of the note's id (see `upleveler notes`)");
+        }
+        let notes = self.notes()?;
+        let matches: Vec<&Note> = notes
+            .iter()
+            .filter(|n| n.id == key || n.short_id().starts_with(&key))
+            .collect();
+        match matches.as_slice() {
+            [one] => Ok((*one).clone()),
+            [] => bail!("no note with id {key} (see `upleveler notes`)"),
+            more => bail!(
+                "{key} matches {} notes; give more of the id: {}",
+                more.len(),
+                more.iter()
+                    .map(|n| n.short_id())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        }
+    }
+
+    /// Changes a note's kind, date and text; returns the note as it was before.
+    /// The id stays, so lists and undo keep pointing at it.
+    pub fn edit_note(&self, id: &str, kind: NoteKind, date: NaiveDate, text: &str) -> Result<Note> {
+        let text = text.trim();
+        if text.is_empty() {
+            bail!("a note needs some text");
+        }
+        self.notes_store()
+            .update(|notes| {
+                let note = notes.iter_mut().find(|n| n.id == id)?;
+                let before = note.clone();
+                note.kind = kind;
+                note.date = date;
+                note.text = text.to_string();
+                if kind != NoteKind::FollowUp {
+                    note.done = false;
+                }
+                Some(before)
+            })?
+            .with_context(|| format!("no note with id {id}"))
+    }
+
+    /// Puts a deleted note back where it was (for undo).
+    pub fn restore_note(&self, note: Note) -> Result<()> {
+        self.notes_store().update(|notes| {
+            if notes.iter().all(|n| n.id != note.id) {
+                let pos = notes
+                    .iter()
+                    .position(|n| n.created_at > note.created_at)
+                    .unwrap_or(notes.len());
+                notes.insert(pos, note);
+            }
+        })
     }
 
     pub fn remove_note(&self, id: &str) -> Result<Option<Note>> {
@@ -227,8 +303,17 @@ impl Session {
         expectation: Option<&str>,
         due: Option<NaiveDate>,
     ) -> Result<Goal> {
-        let expectation = match expectation.map(str::trim).filter(|e| !e.is_empty()) {
-            None => None,
+        let expectation = self.check_expectation(expectation)?;
+        let mut goals = self.goals()?;
+        let goal = goals.add(text, expectation, due, today())?.clone();
+        goals.save(&self.paths.goals)?;
+        Ok(goal)
+    }
+
+    /// The ladder's id for an expectation a goal is tied to; `None` for none.
+    fn check_expectation(&self, expectation: Option<&str>) -> Result<Option<String>> {
+        match expectation.map(str::trim).filter(|e| !e.is_empty()) {
+            None => Ok(None),
             Some(id) => {
                 let ladder = self
                     .ladder()?
@@ -238,11 +323,39 @@ impl Session {
                         "there is no expectation {id} in your ladder (see `upleveler ladder show`)"
                     )
                 })?;
-                Some(exp.id.clone())
+                Ok(Some(exp.id.clone()))
             }
+        }
+    }
+
+    /// Changes a goal's text, expectation (`Some("")` unties it) or due date
+    /// (`Some(None)` clears it).
+    pub fn edit_goal(
+        &self,
+        id: u32,
+        text: Option<&str>,
+        expectation: Option<&str>,
+        due: Option<Option<NaiveDate>>,
+    ) -> Result<Goal> {
+        let expectation = match expectation {
+            Some(e) => Some(self.check_expectation(Some(e))?),
+            None => None,
         };
         let mut goals = self.goals()?;
-        let goal = goals.add(text, expectation, due, today())?.clone();
+        let goal = goals.get_mut(id)?;
+        if let Some(text) = text.map(str::trim) {
+            if text.is_empty() {
+                bail!("a goal needs some text");
+            }
+            goal.text = text.to_string();
+        }
+        if let Some(expectation) = expectation {
+            goal.expectation = expectation;
+        }
+        if let Some(due) = due {
+            goal.due = due;
+        }
+        let goal = goal.clone();
         goals.save(&self.paths.goals)?;
         Ok(goal)
     }
@@ -252,6 +365,23 @@ impl Session {
         let goal = goals.set_status(id, status)?.clone();
         goals.save(&self.paths.goals)?;
         Ok(goal)
+    }
+
+    /// The `n`th check-in of a goal (1 = the oldest), as `goal show` numbers them.
+    pub fn checkin_at(&self, id: u32, n: usize) -> Result<crate::goals::Checkin> {
+        let goals = self.goals()?;
+        let goal = goals
+            .get(id)
+            .with_context(|| format!("there is no goal #{id} (see `upleveler goal list`)"))?;
+        n.checked_sub(1)
+            .and_then(|i| goal.checkins.get(i))
+            .cloned()
+            .with_context(|| {
+                format!(
+                    "goal #{id} has {} check-ins; see `upleveler goal show {id}`",
+                    goal.checkins.len()
+                )
+            })
     }
 
     /// Undoes a check-in; false if it was already gone.
@@ -591,7 +721,7 @@ impl Session {
         let people = self.people()?;
         let Some(person) = people.get(handle) else {
             let handle = normalize_handle(handle).unwrap_or_else(|| handle.to_string());
-            bail!("@{handle} is not in your people yet. Add them first: upleveler person add {handle} --name \"…\"");
+            bail!("@{handle} is not in your people yet. Add them first: /people add @{handle} <name> in the app, or upleveler person add {handle} --name \"…\"");
         };
         let notes = self.notes()?;
         let about: Vec<&Note> = notes.iter().filter(|n| n.person == person.handle).collect();

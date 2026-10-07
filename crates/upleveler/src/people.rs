@@ -269,6 +269,12 @@ impl Note {
         }
     }
 
+    /// The hash at the end of the id (`1a2b3c4d`): what lists show and what
+    /// commands take to pick a note.
+    pub fn short_id(&self) -> &str {
+        self.id.rsplit('-').next().unwrap_or(&self.id)
+    }
+
     pub fn is_open_follow_up(&self) -> bool {
         self.kind == NoteKind::FollowUp && !self.done
     }

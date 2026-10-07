@@ -15,7 +15,7 @@ pub use goals::{goals, goals_with, GoalForm};
 pub use ladder::ladder;
 pub use logs::{log_results, logs, logs_with, AddForm};
 pub use overview::{demo_frame, overview, overview_body};
-pub use people::{people, people_with, person, person_path, NoteForm, PersonForm};
+pub use people::{people, people_with, person, person_path, remove_person, NoteForm, PersonForm};
 pub use reports::{render_markdown, report, reports, reports_with, run, RunForm};
 
 use super::brand::{self, LockupSize};

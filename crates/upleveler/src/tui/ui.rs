@@ -536,12 +536,137 @@ mod tests {
             .unwrap()
             .checkins
             .is_empty());
+        app.submit("/checkin 1 Wrote the abstract");
+        app.submit("/goal show 1");
+        let printed: Vec<String> = app.out.iter().map(markdown::plain).collect();
+        assert!(
+            printed
+                .iter()
+                .any(|l| l.contains(" 1. ") && l.contains("Wrote the abstract")),
+            "{printed:?}"
+        );
+        app.submit("/checkin delete 1 1");
+        let checkins = |app: &App| {
+            app.session
+                .goals()
+                .unwrap()
+                .get(1)
+                .unwrap()
+                .checkins
+                .clone()
+        };
+        assert!(checkins(&app).is_empty());
+        app.submit("/undo");
+        assert_eq!(checkins(&app)[0].text, "Wrote the abstract");
 
         // Unclear text that mentions someone offers a note about them.
         app.panel = Some(Panel::Choice("@ada seemed unsure about the rollout".into()));
         assert!(render(&app).contains("note about @ada"));
         key(&mut app, KeyCode::Char('n'));
         assert_eq!(app.session.notes().unwrap()[0].person, "ada");
+
+        // Follow-ups close by the short id lists show, and /undo takes it back.
+        app.submit("/note @ada followup Share the retry doc");
+        let id = app
+            .session
+            .notes()
+            .unwrap()
+            .last()
+            .unwrap()
+            .short_id()
+            .to_string();
+        app.submit(&format!("/notes done {}", &id[..4]));
+        assert!(!app
+            .session
+            .notes()
+            .unwrap()
+            .last()
+            .unwrap()
+            .is_open_follow_up());
+        app.submit("/undo");
+        assert!(app
+            .session
+            .notes()
+            .unwrap()
+            .last()
+            .unwrap()
+            .is_open_follow_up());
+        app.submit(&format!("/notes delete {id}"));
+        assert_eq!(app.session.notes().unwrap().len(), 1);
+        app.submit("/undo");
+        assert_eq!(app.session.notes().unwrap().last().unwrap().short_id(), id);
+
+        // People can be added without leaving the app.
+        app.submit("/people add @bo Bo, Staff engineer, peer");
+        let bo = app.session.people().unwrap().get("bo").cloned().unwrap();
+        assert_eq!(bo.label(), "Bo (Staff engineer, peer)");
+        // A goal whose last word is a ladder expectation is tied to it.
+        let ladder =
+            crate::ladder::Ladder::from_yaml(include_str!("../../ladder.example.yaml")).unwrap();
+        app.session.save_ladder(&ladder).unwrap();
+        app.submit("/goal Mentor a junior developer SD3.mentoring.1");
+        let goals = app.session.goals().unwrap();
+        let tied = goals.goals.last().unwrap();
+        assert_eq!(
+            (tied.text.as_str(), tied.expectation.as_deref()),
+            ("Mentor a junior developer", Some("SD3.mentoring.1"))
+        );
+
+        // Everything can be changed in the app, and /undo takes it back.
+        app.submit("/people edit @bo role: Principal engineer, team: Payments, relation: manager");
+        let label = |app: &App| app.session.people().unwrap().get("bo").unwrap().label();
+        assert_eq!(label(&app), "Bo (Principal engineer, manager)");
+        app.submit("/undo");
+        assert_eq!(label(&app), "Bo (Staff engineer, peer)");
+        app.submit("/note @bo followup Ask about the on-call swap");
+        app.submit("/people remove @bo");
+        assert!(app.session.people().unwrap().get("bo").is_none());
+        assert!(app
+            .session
+            .notes()
+            .unwrap()
+            .iter()
+            .all(|n| n.person != "bo"));
+        app.submit("/undo");
+        assert!(app.session.people().unwrap().get("bo").is_some());
+        assert!(app
+            .session
+            .notes()
+            .unwrap()
+            .iter()
+            .any(|n| n.person == "bo"));
+
+        let tied_id = app.session.goals().unwrap().goals.last().unwrap().id;
+        app.submit(&format!(
+            "/goal edit {tied_id} text: Mentor two developers, due: 2099-12-31, expectation:"
+        ));
+        let goal = |app: &App| app.session.goals().unwrap().get(tied_id).cloned().unwrap();
+        assert_eq!(
+            (
+                goal(&app).text,
+                goal(&app).due.map(|d| d.to_string()),
+                goal(&app).expectation
+            ),
+            (
+                "Mentor two developers".to_string(),
+                Some("2099-12-31".to_string()),
+                None
+            )
+        );
+        app.submit("/undo");
+        assert_eq!(goal(&app).expectation.as_deref(), Some("SD3.mentoring.1"));
+
+        let note_id = app.session.notes().unwrap()[0].short_id().to_string();
+        app.submit(&format!(
+            "/notes edit {note_id} given Her reviews are clearer"
+        ));
+        let first = |app: &App| app.session.notes().unwrap()[0].clone();
+        assert_eq!(
+            (first(&app).kind, first(&app).text.as_str()),
+            (NoteKind::FeedbackGiven, "Her reviews are clearer")
+        );
+        app.submit("/undo");
+        assert_eq!(first(&app).kind, NoteKind::Note);
 
         app.submit("/people @ada");
         let printed: Vec<String> = app.out.iter().map(markdown::plain).collect();

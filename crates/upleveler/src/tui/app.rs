@@ -111,6 +111,30 @@ enum Undo {
         date: NaiveDate,
         text: String,
     },
+    /// A follow-up marked done or open again; holds what it was before.
+    NoteDone {
+        id: String,
+        was: bool,
+    },
+    /// A deleted note, to put back.
+    Deleted(crate::people::Note),
+    /// A note as it was before `/notes edit`.
+    NoteEdit(crate::people::Note),
+    /// A profile as it was before `/people edit`.
+    Person(crate::people::Person),
+    /// Someone removed with `/people remove`, with their notes.
+    Removed {
+        person: crate::people::Person,
+        notes: Vec<crate::people::Note>,
+    },
+    /// A goal as it was before `/goal edit`.
+    Goal(crate::goals::Goal),
+    /// A deleted check-in, to put back.
+    DeletedCheckin {
+        goal: u32,
+        date: NaiveDate,
+        text: String,
+    },
 }
 
 pub struct RunningJob {
@@ -638,6 +662,15 @@ impl App {
             "undo" => self.undo(),
             "note" => self.note_command(args),
             "notes" => self.notes_command(args),
+            "people" if args.starts_with("add ") || args == "add" => {
+                self.people_add(args.trim_start_matches("add").trim())
+            }
+            "people" if args.starts_with("edit ") || args == "edit" => {
+                self.people_edit(args.trim_start_matches("edit").trim())
+            }
+            "people" if args.starts_with("remove ") || args == "remove" => {
+                self.people_remove(args.trim_start_matches("remove").trim())
+            }
             "people" if !args.is_empty() => self.person_command(args),
             "people" => match (self.session.people(), self.session.notes()) {
                 (Ok(people), Ok(notes)) => {
@@ -648,6 +681,9 @@ impl App {
             },
             "goals" => self.goals_command(args == "all"),
             "goal" => self.goal_command(args),
+            "checkin" if args.starts_with("delete ") => {
+                self.delete_checkin(&args["delete ".len()..])
+            }
             "checkin" => {
                 let (id, text) = args.split_once(char::is_whitespace).unwrap_or((args, ""));
                 match id.trim_start_matches('#').parse::<u32>() {
@@ -778,6 +814,54 @@ impl App {
                 .session
                 .remove_checkin(goal, date, &text)
                 .map(|done| done.then(|| format!("Removed the check-in on goal #{goal}: {text}"))),
+            Undo::NoteDone { id, was } => self.session.set_note_done(&id, was).map(|found| {
+                found.then(|| {
+                    if was {
+                        "Marked done again."
+                    } else {
+                        "Open again."
+                    }
+                    .to_string()
+                })
+            }),
+            Undo::NoteEdit(before) => self
+                .session
+                .edit_note(&before.id, before.kind, before.date, &before.text)
+                .and_then(|_| self.session.set_note_done(&before.id, before.done))
+                .map(|_| Some(format!("The note is back to: {}", before.text))),
+            Undo::Person(before) => {
+                let label = before.label();
+                let handle = before.handle.clone();
+                self.session
+                    .edit_person(&handle, |p| *p = before)
+                    .map(|_| Some(format!("@{handle} is back to: {label}")))
+            }
+            Undo::Removed { person, notes } => {
+                let handle = person.handle.clone();
+                self.session.add_person(person).and_then(|_| {
+                    notes
+                        .into_iter()
+                        .try_for_each(|n| self.session.restore_note(n))
+                        .map(|()| Some(format!("Restored @{handle} and their notes.")))
+                })
+            }
+            Undo::Goal(before) => self
+                .session
+                .edit_goal(
+                    before.id,
+                    Some(&before.text),
+                    Some(before.expectation.as_deref().unwrap_or_default()),
+                    Some(before.due),
+                )
+                .map(|g| Some(format!("Goal is back to: {}", g.line()))),
+            Undo::DeletedCheckin { goal, date, text } => self
+                .session
+                .add_checkin(goal, date, &text)
+                .map(|_| Some(format!("Restored the check-in on goal #{goal}: {text}"))),
+            Undo::Deleted(note) => {
+                let message = format!("Restored the note about @{}: {}", note.person, note.text);
+                self.session.restore_note(note).map(|()| Some(message))
+            }
         };
         match result {
             Ok(Some(message)) => {
@@ -834,27 +918,189 @@ impl App {
         if who.is_empty() || rest.trim().is_empty() {
             return self.info(usage);
         }
-        let (first, after) = rest
+        let (kind, text) = kind_prefix(rest);
+        let (date, text) = intent::split_date(text, today());
+        self.note(who, kind.unwrap_or_default(), date, &text);
+    }
+
+    /// `/notes edit <id> [kind] <text>`: the kind word is optional.
+    fn note_edit(&mut self, args: &str) {
+        let (key, rest) = args
             .trim()
             .split_once(char::is_whitespace)
-            .unwrap_or((rest.trim(), ""));
-        let alias = match first.to_lowercase().as_str() {
-            "1:1" | "1on1" | "one-on-one" => Some(NoteKind::OneOnOne),
-            "given" | "feedback-given" => Some(NoteKind::FeedbackGiven),
-            "received" | "feedback-received" => Some(NoteKind::FeedbackReceived),
-            "followup" | "follow-up" | "todo" => Some(NoteKind::FollowUp),
-            "note" => Some(NoteKind::Note),
-            _ => None,
+            .unwrap_or((args.trim(), ""));
+        if key.is_empty() || rest.trim().is_empty() {
+            return self.info("Usage: /notes edit <id> [1:1|given|received|followup] <new text>");
+        }
+        let note = match self.session.find_note(key) {
+            Ok(n) => n,
+            Err(e) => return self.error(&format!("{e:#}")),
         };
-        let (kind, text) = match alias {
-            Some(kind) if !after.trim().is_empty() => (kind, after),
-            _ => (NoteKind::Note, rest),
+        let (kind, text) = kind_prefix(rest);
+        match self
+            .session
+            .edit_note(&note.id, kind.unwrap_or(note.kind), note.date, text)
+        {
+            Ok(before) => {
+                self.logged.push(Undo::NoteEdit(before));
+                self.success(&format!(
+                    "Updated the note about @{}: {}  (/undo to take it back)",
+                    note.person,
+                    text.trim()
+                ));
+            }
+            Err(e) => self.error(&format!("{e:#}")),
+        }
+    }
+
+    /// `/people edit @ada role: Developer, team: Payments`; an empty value clears.
+    fn people_edit(&mut self, args: &str) {
+        let usage =
+            "Usage: /people edit @handle name: …, role: …, team: …, relation: peer, about: …";
+        let (handle, rest) = args
+            .trim()
+            .split_once(char::is_whitespace)
+            .unwrap_or((args.trim(), ""));
+        let fields = match fields(rest, &["name", "role", "team", "relation", "about"]) {
+            Ok(f) if !handle.is_empty() && !f.is_empty() => f,
+            Ok(_) => return self.info(usage),
+            Err(e) => return self.info(&format!("{e}. {usage}")),
         };
-        let (date, text) = intent::split_date(text, today());
-        self.note(who, kind, date, &text);
+        let Some(before) = self
+            .session
+            .people()
+            .ok()
+            .and_then(|p| p.get(handle).cloned())
+        else {
+            return self.info(&format!("{handle} is not in your people (see /people)."));
+        };
+        let mut relation = None;
+        for (key, value) in &fields {
+            if key == "relation" {
+                match crate::people::Relation::parse(value) {
+                    Some(r) => relation = Some(r),
+                    None => {
+                        return self
+                            .info("relation is one of manager, peer, mentee, report, other.")
+                    }
+                }
+            }
+        }
+        let optional = |v: &str| Some(v.to_string()).filter(|v| !v.is_empty());
+        let result = self.session.edit_person(&before.handle, |p| {
+            for (key, value) in &fields {
+                match key.as_str() {
+                    "name" if !value.is_empty() => p.name = value.clone(),
+                    "role" => p.role = optional(value),
+                    "team" => p.team = optional(value),
+                    "about" => p.about = optional(value),
+                    _ => {}
+                }
+            }
+            if let Some(r) = relation {
+                p.relation = r;
+            }
+        });
+        match result {
+            Ok(p) => {
+                self.logged.push(Undo::Person(before));
+                self.success(&format!(
+                    "Updated @{}: {}  (/undo to take it back)",
+                    p.handle,
+                    p.label()
+                ));
+            }
+            Err(e) => self.error(&format!("{e:#}")),
+        }
+    }
+
+    /// `/people remove @ada`: their profile and notes go, `/undo` brings them back.
+    fn people_remove(&mut self, handle: &str) {
+        let Some(person) = self
+            .session
+            .people()
+            .ok()
+            .and_then(|p| p.get(handle.trim()).cloned())
+        else {
+            return self.info("Usage: /people remove @handle  (see /people)");
+        };
+        let notes: Vec<_> = self
+            .session
+            .notes()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|n| n.person == person.handle)
+            .collect();
+        match self.session.remove_person(&person.handle) {
+            Ok(_) => {
+                self.success(&format!(
+                    "Removed @{} and {} {}; log entries that mention them stay.  (/undo to restore)",
+                    person.handle,
+                    notes.len(),
+                    if notes.len() == 1 { "note" } else { "notes" }
+                ));
+                self.logged.push(Undo::Removed { person, notes });
+            }
+            Err(e) => self.error(&format!("{e:#}")),
+        }
+    }
+
+    /// `/goal edit 2 text: …, due: 2026-12-31, expectation: SD3.mentoring.1`.
+    fn goal_edit(&mut self, args: &str) {
+        let usage = "Usage: /goal edit <id> text: …, due: 2026-12-31, expectation: <id>  (an empty value clears)";
+        let (id, rest) = args
+            .trim()
+            .split_once(char::is_whitespace)
+            .unwrap_or((args.trim(), ""));
+        let Ok(id) = id.trim_start_matches('#').parse::<u32>() else {
+            return self.info(usage);
+        };
+        let fields = match fields(rest, &["text", "due", "expectation"]) {
+            Ok(f) if !f.is_empty() => f,
+            Ok(_) => return self.info(usage),
+            Err(e) => return self.info(&format!("{e}. {usage}")),
+        };
+        let Some(before) = self.session.goals().ok().and_then(|g| g.get(id).cloned()) else {
+            return self.info(&format!("There is no goal #{id} (see /goals)."));
+        };
+        let (mut text, mut due, mut expectation) = (None, None, None);
+        for (key, value) in &fields {
+            match key.as_str() {
+                "text" => text = Some(value.as_str()),
+                "expectation" => expectation = Some(value.as_str()),
+                "due" if value.is_empty() => due = Some(None),
+                "due" => match crate::dates::parse_date(value, today()) {
+                    Some(d) => due = Some(Some(d)),
+                    None => {
+                        return self.info(&format!("Unrecognized date {value:?}; use 2026-12-31."))
+                    }
+                },
+                _ => {}
+            }
+        }
+        match self.session.edit_goal(id, text, expectation, due) {
+            Ok(g) => {
+                self.logged.push(Undo::Goal(before));
+                self.success(&format!(
+                    "Updated goal {}  (/undo to take it back)",
+                    g.line()
+                ));
+            }
+            Err(e) => self.error(&format!("{e:#}")),
+        }
     }
 
     fn notes_command(&mut self, args: &str) {
+        let (first, rest) = args
+            .trim()
+            .split_once(char::is_whitespace)
+            .unwrap_or((args.trim(), ""));
+        if first == "edit" {
+            return self.note_edit(rest);
+        }
+        if matches!(first, "done" | "reopen" | "delete") {
+            return self.change_note(first, rest.trim());
+        }
         let notes = match self.session.notes() {
             Ok(n) => n,
             Err(e) => return self.error(&format!("{e:#}")),
@@ -875,6 +1121,52 @@ impl App {
                 self.print(lines);
             }
             None => self.info(&format!("{} is not in your people (/people).", args.trim())),
+        }
+    }
+
+    /// `/notes done|reopen|delete <id>`, with the id shown in note lists.
+    fn change_note(&mut self, action: &str, key: &str) {
+        if key.is_empty() {
+            return self.info(&format!(
+                "Usage: /notes {action} <id>  (the id is shown in /notes)"
+            ));
+        }
+        let note = match self.session.find_note(key) {
+            Ok(n) => n,
+            Err(e) => return self.error(&format!("{e:#}")),
+        };
+        let result = match action {
+            "delete" => self.session.remove_note(&note.id).map(|_| {
+                self.logged.push(Undo::Deleted(note.clone()));
+                format!(
+                    "Deleted the note about @{}: {}  (/undo to restore)",
+                    note.person, note.text
+                )
+            }),
+            _ if note.kind != NoteKind::FollowUp => {
+                return self.info(&format!(
+                    "That note is a {}, not a follow-up.",
+                    note.kind.label()
+                ));
+            }
+            _ => {
+                let done = action == "done";
+                self.session.set_note_done(&note.id, done).map(|_| {
+                    self.logged.push(Undo::NoteDone {
+                        id: note.id.clone(),
+                        was: note.done,
+                    });
+                    let state = if done { "Done" } else { "Open again" };
+                    format!(
+                        "{state}: @{} {}  (/undo to take it back)",
+                        note.person, note.text
+                    )
+                })
+            }
+        };
+        match result {
+            Ok(message) => self.success(&message),
+            Err(e) => self.error(&format!("{e:#}")),
         }
     }
 
@@ -919,6 +1211,15 @@ impl App {
     /// `/goal <text>` adds a goal; `/goal done 2` and `/goal drop 2` change one.
     fn goal_command(&mut self, args: &str) {
         let (first, rest) = args.split_once(char::is_whitespace).unwrap_or((args, ""));
+        if first == "edit" {
+            return self.goal_edit(rest);
+        }
+        if first == "show" {
+            return match rest.trim().trim_start_matches('#').parse::<u32>() {
+                Ok(id) => self.show_goal(id),
+                Err(_) => self.info("Usage: /goal show <id>  (see /goals)"),
+            };
+        }
         let status = match first {
             "done" => Some(crate::goals::GoalStatus::Done),
             "drop" => Some(crate::goals::GoalStatus::Dropped),
@@ -939,12 +1240,111 @@ impl App {
             };
         }
         if args.trim().is_empty() {
-            return self.info("Usage: /goal <text>. To tie a goal to a ladder expectation, use upleveler goal add … --expectation <id>.");
+            return self.info("Usage: /goal <text> [expectation id, e.g. SD3.mentoring.1]");
         }
-        match self.session.add_goal(args, None, None) {
+        // A last word that is an expectation of the ladder ties the goal to it.
+        let (text, expectation) = match args.trim().rsplit_once(char::is_whitespace) {
+            Some((text, last))
+                if self
+                    .session
+                    .ladder()
+                    .ok()
+                    .flatten()
+                    .is_some_and(|l| l.expectation(last).is_some()) =>
+            {
+                (text, Some(last))
+            }
+            _ => (args, None),
+        };
+        match self.session.add_goal(text, expectation, None) {
             Ok(g) => self.success(&format!(
                 "Added goal #{}: {}. Check in with /checkin {} <progress>, or tag entries goal-{}.",
                 g.id, g.text, g.id, g.id
+            )),
+            Err(e) => self.error(&format!("{e:#}")),
+        }
+    }
+
+    /// One goal with its progress and numbered check-ins.
+    fn show_goal(&mut self, id: u32) {
+        let goals = match self.session.goals() {
+            Ok(g) => g,
+            Err(e) => return self.error(&format!("{e:#}")),
+        };
+        let Some(goal) = goals.get(id) else {
+            return self.info(&format!("There is no goal #{id} (see /goals)."));
+        };
+        let entries = self.session.entries().unwrap_or_default();
+        let gap = self.session.latest_gap();
+        let lines = history::goal(goal, &entries, gap.as_ref(), self.width);
+        self.print(lines);
+    }
+
+    /// `/checkin delete <goal id> <n>`, with `n` as `/goal show` numbers them.
+    fn delete_checkin(&mut self, args: &str) {
+        let usage = "Usage: /checkin delete <goal id> <check-in number>  (see /goal show <id>)";
+        let mut words = args.split_whitespace();
+        let (Some(Ok(id)), Some(Ok(n))) = (
+            words
+                .next()
+                .map(|w| w.trim_start_matches('#').parse::<u32>()),
+            words.next().map(str::parse::<usize>),
+        ) else {
+            return self.info(usage);
+        };
+        let result = self
+            .session
+            .checkin_at(id, n)
+            .and_then(|c| self.session.remove_checkin(id, c.date, &c.text).map(|_| c));
+        match result {
+            Ok(c) => {
+                self.success(&format!(
+                    "Deleted the check-in on goal #{id}: {}  (/undo to restore)",
+                    c.text
+                ));
+                self.logged.push(Undo::DeletedCheckin {
+                    goal: id,
+                    date: c.date,
+                    text: c.text,
+                });
+            }
+            Err(e) => self.error(&format!("{e:#}")),
+        }
+    }
+
+    /// `/people add @ada Ada, Junior developer, mentee`: name, then an optional
+    /// role and relation, separated by commas.
+    fn people_add(&mut self, args: &str) {
+        let usage = "Usage: /people add @handle Name[, role][, manager|peer|mentee|report|other]";
+        let (handle, rest) = args.split_once(char::is_whitespace).unwrap_or((args, ""));
+        if handle.is_empty() {
+            return self.info(usage);
+        }
+        let mut parts = rest.split(',').map(str::trim).filter(|p| !p.is_empty());
+        let name = parts.next().unwrap_or_default().to_string();
+        let (mut role, mut relation) = (None, None);
+        for part in parts {
+            match crate::people::Relation::parse(part) {
+                Some(r) if relation.is_none() => relation = Some(r),
+                _ if role.is_none() => role = Some(part.to_string()),
+                _ => return self.info(usage),
+            }
+        }
+        let person = crate::people::Person {
+            handle: handle.to_string(),
+            name,
+            role,
+            team: None,
+            relation: relation.unwrap_or_default(),
+            about: None,
+            since: None,
+        };
+        match self.session.add_person(person) {
+            Ok(p) => self.success(&format!(
+                "Added @{}: {}. Write notes with /note @{} …",
+                p.handle,
+                p.label(),
+                p.handle
             )),
             Err(e) => self.error(&format!("{e:#}")),
         }
@@ -1272,7 +1672,7 @@ impl App {
                     let current = cfg.llm.model.clone();
                     self.panel = Some(input(
                         "Model name",
-                        "e.g. gemma3:12b · enter to continue",
+                        "e.g. gemma4:12b · enter to continue",
                         &current,
                         Purpose::ModelName,
                     ));
@@ -1298,7 +1698,7 @@ impl App {
                     let current = cfg.llm.model.clone();
                     self.panel = Some(input(
                         "Model name",
-                        "e.g. gemma3:12b · enter to continue",
+                        "e.g. gemma4:12b · enter to continue",
                         &current,
                         Purpose::ModelName,
                     ));
@@ -1604,7 +2004,8 @@ impl App {
                     .map(|m| {
                         let detail = match (m.as_str(), *m == current) {
                             (_, true) => "current",
-                            ("gemma3:12b", _) => "recommended · good Turkish",
+                            ("gemma4:12b", _) => "recommended",
+                            ("gemma3:12b", _) => "also works",
                             _ => "",
                         };
                         Item::new(m.clone(), detail, m.clone())
@@ -1614,6 +2015,7 @@ impl App {
                 let selected = models
                     .iter()
                     .position(|m| *m == current)
+                    .or_else(|| models.iter().position(|m| m == "gemma4:12b"))
                     .or_else(|| models.iter().position(|m| m == "gemma3:12b"))
                     .unwrap_or(0);
                 self.panel = Some(Panel::Select {
@@ -1625,7 +2027,7 @@ impl App {
                 });
             }
             Ok(_) => self.models_failed(
-                "Ollama is running but has no models. In another terminal run: ollama pull gemma3:12b",
+                "Ollama is running but has no models. In another terminal run: ollama pull gemma4:12b",
             ),
             Err(e) => self.models_failed(&format!(
                 "Could not list models ({e}). Is Ollama running? Start it with `ollama serve`."
@@ -1677,6 +2079,51 @@ fn empty_status(session: &Session) -> Status {
     }
 }
 
+/// A leading note kind word (`1:1`, `given`, `received`, `followup`, `note`)
+/// and the text after it; no kind when the word is not one or nothing follows.
+fn kind_prefix(text: &str) -> (Option<NoteKind>, &str) {
+    let text = text.trim();
+    let (first, after) = text.split_once(char::is_whitespace).unwrap_or((text, ""));
+    let kind = match first.to_lowercase().as_str() {
+        "1:1" | "1on1" | "one-on-one" => Some(NoteKind::OneOnOne),
+        "given" | "feedback-given" => Some(NoteKind::FeedbackGiven),
+        "received" | "feedback-received" => Some(NoteKind::FeedbackReceived),
+        "followup" | "follow-up" | "todo" => Some(NoteKind::FollowUp),
+        "note" => Some(NoteKind::Note),
+        _ => None,
+    };
+    match kind {
+        Some(kind) if !after.trim().is_empty() => (Some(kind), after.trim()),
+        _ => (None, text),
+    }
+}
+
+/// `key: value, key: value` with the given keys. A comma that is not followed
+/// by a known key belongs to the value ("about: likes Rust, Go"). An empty
+/// value is kept, so it can clear a field.
+fn fields(text: &str, keys: &[&str]) -> Result<Vec<(String, String)>, String> {
+    let mut out: Vec<(String, String)> = Vec::new();
+    for part in text.split(',') {
+        let key = part.split_once(':').map(|(k, _)| k.trim().to_lowercase());
+        match key {
+            Some(k) if keys.contains(&k.as_str()) => {
+                let value = part.split_once(':').map_or("", |(_, v)| v).trim();
+                out.push((k, value.to_string()));
+            }
+            _ => match out.last_mut() {
+                Some((_, value)) => {
+                    value.push(',');
+                    value.push_str(part);
+                    *value = value.trim().to_string();
+                }
+                None if part.trim().is_empty() => {}
+                None => return Err(format!("start with one of {}:", keys.join(", "))),
+            },
+        }
+    }
+    Ok(out)
+}
+
 #[cfg(all(test, feature = "server"))]
 mod tests {
     use super::*;
@@ -1694,5 +2141,31 @@ mod tests {
             first,
             "a second /web reuses the server"
         );
+    }
+}
+
+#[cfg(test)]
+mod parse_tests {
+    use super::*;
+
+    #[test]
+    fn fields_and_kind_words() {
+        let keys = ["role", "team", "about"];
+        assert_eq!(
+            fields("role: Developer, team:, about: likes Rust, Go", &keys).unwrap(),
+            vec![
+                ("role".to_string(), "Developer".to_string()),
+                ("team".to_string(), String::new()),
+                ("about".to_string(), "likes Rust, Go".to_string()),
+            ]
+        );
+        assert!(fields("Developer", &keys).is_err());
+        assert_eq!(fields("", &keys).unwrap(), vec![]);
+        assert_eq!(
+            kind_prefix("1:1 talked"),
+            (Some(NoteKind::OneOnOne), "talked")
+        );
+        assert_eq!(kind_prefix("given"), (None, "given"));
+        assert_eq!(kind_prefix("plain text"), (None, "plain text"));
     }
 }

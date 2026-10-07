@@ -149,7 +149,7 @@ jobs:
             echo "cargo install --path crates/upleveler --locked --force"
             echo '```'
             echo
-            echo "Upleveler needs [Ollama](https://ollama.com) and a model, for example \`ollama pull gemma3:12b\`."
+            echo "Upleveler needs [Ollama](https://ollama.com) and a model, for example \`ollama pull gemma4:12b\`."
           } >> notes.md
 
       - name: Create the release

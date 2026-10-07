@@ -70,4 +70,4 @@ case ":$PATH:" in
     *":$DIR:"*) ;;
     *) echo "Add $DIR to your PATH, for example: echo 'export PATH=\"$DIR:\$PATH\"' >> ~/.profile" ;;
 esac
-echo "Next: install Ollama (https://ollama.com), run 'ollama pull gemma3:12b', then 'upleveler'."
+echo "Next: install Ollama (https://ollama.com), run 'ollama pull gemma4:12b', then 'upleveler'."

@@ -85,7 +85,7 @@ impl Default for LlmConfig {
         Self {
             provider: Provider::Ollama,
             base_url: "http://localhost:11434".into(),
-            model: "gemma3:12b".into(),
+            model: "gemma4:12b".into(),
             api_key_env: None,
             allow_remote: false,
             context_tokens: default_context_tokens(),

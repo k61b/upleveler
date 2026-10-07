@@ -90,14 +90,14 @@ pub const COMMANDS: &[Command] = &[
     },
     Command {
         name: "notes",
-        args: "[@person]",
-        help: "open follow-ups, or your notes about someone",
+        args: "[@person] | done|edit <id>",
+        help: "open follow-ups or notes; done, reopen, edit or delete one",
         runs_bare: true,
     },
     Command {
         name: "people",
-        args: "[@person]",
-        help: "the people you work with, or one of them",
+        args: "[@person] | add|edit|remove",
+        help: "the people you work with; add, edit or remove someone",
         runs_bare: true,
     },
     Command {
@@ -108,14 +108,14 @@ pub const COMMANDS: &[Command] = &[
     },
     Command {
         name: "goal",
-        args: "<text> | done <id> | drop <id>",
-        help: "add a goal, or mark one done or dropped",
+        args: "<text> | edit|done|drop <id>",
+        help: "add a goal; show, edit, finish or drop one",
         runs_bare: false,
     },
     Command {
         name: "checkin",
-        args: "<id> <text>",
-        help: "note progress on a goal",
+        args: "<id> <text>|delete <id> <n>",
+        help: "note progress on a goal, or delete a check-in",
         runs_bare: false,
     },
     Command {

@@ -66,8 +66,11 @@ enum Command {
         #[arg(long, short)]
         date: Option<String>,
     },
-    /// List notes about people
+    /// List notes about people, or close, reopen or delete one by its id
+    #[command(args_conflicts_with_subcommands = true)]
     Notes {
+        #[command(subcommand)]
+        action: Option<NotesCmd>,
         /// Only notes about this person
         #[arg(long, short)]
         person: Option<String>,
@@ -197,6 +200,20 @@ enum LadderCmd {
 }
 
 #[derive(Subcommand)]
+enum NotesCmd {
+    /// Mark a follow-up as done (the id is shown by `upleveler notes`)
+    Done { id: String },
+    /// Open a follow-up again
+    Reopen { id: String },
+    /// Delete a note
+    Delete {
+        id: String,
+        #[arg(long, short)]
+        yes: bool,
+    },
+}
+
+#[derive(Subcommand)]
 enum PersonCmd {
     /// Add someone you work with
     Add {
@@ -212,6 +229,21 @@ enum PersonCmd {
         #[arg(long, value_enum, default_value_t = RelationArg::Other)]
         relation: RelationArg,
         /// A short description
+        #[arg(long)]
+        about: Option<String>,
+    },
+    /// Change someone's name, role, team, relation or description
+    /// (an empty value clears role, team or description)
+    Edit {
+        handle: String,
+        #[arg(long)]
+        name: Option<String>,
+        #[arg(long)]
+        role: Option<String>,
+        #[arg(long)]
+        team: Option<String>,
+        #[arg(long, value_enum)]
+        relation: Option<RelationArg>,
         #[arg(long)]
         about: Option<String>,
     },
@@ -239,6 +271,18 @@ enum GoalCmd {
         #[arg(long)]
         due: Option<String>,
     },
+    /// Change a goal's text, expectation or due date
+    Edit {
+        id: u32,
+        #[arg(long)]
+        text: Option<String>,
+        /// A ladder expectation id, or "" to untie the goal
+        #[arg(long, short)]
+        expectation: Option<String>,
+        /// A date, or "" to clear it
+        #[arg(long)]
+        due: Option<String>,
+    },
     /// List goals and their progress
     List {
         /// Also show done and dropped goals
@@ -257,6 +301,10 @@ enum GoalCmd {
         #[arg(long, short)]
         date: Option<String>,
     },
+    /// Show a goal with its progress and numbered check-ins
+    Show { id: u32 },
+    /// Delete a check-in by its number in `goal show`
+    DropCheckin { id: u32, n: usize },
 }
 
 #[derive(Clone, Copy, clap::ValueEnum)]
@@ -338,7 +386,15 @@ fn run(cli: Cli) -> Result<()> {
             }
             Ok(())
         }
-        Some(Command::Notes { person, open }) => {
+        Some(Command::Notes {
+            action: Some(action),
+            ..
+        }) => notes_cmd(&session, action),
+        Some(Command::Notes {
+            action: None,
+            person,
+            open,
+        }) => {
             let people = session.people()?;
             let person = match person {
                 Some(h) => Some(
@@ -356,7 +412,7 @@ fn run(cli: Cli) -> Result<()> {
                 .filter(|n| !open || n.is_open_follow_up())
                 .collect();
             for n in &notes {
-                println!("@{} {}", n.person, n.line());
+                println!("{}  @{} {}", n.short_id(), n.person, n.line());
             }
             eprintln!("{}", plural(notes.len(), "note", "notes"));
             Ok(())
@@ -513,6 +569,36 @@ fn progress(label: &str, done: usize, total: usize) -> Result<()> {
 
 fn interactive() -> bool {
     io::stdin().is_terminal() && io::stdout().is_terminal()
+}
+
+fn notes_cmd(session: &Session, action: NotesCmd) -> Result<()> {
+    match action {
+        NotesCmd::Done { id } => set_done(session, &id, true),
+        NotesCmd::Reopen { id } => set_done(session, &id, false),
+        NotesCmd::Delete { id, yes } => {
+            let note = session.find_note(&id)?;
+            if !confirm(
+                &format!("Delete the note about @{}: {}?", note.person, note.text),
+                yes,
+            )? {
+                return Ok(());
+            }
+            session.remove_note(&note.id)?;
+            println!("Deleted the note about @{}: {}", note.person, note.text);
+            Ok(())
+        }
+    }
+}
+
+fn set_done(session: &Session, id: &str, done: bool) -> Result<()> {
+    let note = session.find_note(id)?;
+    if note.kind != NoteKind::FollowUp {
+        bail!("that note is a {}, not a follow-up", note.kind.label());
+    }
+    session.set_note_done(&note.id, done)?;
+    let state = if done { "Done" } else { "Open again" };
+    println!("{state}: @{} {}", note.person, note.text);
+    Ok(())
 }
 
 fn confirm(question: &str, yes: bool) -> Result<bool> {
@@ -764,6 +850,42 @@ fn person_cmd(session: &Session, action: PersonCmd) -> Result<()> {
             })?;
             println!("Added @{}: {}", person.handle, person.label());
         }
+        PersonCmd::Edit {
+            handle,
+            name,
+            role,
+            team,
+            relation,
+            about,
+        } => {
+            if name.is_none()
+                && role.is_none()
+                && team.is_none()
+                && relation.is_none()
+                && about.is_none()
+            {
+                bail!("nothing to change: give --name, --role, --team, --relation or --about");
+            }
+            let optional = |v: String| Some(v.trim().to_string()).filter(|v| !v.is_empty());
+            let person = session.edit_person(&handle, |p| {
+                if let Some(name) = name {
+                    p.name = name.trim().to_string();
+                }
+                if let Some(role) = role {
+                    p.role = optional(role);
+                }
+                if let Some(team) = team {
+                    p.team = optional(team);
+                }
+                if let Some(relation) = relation {
+                    p.relation = relation.into();
+                }
+                if let Some(about) = about {
+                    p.about = optional(about);
+                }
+            })?;
+            println!("Updated @{}: {}", person.handle, person.label());
+        }
         PersonCmd::List => {
             let people = session.people()?;
             let notes = session.notes()?;
@@ -808,7 +930,7 @@ fn person_cmd(session: &Session, action: PersonCmd) -> Result<()> {
                 .collect();
             println!("\nNotes ({}):", notes.len());
             for n in notes.iter().rev() {
-                println!("  {}", n.line());
+                println!("  {}  {}", n.short_id(), n.line());
             }
             let entries = session.entries()?;
             let mentioned: Vec<_> = entries
@@ -868,6 +990,35 @@ fn goal_cmd(session: &Session, action: GoalCmd) -> Result<()> {
                 goal.id
             );
         }
+        GoalCmd::Show { id } => {
+            let goals = session.goals()?;
+            let g = goals
+                .get(id)
+                .with_context(|| format!("there is no goal #{id} (see `upleveler goal list`)"))?;
+            let p = goals::progress(g, &session.entries()?, session.latest_gap().as_ref());
+            println!("{}", g.line());
+            if g.status != GoalStatus::Active {
+                println!("  {}", g.status.as_str());
+            }
+            println!(
+                "  {}{}",
+                plural(p.evidence + p.tagged, "entry", "entries"),
+                p.rating
+                    .map(|r| format!(" · rated {r}"))
+                    .unwrap_or_default()
+            );
+            if g.checkins.is_empty() {
+                println!("  No check-ins yet: upleveler goal checkin {id} \"…\"");
+            }
+            for (i, c) in g.checkins.iter().enumerate() {
+                println!("  {}. {} {}", i + 1, c.date, c.text);
+            }
+        }
+        GoalCmd::DropCheckin { id, n } => {
+            let c = session.checkin_at(id, n)?;
+            session.remove_checkin(id, c.date, &c.text)?;
+            println!("Deleted check-in {n} of goal #{id}: {} {}", c.date, c.text);
+        }
         GoalCmd::List { all } => {
             let goals = session.goals()?;
             let entries = session.entries()?;
@@ -902,6 +1053,25 @@ fn goal_cmd(session: &Session, action: GoalCmd) -> Result<()> {
             if shown.is_empty() {
                 println!("No goals yet. Add one: upleveler goal add \"Speak at a meetup\" --due 2026-12-01");
             }
+        }
+        GoalCmd::Edit {
+            id,
+            text,
+            expectation,
+            due,
+        } => {
+            if text.is_none() && expectation.is_none() && due.is_none() {
+                bail!("nothing to change: give --text, --expectation or --due");
+            }
+            let due = match due.as_deref().map(str::trim) {
+                None => None,
+                Some("") => Some(None),
+                Some(d) => Some(Some(
+                    parse_date(d, today()).with_context(|| format!("unrecognized date {d:?}"))?,
+                )),
+            };
+            let goal = session.edit_goal(id, text.as_deref(), expectation.as_deref(), due)?;
+            println!("Updated goal {}", goal.line());
         }
         GoalCmd::Done { id } => println!(
             "Done: {}",
