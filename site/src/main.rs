@@ -187,12 +187,18 @@ fn dashboard_demo() -> Markup {
 
 fn privacy() -> Markup {
     // (label, value, value is literal (mono), note)
-    let facts: [(&str, &str, bool, &str); 5] = [
+    let facts: [(&str, &str, bool, &str); 6] = [
         (
             "Logs",
             "~/.upleveler/logs.jsonl",
             true,
             "One JSON line per entry. Yours to read, edit or move.",
+        ),
+        (
+            "Notes about people",
+            "~/.upleveler/notes.jsonl",
+            true,
+            "1:1s and feedback stay with you, and never go into your promotion document.",
         ),
         (
             "Ladder and reports",

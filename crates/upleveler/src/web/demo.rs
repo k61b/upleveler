@@ -4,7 +4,9 @@
 
 use super::data::{DashboardData, Report};
 use crate::analyze::{GapRow, GapSummary};
+use crate::goals::Goals;
 use crate::ladder::Ladder;
+use crate::people::{Note, NoteKind, People, Person, Relation};
 use crate::store::Entry;
 use chrono::{Datelike, Duration, NaiveDate, Weekday};
 
@@ -33,7 +35,7 @@ const WORK: &[(&str, &[&str], &[&str])] = &[
         &["SD3.technical.1"],
     ),
     (
-        "Paired with Deniz on the retry logic in the ledger service",
+        "Paired with @ada on the retry logic in the ledger service",
         &["mentoring"],
         &["SD3.mentoring.1"],
     ),
@@ -53,7 +55,7 @@ const WORK: &[(&str, &[&str], &[&str])] = &[
         &["SD3.ownership.1"],
     ),
     (
-        "Broke the refunds epic into eight tickets and estimated them with the team",
+        "Broke the refunds epic into eight tickets and estimated them with @kai",
         &["planning"],
         &["SD2.delivery.2"],
     ),
@@ -63,7 +65,7 @@ const WORK: &[(&str, &[&str], &[&str])] = &[
         &["SD2.technical.1"],
     ),
     (
-        "Weekly 1:1 with Ada: walked through her first design doc",
+        "Weekly 1:1 with @ada: walked through her first design doc",
         &["mentoring"],
         &["SD3.mentoring.1"],
     ),
@@ -205,7 +207,95 @@ pub fn data(today: NaiveDate) -> DashboardData {
         reports: reports(today),
         model: "gemma3:12b".into(),
         model_local: true,
+        people: people(),
+        notes: notes(today),
+        goals: goals(today),
     }
+}
+
+fn person(handle: &str, name: &str, role: &str, relation: Relation) -> Person {
+    Person {
+        handle: handle.into(),
+        name: name.into(),
+        role: Some(role.into()),
+        team: Some("Payments".into()),
+        relation,
+        about: None,
+        since: None,
+    }
+}
+
+fn people() -> People {
+    People {
+        people: vec![
+            person("ada", "Ada", "Junior developer", Relation::Mentee),
+            person("deniz", "Deniz", "Engineering manager", Relation::Manager),
+            person("kai", "Kai", "Staff engineer", Relation::Peer),
+        ],
+    }
+}
+
+fn notes(today: NaiveDate) -> Vec<Note> {
+    let ago = |days| today - Duration::days(days);
+    let mut done = Note::new(
+        "deniz",
+        ago(20),
+        NoteKind::FollowUp,
+        "Send the on-call proposal before planning",
+    );
+    done.done = true;
+    vec![
+        Note::new(
+            "ada",
+            ago(30),
+            NoteKind::OneOnOne,
+            "Wants to own a service by the end of the year; nervous about on-call",
+        ),
+        done,
+        Note::new(
+            "kai",
+            ago(15),
+            NoteKind::FeedbackReceived,
+            "My invoice queue doc needs a clearer rollback plan",
+        ),
+        Note::new(
+            "ada",
+            ago(9),
+            NoteKind::FeedbackGiven,
+            "Her pull request descriptions are much clearer now",
+        ),
+        Note::new(
+            "deniz",
+            ago(6),
+            NoteKind::OneOnOne,
+            "Asked for a cross-team project that shows SD3 scope",
+        ),
+        Note::new(
+            "ada",
+            ago(2),
+            NoteKind::FollowUp,
+            "Share the retry design doc before her on-call week",
+        ),
+    ]
+}
+
+fn goals(today: NaiveDate) -> Goals {
+    let mut goals = Goals::default();
+    let year_end = NaiveDate::from_ymd_opt(today.year(), 12, 31).unwrap_or(today);
+    let _ = goals.add(
+        "Mentor a junior developer through their first on-call",
+        Some("SD3.mentoring.1".into()),
+        Some(year_end),
+        today - Duration::days(60),
+    );
+    let _ = goals.add(
+        "Speak at a local meetup",
+        None,
+        None,
+        today - Duration::days(40),
+    );
+    let _ = goals.checkin(2, today - Duration::days(10), "Sent the talk proposal");
+    goals
 }
 
 #[cfg(test)]

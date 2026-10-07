@@ -10,7 +10,7 @@
 use super::data::DashboardData;
 use super::runs::{self, Kind, MakeLlm, Runs, StartError};
 use super::ui::Alert;
-use super::views::{AddForm, RunForm};
+use super::views::{AddForm, GoalForm, NoteForm, PersonForm, RunForm};
 use super::{brand, views, FONTS, SCRIPT};
 use crate::config::Paths;
 use crate::session::Session;
@@ -151,6 +151,20 @@ fn router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/", get(overview))
         .route("/logs", get(logs).post(add_log))
+        .route("/people", get(people).post(add_person))
+        .route("/people/{handle}", get(person))
+        .route("/people/{handle}/notes", axum::routing::post(add_note))
+        .route(
+            "/people/{handle}/notes/{id}/done",
+            axum::routing::post(note_done),
+        )
+        .route(
+            "/people/{handle}/notes/{id}/delete",
+            axum::routing::post(delete_note),
+        )
+        .route("/goals", get(goals).post(add_goal))
+        .route("/goals/{id}/checkin", axum::routing::post(checkin))
+        .route("/goals/{id}/status", axum::routing::post(goal_status))
         .route("/ladder", get(ladder))
         .route("/reports", get(reports))
         .route("/run", get(run_page).post(start_run))
@@ -325,6 +339,408 @@ async fn add_log(
         Ok(Err(err)) => error_page(&format!("{err:#}")),
         Err(err) => error_page(&err.to_string()),
     }
+}
+
+/// Runs a form handler with a fresh session off the async threads; a refused
+/// origin is 403 and any unexpected error the error page.
+async fn write<F>(state: Arc<AppState>, headers: &HeaderMap, handle: F) -> Response
+where
+    F: FnOnce(&Session) -> Result<Response> + Send + 'static,
+{
+    if !same_origin(headers, state.port) {
+        return forbidden_post();
+    }
+    let paths = state.paths.clone();
+    let result =
+        tokio::task::spawn_blocking(move || Session::at(paths).and_then(|s| handle(&s))).await;
+    match result {
+        Ok(Ok(response)) => response,
+        Ok(Err(err)) => error_page(&format!("{err:#}")),
+        Err(err) => error_page(&err.to_string()),
+    }
+}
+
+fn see_other(location: String) -> Response {
+    (StatusCode::SEE_OTHER, [(header::LOCATION, location)]).into_response()
+}
+
+fn invalid(markup: maud::Markup) -> Response {
+    (StatusCode::UNPROCESSABLE_ENTITY, Html(markup.into_string())).into_response()
+}
+
+fn missing() -> Response {
+    (
+        StatusCode::NOT_FOUND,
+        Html(views::not_found().into_string()),
+    )
+        .into_response()
+}
+
+/// A form date: empty is `empty`, otherwise it must parse.
+fn form_date(
+    value: &str,
+    empty: Option<chrono::NaiveDate>,
+) -> std::result::Result<Option<chrono::NaiveDate>, String> {
+    match value.trim() {
+        "" => Ok(empty),
+        d => crate::dates::parse_date(d, crate::session::today())
+            .map(Some)
+            .ok_or_else(|| "Use a date like 2026-10-04.".to_string()),
+    }
+}
+
+/// What a redirect after a form tells the next page, as a fixed message.
+#[derive(Deserialize, Default)]
+struct Saved {
+    saved: Option<String>,
+}
+
+impl Saved {
+    fn notice(&self) -> Option<(Alert, String)> {
+        let text = match self.saved.as_deref()? {
+            "person" => "Added. Mention them in your logs as @handle.",
+            "note" => "Note saved.",
+            "done" => "Follow-up updated.",
+            "deleted" => "Note deleted.",
+            "goal" => "Goal added.",
+            "checkin" => "Check-in saved.",
+            "status" => "Goal updated.",
+            _ => return None,
+        };
+        Some((Alert::Success, text.to_string()))
+    }
+}
+
+async fn people(State(state): State<Arc<AppState>>, Query(saved): Query<Saved>) -> Response {
+    with_data(state, move |data| {
+        let form = PersonForm {
+            notice: saved.notice(),
+            ..PersonForm::default()
+        };
+        page(views::people_with(data, &form))
+    })
+    .await
+}
+
+#[derive(Deserialize)]
+struct AddPerson {
+    #[serde(default)]
+    handle: String,
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    role: String,
+    #[serde(default)]
+    relation: String,
+}
+
+async fn add_person(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Form(input): Form<AddPerson>,
+) -> Response {
+    write(state, &headers, move |session| {
+        let handle = crate::people::normalize_handle(&input.handle);
+        let name = input.name.trim();
+        let added = match handle {
+            None => Err("Use letters, numbers, - _ or . for the handle, like ada.".to_string()),
+            Some(_) if name.is_empty() => Err("Write their name.".to_string()),
+            Some(_) if name.chars().count() > 100 || input.role.chars().count() > 100 => {
+                Err("Keep the name and role under 100 characters.".to_string())
+            }
+            Some(handle) => session
+                .add_person(crate::people::Person {
+                    handle,
+                    name: name.to_string(),
+                    role: Some(input.role.trim().to_string()).filter(|r| !r.is_empty()),
+                    team: None,
+                    relation: crate::people::Relation::parse(&input.relation).unwrap_or_default(),
+                    about: None,
+                    since: None,
+                })
+                .map_err(|e| format!("{e:#}")),
+        };
+        match added {
+            Ok(_) => Ok(see_other(format!(
+                "{}?saved=person",
+                views::Tab::People.path()
+            ))),
+            Err(problem) => {
+                let data = DashboardData::load(session)?;
+                let form = PersonForm {
+                    handle: input.handle,
+                    name: input.name,
+                    role: input.role,
+                    relation: input.relation,
+                    notice: Some((Alert::Error, problem)),
+                };
+                Ok(invalid(views::people_with(&data, &form)))
+            }
+        }
+    })
+    .await
+}
+
+async fn person(
+    State(state): State<Arc<AppState>>,
+    Path(handle): Path<String>,
+    Query(saved): Query<Saved>,
+) -> Response {
+    with_data(state, move |data| {
+        let mut form = NoteForm::empty(data.today);
+        form.notice = saved.notice();
+        match views::person(data, &handle, &form) {
+            Some(markup) => page(markup),
+            None => missing(),
+        }
+    })
+    .await
+}
+
+#[derive(Deserialize)]
+struct AddNote {
+    #[serde(default)]
+    text: String,
+    #[serde(default)]
+    kind: String,
+    #[serde(default)]
+    date: String,
+}
+
+async fn add_note(
+    State(state): State<Arc<AppState>>,
+    Path(handle): Path<String>,
+    headers: HeaderMap,
+    Form(input): Form<AddNote>,
+) -> Response {
+    write(state, &headers, move |session| {
+        let Some(person) = session.people()?.get(&handle).cloned() else {
+            return Ok(missing());
+        };
+        let text = input.text.trim();
+        let kind = crate::people::NoteKind::parse(&input.kind).unwrap_or_default();
+        let checked = if text.is_empty() {
+            Err("Write the note first.".to_string())
+        } else if text.chars().count() > MAX_ENTRY {
+            Err(format!("That is longer than {MAX_ENTRY} characters."))
+        } else {
+            form_date(&input.date, Some(crate::session::today()))
+        };
+        match checked {
+            Ok(date) => {
+                let date = date.unwrap_or_else(crate::session::today);
+                session.add_note(&person.handle, kind, date, text)?;
+                Ok(see_other(format!(
+                    "{}?saved=note",
+                    views::person_path(&person.handle)
+                )))
+            }
+            Err(problem) => {
+                let data = DashboardData::load(session)?;
+                let form = NoteForm {
+                    kind: input.kind,
+                    date: input.date,
+                    text: input.text,
+                    notice: Some((Alert::Error, problem)),
+                };
+                Ok(match views::person(&data, &person.handle, &form) {
+                    Some(markup) => invalid(markup),
+                    None => missing(),
+                })
+            }
+        }
+    })
+    .await
+}
+
+#[derive(Deserialize)]
+struct NoteDone {
+    #[serde(default)]
+    done: String,
+    /// Where to go back to: the People page or the person's page.
+    #[serde(default)]
+    back: String,
+}
+
+/// Only the People page and the person's own page are allowed as `back`, so a
+/// form cannot redirect elsewhere.
+fn back_to(back: &str, handle: &str) -> String {
+    let person = views::person_path(handle);
+    if back == views::Tab::People.path() || back == "/" {
+        back.to_string()
+    } else {
+        person
+    }
+}
+
+async fn note_done(
+    State(state): State<Arc<AppState>>,
+    Path((handle, id)): Path<(String, String)>,
+    headers: HeaderMap,
+    Form(input): Form<NoteDone>,
+) -> Response {
+    write(state, &headers, move |session| {
+        let ours = session
+            .notes()?
+            .iter()
+            .any(|n| n.id == id && n.person == handle);
+        if !ours {
+            return Ok(missing());
+        }
+        session.set_note_done(&id, input.done != "false")?;
+        Ok(see_other(format!(
+            "{}?saved=done",
+            back_to(&input.back, &handle)
+        )))
+    })
+    .await
+}
+
+async fn delete_note(
+    State(state): State<Arc<AppState>>,
+    Path((handle, id)): Path<(String, String)>,
+    headers: HeaderMap,
+    Form(input): Form<NoteDone>,
+) -> Response {
+    write(state, &headers, move |session| {
+        let ours = session
+            .notes()?
+            .iter()
+            .any(|n| n.id == id && n.person == handle);
+        if !ours {
+            return Ok(missing());
+        }
+        session.remove_note(&id)?;
+        Ok(see_other(format!(
+            "{}?saved=deleted",
+            back_to(&input.back, &handle)
+        )))
+    })
+    .await
+}
+
+async fn goals(State(state): State<Arc<AppState>>, Query(saved): Query<Saved>) -> Response {
+    with_data(state, move |data| {
+        let mut form = GoalForm::empty();
+        form.notice = saved.notice();
+        page(views::goals_with(data, &form))
+    })
+    .await
+}
+
+#[derive(Deserialize)]
+struct AddGoal {
+    #[serde(default)]
+    text: String,
+    #[serde(default)]
+    expectation: String,
+    #[serde(default)]
+    due: String,
+}
+
+async fn add_goal(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Form(input): Form<AddGoal>,
+) -> Response {
+    write(state, &headers, move |session| {
+        let text = input.text.trim();
+        let added = if text.is_empty() {
+            Err("Write the goal first.".to_string())
+        } else if text.chars().count() > 400 {
+            Err("Keep a goal under 400 characters.".to_string())
+        } else {
+            form_date(&input.due, None).and_then(|due| {
+                session
+                    .add_goal(text, Some(input.expectation.as_str()), due)
+                    .map_err(|e| format!("{e:#}"))
+            })
+        };
+        match added {
+            Ok(_) => Ok(see_other(format!(
+                "{}?saved=goal",
+                views::Tab::Goals.path()
+            ))),
+            Err(problem) => {
+                let data = DashboardData::load(session)?;
+                let form = GoalForm {
+                    text: input.text,
+                    expectation: input.expectation,
+                    due: input.due,
+                    notice: Some((Alert::Error, problem)),
+                };
+                Ok(invalid(views::goals_with(&data, &form)))
+            }
+        }
+    })
+    .await
+}
+
+#[derive(Deserialize)]
+struct Checkin {
+    #[serde(default)]
+    text: String,
+}
+
+async fn checkin(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<u32>,
+    headers: HeaderMap,
+    Form(input): Form<Checkin>,
+) -> Response {
+    write(state, &headers, move |session| {
+        if session.goals()?.get(id).is_none() {
+            return Ok(missing());
+        }
+        let text = input.text.trim();
+        if text.is_empty() || text.chars().count() > MAX_ENTRY {
+            let data = DashboardData::load(session)?;
+            let mut form = GoalForm::empty();
+            form.notice = Some((
+                Alert::Error,
+                format!("Write what you did for goal #{id} first."),
+            ));
+            return Ok(invalid(views::goals_with(&data, &form)));
+        }
+        session.add_checkin(id, crate::session::today(), text)?;
+        Ok(see_other(format!(
+            "{}?saved=checkin",
+            views::Tab::Goals.path()
+        )))
+    })
+    .await
+}
+
+#[derive(Deserialize)]
+struct Status {
+    #[serde(default)]
+    status: String,
+}
+
+async fn goal_status(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<u32>,
+    headers: HeaderMap,
+    Form(input): Form<Status>,
+) -> Response {
+    use crate::goals::GoalStatus;
+    write(state, &headers, move |session| {
+        let status = match input.status.as_str() {
+            "active" => GoalStatus::Active,
+            "done" => GoalStatus::Done,
+            "dropped" => GoalStatus::Dropped,
+            _ => return Ok((StatusCode::BAD_REQUEST, "Unknown status.\n").into_response()),
+        };
+        if session.goals()?.get(id).is_none() {
+            return Ok(missing());
+        }
+        session.set_goal_status(id, status)?;
+        Ok(see_other(format!(
+            "{}?saved=status",
+            views::Tab::Goals.path()
+        )))
+    })
+    .await
 }
 
 async fn ladder(State(state): State<Arc<AppState>>, Query(query): Query<LadderQuery>) -> Response {
@@ -926,6 +1342,167 @@ mod tests {
                 .status(),
             StatusCode::FORBIDDEN
         );
+    }
+
+    #[tokio::test]
+    async fn people_notes_and_goals_from_the_browser() {
+        let home = tempfile::tempdir().unwrap();
+        let paths = Paths::at(home.path().to_path_buf());
+        let state = Arc::new(AppState::new(4747, TOKEN.into(), paths.clone()));
+        let same = |req: axum::http::request::Builder| {
+            req.header("origin", "http://127.0.0.1:4747")
+                .header("sec-fetch-site", "same-origin")
+        };
+        let post = |path: &str| same(Request::post(path));
+        let location = |res: &Response| {
+            res.headers()[header::LOCATION]
+                .to_str()
+                .unwrap()
+                .to_string()
+        };
+
+        // People.
+        let added = send(
+            &state,
+            post("/people"),
+            "handle=%40Ada&name=Ada&role=Junior+developer&relation=mentee",
+        )
+        .await;
+        assert_eq!(added.status(), StatusCode::SEE_OTHER);
+        assert_eq!(location(&added), "/people?saved=person");
+        let list = body(send(&state, Request::get("/people?saved=person"), "").await).await;
+        assert!(
+            list.contains("Added.") && list.contains("Ada (Junior developer, mentee)"),
+            "{list}"
+        );
+        for (form, message) in [
+            ("handle=ada&name=Ada", "already"),
+            ("handle=%21%21&name=X", "Use letters"),
+            ("handle=bo&name=+", "Write their name."),
+        ] {
+            let res = send(&state, post("/people"), form).await;
+            assert_eq!(res.status(), StatusCode::UNPROCESSABLE_ENTITY, "{form}");
+            assert!(body(res).await.contains(message), "{form}");
+        }
+
+        // Notes.
+        let noted = send(
+            &state,
+            post("/people/ada/notes"),
+            "text=Wants+to+own+a+service&kind=follow-up&date=",
+        )
+        .await;
+        assert_eq!(location(&noted), "/people/ada?saved=note");
+        let session = Session::at(paths.clone()).unwrap();
+        let note = session.notes().unwrap().remove(0);
+        assert!(note.is_open_follow_up());
+        let bad = send(
+            &state,
+            post("/people/ada/notes"),
+            "text=Kept+text&date=nope",
+        )
+        .await;
+        assert_eq!(bad.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(body(bad).await.contains(">Kept text</textarea>"));
+        assert_eq!(
+            send(&state, post("/people/bo/notes"), "text=x")
+                .await
+                .status(),
+            StatusCode::NOT_FOUND
+        );
+        let done = send(
+            &state,
+            post(&format!("/people/ada/notes/{}/done", note.id)),
+            "done=true&back=%2Fpeople",
+        )
+        .await;
+        assert_eq!(location(&done), "/people?saved=done");
+        assert!(!session.notes().unwrap()[0].is_open_follow_up());
+        // A note is only reached through its own person, and `back` cannot leave the dashboard.
+        assert_eq!(
+            send(
+                &state,
+                post(&format!("/people/bo/notes/{}/delete", note.id)),
+                ""
+            )
+            .await
+            .status(),
+            StatusCode::NOT_FOUND
+        );
+        let deleted = send(
+            &state,
+            post(&format!("/people/ada/notes/{}/delete", note.id)),
+            "back=https%3A%2F%2Fevil.example",
+        )
+        .await;
+        assert_eq!(location(&deleted), "/people/ada?saved=deleted");
+        assert!(session.notes().unwrap().is_empty());
+        assert_eq!(
+            send(&state, Request::get("/people/nobody"), "")
+                .await
+                .status(),
+            StatusCode::NOT_FOUND
+        );
+
+        // Goals.
+        let goal = send(
+            &state,
+            post("/goals"),
+            "text=Speak+at+a+meetup&expectation=&due=2099-12-31",
+        )
+        .await;
+        assert_eq!(location(&goal), "/goals?saved=goal");
+        let tied = send(&state, post("/goals"), "text=Mentor&expectation=SD9.nope.1").await;
+        assert_eq!(tied.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(body(tied).await.contains("import a ladder"));
+        let checked = send(&state, post("/goals/1/checkin"), "text=Sent+the+proposal").await;
+        assert_eq!(location(&checked), "/goals?saved=checkin");
+        assert_eq!(
+            send(&state, post("/goals/9/checkin"), "text=x")
+                .await
+                .status(),
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            send(&state, post("/goals/1/status"), "status=finished")
+                .await
+                .status(),
+            StatusCode::BAD_REQUEST
+        );
+        send(&state, post("/goals/1/status"), "status=done").await;
+        let goals = session.goals().unwrap();
+        assert_eq!(goals.get(1).unwrap().checkins.len(), 1);
+        assert_eq!(goals.get(1).unwrap().status, crate::goals::GoalStatus::Done);
+        let page = body(send(&state, Request::get("/goals?saved=status"), "").await).await;
+        assert!(
+            page.contains("Goal updated.") && page.contains("Done and dropped"),
+            "{page}"
+        );
+
+        // Other sites cannot change anything.
+        let cross = |req: axum::http::request::Builder| {
+            req.header("origin", "http://evil.example")
+                .header("sec-fetch-site", "cross-site")
+        };
+        for path in [
+            "/people",
+            "/people/ada/notes",
+            "/goals",
+            "/goals/1/checkin",
+            "/goals/1/status",
+        ] {
+            assert_eq!(
+                send(
+                    &state,
+                    cross(Request::post(path)),
+                    "text=x&handle=x&name=x&status=active"
+                )
+                .await
+                .status(),
+                StatusCode::FORBIDDEN,
+                "{path}"
+            );
+        }
     }
 
     #[test]

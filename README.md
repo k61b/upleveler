@@ -76,8 +76,10 @@ Opens the dashboard in your browser (or type `/web` in the app). It runs on your
 
 | Tab | What it shows |
 |---|---|
-| Overview | Entries, streak, a 26-week activity heatmap, readiness from your latest gap analysis, latest reports |
+| Overview | Entries, streak, a 26-week activity heatmap, readiness from your latest gap analysis, latest reports, active goals and open follow-ups |
 | Logs | Every entry by day, filtered as you type (text, tag or date); add new entries with a date and tags |
+| People | The people you work with; add someone, then open their page to write notes (1:1, feedback, follow-ups), close follow-ups and see the entries that mention them |
+| Goals | Active and finished goals with progress from your log, the latest gap analysis and check-ins; add a goal, check in, mark it done or drop it |
 | Ladder | Each level's expectations with the entries that back them; your target level is marked |
 | Reports | Run a gap analysis, promotion document or summary with live progress; read or copy any report as Markdown |
 

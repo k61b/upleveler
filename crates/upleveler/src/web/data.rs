@@ -3,7 +3,9 @@
 //! the disk themselves.
 
 use crate::analyze::GapSummary;
+use crate::goals::Goals;
 use crate::ladder::Ladder;
+use crate::people::{Note, People, Person};
 use crate::session::{activity, streak, Session};
 use crate::store::Entry;
 use anyhow::Result;
@@ -26,6 +28,10 @@ pub struct DashboardData {
     pub model: String,
     /// Whether that model runs on this computer.
     pub model_local: bool,
+    pub people: People,
+    /// Notes about people, oldest first.
+    pub notes: Vec<Note>,
+    pub goals: Goals,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -115,7 +121,44 @@ impl DashboardData {
             reports,
             model: session.cfg.llm.model.clone(),
             model_local: crate::config::is_local_url(&session.cfg.llm.base_url),
+            people: session.people()?,
+            notes: session.notes()?,
+            goals: session.goals()?,
         })
+    }
+
+    pub fn person(&self, handle: &str) -> Option<&Person> {
+        self.people.get(handle)
+    }
+
+    /// Notes about `handle`, newest first.
+    pub fn notes_about(&self, handle: &str) -> Vec<&Note> {
+        self.notes
+            .iter()
+            .rev()
+            .filter(|n| n.person == handle)
+            .collect()
+    }
+
+    /// Entries that mention `@handle`, newest first.
+    pub fn mentioning(&self, handle: &str) -> Vec<&Entry> {
+        self.entries
+            .iter()
+            .filter(|e| e.mentions().iter().any(|m| m == handle))
+            .collect()
+    }
+
+    /// Open follow-ups, oldest first (the longest waiting at the top).
+    pub fn open_follow_ups(&self) -> Vec<&Note> {
+        self.notes
+            .iter()
+            .filter(|n| n.is_open_follow_up())
+            .collect()
+    }
+
+    /// The goal's progress from the log, the latest gap analysis and check-ins.
+    pub fn goal_progress(&self, goal: &crate::goals::Goal) -> crate::goals::Progress {
+        crate::goals::progress(goal, &self.entries, self.gap.as_ref())
     }
 
     pub fn report(&self, name: &str) -> Option<&Report> {

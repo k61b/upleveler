@@ -54,6 +54,62 @@ fn reports_card(data: &DashboardData) -> Markup {
     )
 }
 
+fn goals_card(data: &DashboardData) -> Markup {
+    let active: Vec<_> = data.goals.active().collect();
+    ui::card(
+        Card::Raised,
+        html! {
+            h2.card-title { "Goals" }
+            @if active.is_empty() {
+                (ui::empty_state(None, "No active goals.", Some(ui::button(Button::Ghost, "Add a goal", Some(Tab::Goals.path())))))
+            } @else {
+                ul.overview-list {
+                    @for g in active.iter().take(3) {
+                        @let p = data.goal_progress(g);
+                        li {
+                            @if let Some(rating) = &p.rating { (ui::rating_marker(rating)) " " }
+                            (g.text)
+                            span.muted {
+                                " · " (plural(p.evidence + p.tagged, "entry", "entries"))
+                                @if p.checkins > 0 { " · " (plural(p.checkins, "check-in", "check-ins")) }
+                                @if let Some(due) = g.due { " · due " span.mono { (due) } }
+                            }
+                        }
+                    }
+                }
+                a.card-link href=(Tab::Goals.path()) { "All goals" }
+            }
+        },
+    )
+}
+
+fn people_card(data: &DashboardData) -> Markup {
+    let open = data.open_follow_ups();
+    ui::card(
+        Card::Raised,
+        html! {
+            h2.card-title { "Follow-ups" }
+            @if data.people.people.is_empty() {
+                (ui::empty_state(None, "Add the people you work with to keep notes about 1:1s and feedback.", Some(ui::button(Button::Ghost, "Add a person", Some(Tab::People.path())))))
+            } @else if open.is_empty() {
+                p.muted { "No open follow-ups with " (plural(data.people.people.len(), "person", "people")) "." }
+                a.card-link href=(Tab::People.path()) { "People" }
+            } @else {
+                ul.overview-list {
+                    @for n in open.iter().take(4) {
+                        li {
+                            a href=(super::people::person_path(&n.person)) { "@" (n.person) }
+                            " " (n.text)
+                            span.muted { " · since " span.mono { (n.date) } }
+                        }
+                    }
+                }
+                a.card-link href=(Tab::People.path()) { (plural(open.len(), "open follow-up", "open follow-ups")) }
+            }
+        },
+    )
+}
+
 /// The Overview content without the page frame (also used by the site demo).
 pub fn overview_body(data: &DashboardData) -> Markup {
     let lead = match data.target.as_deref() {
@@ -93,6 +149,10 @@ pub fn overview_body(data: &DashboardData) -> Markup {
             div.grid-2 {
                 (readiness_card(data))
                 (reports_card(data))
+            }
+            div.grid-2 {
+                (goals_card(data))
+                (people_card(data))
             }
         }
     };

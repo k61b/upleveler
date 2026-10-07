@@ -3,15 +3,19 @@
 //! and the site's demo.
 
 mod gallery;
+mod goals;
 mod ladder;
 mod logs;
 mod overview;
+mod people;
 mod reports;
 
 pub use gallery::gallery;
+pub use goals::{goals, goals_with, GoalForm};
 pub use ladder::ladder;
 pub use logs::{log_results, logs, logs_with, AddForm};
 pub use overview::{demo_frame, overview, overview_body};
+pub use people::{people, people_with, person, person_path, NoteForm, PersonForm};
 pub use reports::{render_markdown, report, reports, reports_with, run, RunForm};
 
 use super::brand::{self, LockupSize};
@@ -23,17 +27,28 @@ use maud::{html, Markup, DOCTYPE};
 pub enum Tab {
     Overview,
     Logs,
+    People,
+    Goals,
     Ladder,
     Reports,
 }
 
 impl Tab {
-    pub const ALL: [Tab; 4] = [Tab::Overview, Tab::Logs, Tab::Ladder, Tab::Reports];
+    pub const ALL: [Tab; 6] = [
+        Tab::Overview,
+        Tab::Logs,
+        Tab::People,
+        Tab::Goals,
+        Tab::Ladder,
+        Tab::Reports,
+    ];
 
     pub fn path(self) -> &'static str {
         match self {
             Tab::Overview => "/",
             Tab::Logs => "/logs",
+            Tab::People => "/people",
+            Tab::Goals => "/goals",
             Tab::Ladder => "/ladder",
             Tab::Reports => "/reports",
         }
@@ -43,6 +58,8 @@ impl Tab {
         match self {
             Tab::Overview => "Overview",
             Tab::Logs => "Logs",
+            Tab::People => "People",
+            Tab::Goals => "Goals",
             Tab::Ladder => "Ladder",
             Tab::Reports => "Reports",
         }
@@ -171,6 +188,30 @@ mod tests {
     }
 
     #[test]
+    fn people_and_goals_pages_show_the_demo() {
+        let data = sample();
+        let list = people(&data).into_string();
+        assert!(list.contains("Ada (Junior developer, mentee)"), "{list}");
+        assert!(list.contains("Open follow-ups") && list.contains("Share the retry design doc"));
+        // The closed follow-up is not listed as open.
+        assert!(!list.contains("Send the on-call proposal"));
+
+        let ada = person(&data, "@Ada", &NoteForm::empty(data.today))
+            .unwrap()
+            .into_string();
+        assert!(ada.contains("Wants to own a service") && ada.contains("Paired with @ada"));
+        assert!(!ada.contains("rollback plan"), "only Ada's notes");
+        assert!(person(&data, "nobody", &NoteForm::empty(data.today)).is_none());
+
+        let goals = goals(&data).into_string();
+        assert!(goals.contains("Mentor a junior developer") && goals.contains("SD3.mentoring.1"));
+        assert!(goals.contains("Sent the talk proposal") && goals.contains("1 check-in"));
+
+        let overview = overview(&data).into_string();
+        assert!(overview.contains("Follow-ups") && overview.contains("Speak at a local meetup"));
+    }
+
+    #[test]
     fn pages_load_only_local_assets() {
         let data = sample();
         let pages = [
@@ -179,6 +220,9 @@ mod tests {
             ladder(&data, None),
             reports(&data),
             report(&data.reports[0]),
+            people(&data),
+            person(&data, "ada", &NoteForm::empty(data.today)).unwrap(),
+            goals(&data),
             unauthorized(),
             not_found(),
             gallery(),

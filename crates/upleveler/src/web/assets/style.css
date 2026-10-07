@@ -1598,6 +1598,127 @@ select.input {
   font-size: var(--text-sm);
 }
 
+/* ---------- People and goals ---------- */
+
+.add-entry:last-child {
+  margin-bottom: 0;
+  padding-bottom: 0;
+  border-bottom: 0;
+}
+
+.person-list,
+.note-list,
+.goal-list,
+.overview-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.person-row,
+.note,
+.goal {
+  padding: 12px 0;
+  border-top: 1px solid var(--rule);
+}
+
+.person-row:first-child,
+.goal:first-child {
+  border-top: 0;
+  padding-top: 0;
+}
+
+.person-name {
+  color: var(--fg);
+  font-weight: 600;
+  text-decoration: none;
+  overflow-wrap: anywhere;
+}
+
+.person-name .mono {
+  color: var(--emphasis);
+}
+
+.person-name:hover {
+  text-decoration: underline;
+}
+
+.person-row .muted,
+.goal .muted {
+  margin-top: 4px;
+  font-size: var(--text-sm);
+}
+
+.person-about {
+  color: var(--fg);
+  overflow-wrap: anywhere;
+}
+
+.note-meta {
+  font-size: var(--text-sm);
+}
+
+.note-text {
+  margin-top: 4px;
+  color: var(--fg);
+  overflow-wrap: anywhere;
+}
+
+.note-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.note-actions .btn {
+  padding: 0 14px;
+  font-size: var(--text-sm);
+}
+
+.goal-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 10px;
+}
+
+.goal-title {
+  font-size: var(--text-lg);
+  letter-spacing: -0.01em;
+  overflow-wrap: anywhere;
+}
+
+.goal .note-list {
+  margin-top: 8px;
+  padding-left: 14px;
+  border-left: 2px solid var(--rule);
+}
+
+.goal .note:first-child {
+  border-top: 0;
+}
+
+.goal .note {
+  padding: 6px 0;
+}
+
+.goal .add-entry-row {
+  margin-top: 12px;
+}
+
+.overview-list li {
+  overflow-wrap: anywhere;
+}
+
+.overview-list .mono {
+  white-space: nowrap;
+}
+
+.overview-list li + li {
+  margin-top: 10px;
+}
+
 .reader-wrap {
   max-width: calc(var(--w-prose) + 2 * var(--gutter));
 }
