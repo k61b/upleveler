@@ -5,7 +5,7 @@ Upleveler is open source and public. Anything committed here is published to eve
 ## Never commit or publish
 
 - Secrets: API keys, tokens, passwords, private keys, `.env` files, or real values for `api_key_env` variables.
-- Personal data: real work logs (`logs.jsonl`), staging files, reports, `config.toml`, a real `ladder.yaml`, or exports from anyone's `~/.upleveler`.
+- Personal data: real work logs (`logs.jsonl`), notes about people (`people.yaml`, `notes.jsonl`), goals (`goals.yaml`), staging files, reports, `config.toml`, a real `ladder.yaml`, or exports from anyone's `~/.upleveler`.
 - Company material: real career-ladder documents, internal hostnames or URLs, and names of real employers, colleagues or customers.
 - Machine details: absolute local paths such as `/Users/<name>/...`, and output copied from a real machine that contains them.
 

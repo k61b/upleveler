@@ -12,6 +12,11 @@ pub struct Paths {
     pub logs: PathBuf,
     pub reports: PathBuf,
     pub staging: PathBuf,
+    /// Profiles of the people you work with.
+    pub people: PathBuf,
+    /// Dated notes about them (1:1s, feedback, follow-ups).
+    pub notes: PathBuf,
+    pub goals: PathBuf,
 }
 
 impl Paths {
@@ -33,6 +38,9 @@ impl Paths {
             logs: root.join("logs.jsonl"),
             reports: root.join("reports"),
             staging: root.join("staging"),
+            people: root.join("people.yaml"),
+            notes: root.join("notes.jsonl"),
+            goals: root.join("goals.yaml"),
             root,
         }
     }

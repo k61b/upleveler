@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- People: keep profiles of the people you work with (`upleveler person add|list|show|remove`) and dated notes about them: 1:1s, feedback given and received, follow-ups (`upleveler note`, `upleveler notes --open`). Mention them in your log as `@handle`.
+- Goals: free goals or goals tied to a ladder expectation, with a due date, check-ins and progress from your log (`upleveler goal add|list|done|drop|checkin`). Tag an entry `goal-<id>` to count it toward a goal.
+
 ## 2.0.0
 
 The first release of Upleveler, a rewrite of this repository's earlier project (logswise, releases v0.0.2 to v1.0.1). It is numbered 2.0.0 so it follows those releases.

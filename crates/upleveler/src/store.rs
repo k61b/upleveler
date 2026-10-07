@@ -62,6 +62,11 @@ impl Entry {
         }
     }
 
+    /// The people this entry mentions as `@handle`.
+    pub fn mentions(&self) -> Vec<String> {
+        crate::people::mentions(&self.text)
+    }
+
     /// One-line rendering used in prompts and `list`.
     pub fn line(&self) -> String {
         let tags = if self.tags.is_empty() {

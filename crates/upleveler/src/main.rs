@@ -7,9 +7,11 @@ use std::path::PathBuf;
 use upleveler::analyze;
 use upleveler::dates::{parse_date, parse_period, Range};
 use upleveler::export::Format;
+use upleveler::goals::{self, GoalStatus};
 use upleveler::import;
 use upleveler::ladder::Ladder;
 use upleveler::llm::{Llm, Message};
+use upleveler::people::{NoteKind, Person, Relation};
 use upleveler::session::{today, Session};
 use upleveler::store::{Entry, Filter};
 
@@ -47,6 +49,36 @@ enum Command {
     Ladder {
         #[command(subcommand)]
         action: LadderCmd,
+    },
+    /// The people you work with: profiles, and notes about them
+    Person {
+        #[command(subcommand)]
+        action: PersonCmd,
+    },
+    /// Add a note about someone: a 1:1, feedback, or something to follow up
+    Note {
+        /// Their handle (`ada` or `@ada`)
+        person: String,
+        text: Vec<String>,
+        #[arg(long, short, value_enum, default_value_t = NoteKindArg::Note)]
+        kind: NoteKindArg,
+        /// Date of the note (default: today)
+        #[arg(long, short)]
+        date: Option<String>,
+    },
+    /// List notes about people
+    Notes {
+        /// Only notes about this person
+        #[arg(long, short)]
+        person: Option<String>,
+        /// Only follow-ups that are still open
+        #[arg(long)]
+        open: bool,
+    },
+    /// Your goals, free or tied to an expectation of your ladder
+    Goal {
+        #[command(subcommand)]
+        action: GoalCmd,
     },
     /// Add a log entry (opens $EDITOR, or reads stdin, when no text is given)
     Log {
@@ -159,6 +191,111 @@ enum LadderCmd {
     },
 }
 
+#[derive(Subcommand)]
+enum PersonCmd {
+    /// Add someone you work with
+    Add {
+        /// What you type after @ (`ada`)
+        handle: String,
+        /// Full name (default: the handle)
+        #[arg(long)]
+        name: Option<String>,
+        #[arg(long)]
+        role: Option<String>,
+        #[arg(long)]
+        team: Option<String>,
+        #[arg(long, value_enum, default_value_t = RelationArg::Other)]
+        relation: RelationArg,
+        /// A short description
+        #[arg(long)]
+        about: Option<String>,
+    },
+    /// List the people you work with
+    List,
+    /// Show someone's profile, notes and the entries that mention them
+    Show { handle: String },
+    /// Remove someone and every note about them (your log entries stay)
+    Remove {
+        handle: String,
+        #[arg(long, short)]
+        yes: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum GoalCmd {
+    /// Add a goal
+    Add {
+        text: Vec<String>,
+        /// Tie it to a ladder expectation id (see `upleveler ladder show --level <ID>`)
+        #[arg(long, short)]
+        expectation: Option<String>,
+        /// When you want to reach it
+        #[arg(long)]
+        due: Option<String>,
+    },
+    /// List goals and their progress
+    List {
+        /// Also show done and dropped goals
+        #[arg(long)]
+        all: bool,
+    },
+    /// Mark a goal as reached
+    Done { id: u32 },
+    /// Drop a goal
+    Drop { id: u32 },
+    /// Note progress on a goal
+    Checkin {
+        id: u32,
+        text: Vec<String>,
+        /// Date of the check-in (default: today)
+        #[arg(long, short)]
+        date: Option<String>,
+    },
+}
+
+#[derive(Clone, Copy, clap::ValueEnum)]
+enum NoteKindArg {
+    Note,
+    OneOnOne,
+    FeedbackGiven,
+    FeedbackReceived,
+    FollowUp,
+}
+
+impl From<NoteKindArg> for NoteKind {
+    fn from(kind: NoteKindArg) -> Self {
+        match kind {
+            NoteKindArg::Note => NoteKind::Note,
+            NoteKindArg::OneOnOne => NoteKind::OneOnOne,
+            NoteKindArg::FeedbackGiven => NoteKind::FeedbackGiven,
+            NoteKindArg::FeedbackReceived => NoteKind::FeedbackReceived,
+            NoteKindArg::FollowUp => NoteKind::FollowUp,
+        }
+    }
+}
+
+#[derive(Clone, Copy, clap::ValueEnum)]
+enum RelationArg {
+    Manager,
+    Peer,
+    Mentee,
+    Report,
+    Other,
+}
+
+impl From<RelationArg> for Relation {
+    fn from(relation: RelationArg) -> Self {
+        match relation {
+            RelationArg::Manager => Relation::Manager,
+            RelationArg::Peer => Relation::Peer,
+            RelationArg::Mentee => Relation::Mentee,
+            RelationArg::Report => Relation::Report,
+            RelationArg::Other => Relation::Other,
+        }
+    }
+}
+
 fn main() {
     if let Err(err) = run(Cli::parse()) {
         eprintln!("error: {err:#}");
@@ -181,6 +318,45 @@ fn run(cli: Cli) -> Result<()> {
             upleveler::tui::run(session, true)
         }
         Some(Command::Ladder { action }) => ladder_cmd(&mut session, action),
+        Some(Command::Person { action }) => person_cmd(&session, action),
+        Some(Command::Note {
+            person,
+            text,
+            kind,
+            date,
+        }) => {
+            let date = date_arg(date)?;
+            let text = text.join(" ");
+            match session.add_note(&person, kind.into(), date, &text)? {
+                Some(n) => println!("Noted for @{}: {}", n.person, n.line()),
+                None => println!("Already noted."),
+            }
+            Ok(())
+        }
+        Some(Command::Notes { person, open }) => {
+            let people = session.people()?;
+            let person = match person {
+                Some(h) => Some(
+                    people
+                        .get(&h)
+                        .map(|p| p.handle.clone())
+                        .with_context(|| format!("@{h} is not in your people"))?,
+                ),
+                None => None,
+            };
+            let notes: Vec<_> = session
+                .notes()?
+                .into_iter()
+                .filter(|n| person.as_ref().is_none_or(|p| &n.person == p))
+                .filter(|n| !open || n.is_open_follow_up())
+                .collect();
+            for n in &notes {
+                println!("@{} {}", n.person, n.line());
+            }
+            eprintln!("{}", plural(notes.len(), "note", "notes"));
+            Ok(())
+        }
+        Some(Command::Goal { action }) => goal_cmd(&session, action),
         Some(Command::Log { text, date, tags }) => log(&session, text, date, tags),
         Some(Command::List {
             range,
@@ -535,6 +711,203 @@ fn log(
             "Already logged: {}",
             Entry::new(date, &text, vec![], "manual").line()
         ),
+    }
+    for handle in session.unknown_mentions(&text) {
+        eprintln!(
+            "note: @{handle} is not in your people yet: upleveler person add {handle} --name \"…\""
+        );
+    }
+    Ok(())
+}
+
+/// "1 note", "2 notes".
+fn plural(n: usize, one: &str, many: &str) -> String {
+    format!("{n} {}", if n == 1 { one } else { many })
+}
+
+fn date_arg(date: Option<String>) -> Result<NaiveDate> {
+    match date {
+        Some(d) => parse_date(&d, today()).with_context(|| format!("unrecognized date {d:?}")),
+        None => Ok(today()),
+    }
+}
+
+fn person_cmd(session: &Session, action: PersonCmd) -> Result<()> {
+    match action {
+        PersonCmd::Add {
+            handle,
+            name,
+            role,
+            team,
+            relation,
+            about,
+        } => {
+            let person = session.add_person(Person {
+                handle,
+                name: name.unwrap_or_default(),
+                role,
+                team,
+                relation: relation.into(),
+                about,
+                since: None,
+            })?;
+            println!("Added @{}: {}", person.handle, person.label());
+        }
+        PersonCmd::List => {
+            let people = session.people()?;
+            let notes = session.notes()?;
+            for p in &people.people {
+                let count = notes.iter().filter(|n| n.person == p.handle).count();
+                let open = notes
+                    .iter()
+                    .filter(|n| n.person == p.handle && n.is_open_follow_up())
+                    .count();
+                let open = if open > 0 {
+                    format!(", {}", plural(open, "open follow-up", "open follow-ups"))
+                } else {
+                    String::new()
+                };
+                println!(
+                    "@{:<12} {}  ({}{open})",
+                    p.handle,
+                    p.label(),
+                    plural(count, "note", "notes")
+                );
+            }
+            if people.people.is_empty() {
+                println!("No people yet. Add someone: upleveler person add ada --name \"Ada\" --relation mentee");
+            }
+        }
+        PersonCmd::Show { handle } => {
+            let people = session.people()?;
+            let p = people
+                .get(&handle)
+                .with_context(|| format!("@{handle} is not in your people"))?;
+            println!("@{}  {}", p.handle, p.label());
+            if let Some(team) = &p.team {
+                println!("  team: {team}");
+            }
+            if let Some(about) = &p.about {
+                println!("  about: {about}");
+            }
+            let notes: Vec<_> = session
+                .notes()?
+                .into_iter()
+                .filter(|n| n.person == p.handle)
+                .collect();
+            println!("\nNotes ({}):", notes.len());
+            for n in notes.iter().rev() {
+                println!("  {}", n.line());
+            }
+            let entries = session.entries()?;
+            let mentioned: Vec<_> = entries
+                .iter()
+                .filter(|e| e.mentions().contains(&p.handle))
+                .collect();
+            println!(
+                "\nLog entries that mention @{} ({}):",
+                p.handle,
+                mentioned.len()
+            );
+            for e in mentioned.iter().rev().take(10) {
+                println!("  {}", e.line());
+            }
+        }
+        PersonCmd::Remove { handle, yes } => {
+            let people = session.people()?;
+            let p = people
+                .get(&handle)
+                .with_context(|| format!("@{handle} is not in your people"))?;
+            if !confirm(
+                &format!("Remove @{} and every note about them?", p.handle),
+                yes,
+            )? {
+                println!("Nothing removed.");
+                return Ok(());
+            }
+            if let Some((p, notes)) = session.remove_person(&handle)? {
+                println!(
+                    "Removed @{} and {}. Log entries that mention them are unchanged.",
+                    p.handle,
+                    plural(notes, "note", "notes")
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+fn goal_cmd(session: &Session, action: GoalCmd) -> Result<()> {
+    match action {
+        GoalCmd::Add {
+            text,
+            expectation,
+            due,
+        } => {
+            let due = match due {
+                Some(d) => Some(
+                    parse_date(&d, today()).with_context(|| format!("unrecognized date {d:?}"))?,
+                ),
+                None => None,
+            };
+            let goal = session.add_goal(&text.join(" "), expectation.as_deref(), due)?;
+            println!("Added goal {}", goal.line());
+            println!(
+                "Tag log entries with goal-{} to count them toward it.",
+                goal.id
+            );
+        }
+        GoalCmd::List { all } => {
+            let goals = session.goals()?;
+            let entries = session.entries()?;
+            let gap = session.latest_gap();
+            let shown: Vec<_> = goals
+                .goals
+                .iter()
+                .filter(|g| all || g.status == GoalStatus::Active)
+                .collect();
+            for g in &shown {
+                let p = goals::progress(g, &entries, gap.as_ref());
+                let mut facts = Vec::new();
+                if let Some(rating) = &p.rating {
+                    facts.push(rating.clone());
+                }
+                if g.expectation.is_some() || p.tagged > 0 {
+                    facts.push(plural(p.evidence + p.tagged, "entry", "entries"));
+                }
+                if p.checkins > 0 {
+                    facts.push(plural(p.checkins, "check-in", "check-ins"));
+                }
+                if let Some(last) = p.last {
+                    facts.push(format!("last {last}"));
+                }
+                let facts = if facts.is_empty() {
+                    String::new()
+                } else {
+                    format!("  · {}", facts.join(" · "))
+                };
+                println!("{}{facts}", g.line());
+            }
+            if shown.is_empty() {
+                println!("No goals yet. Add one: upleveler goal add \"Speak at a meetup\" --due 2026-12-01");
+            }
+        }
+        GoalCmd::Done { id } => println!(
+            "Done: {}",
+            session.set_goal_status(id, GoalStatus::Done)?.line()
+        ),
+        GoalCmd::Drop { id } => println!(
+            "Dropped: {}",
+            session.set_goal_status(id, GoalStatus::Dropped)?.line()
+        ),
+        GoalCmd::Checkin { id, text, date } => {
+            let goal = session.add_checkin(id, date_arg(date)?, &text.join(" "))?;
+            println!(
+                "Checked in on {} ({})",
+                goal.line(),
+                plural(goal.checkins.len(), "check-in", "check-ins")
+            );
+        }
     }
     Ok(())
 }

@@ -80,9 +80,30 @@ Opens the dashboard in your browser (or type `/web` in the app). It runs on your
 
 The dashboard reads and writes the same files as the terminal app and shows fresh data on every page load. Analyses use the model you chose in the setup, one at a time, and keep running if you close the page while `upleveler web` is open.
 
+## People and goals
+
+Keep notes about the people you work with and track your own goals:
+
+```sh
+upleveler person add ada --name "Ada" --role "Junior developer" --relation mentee
+upleveler note ada --kind one-on-one "Talked about her first on-call week"
+upleveler note ada --kind follow-up "Share the retry design doc"
+upleveler log "Paired with @ada on the ledger retries"
+
+upleveler goal add "Mentor a junior developer" --expectation SD3.mentoring.1 --due 2026-12-31
+upleveler goal add "Speak at a meetup"
+upleveler goal checkin 2 "Sent the talk proposal"
+upleveler goal list
+```
+
+- Mention people in your log with `@handle`; `upleveler person show ada` lists your notes about them and the entries that mention them.
+- Notes can be a `note`, `one-on-one`, `feedback-given`, `feedback-received` or `follow-up`. `upleveler notes --open` lists open follow-ups.
+- A goal tied to a ladder expectation counts the entries mapped to it and shows its latest gap rating. Tag an entry `goal-<id>` to count it toward any goal.
+- `upleveler person remove ada` deletes their profile and every note about them; your log entries stay.
+
 ## Privacy
 
-- Your data is plain files in `~/.upleveler/`.
+- Your data is plain files in `~/.upleveler/`, including what you note about other people (`people.yaml`, `notes.jsonl`) and your goals (`goals.yaml`). Edit or delete them any time.
 - Nothing is sent anywhere. To use your company's own LLM instead of Ollama, choose "OpenAI-compatible endpoint" in the setup (`/init`) and confirm that the endpoint is approved.
 - No account, no cloud, no telemetry. The browser dashboard (`upleveler web`) loads nothing from the internet.
 
@@ -92,7 +113,7 @@ Every feature is also a plain command, for example `upleveler log "..."`, `uplev
 
 ## Türkçe
 
-Upleveler, yaptığınız işi şirketinizin seviye beklentileriyle karşılaştırır. Terminalde `upleveler` yazın. Ne yaptığınızı yazarsanız log'a eklenir, soru sorarsanız cevaplanır. Komutları görmek için `/` yazın. Panoyu tarayıcıda açmak için `upleveler web` yazın; yalnızca kendi bilgisayarınızda çalışır. Raporların Türkçe olması için kurulumda Türkçe'yi seçin. Verileriniz bilgisayarınızdan çıkmaz.
+Upleveler, yaptığınız işi şirketinizin seviye beklentileriyle karşılaştırır. Terminalde `upleveler` yazın. Ne yaptığınızı yazarsanız log'a eklenir, soru sorarsanız cevaplanır. Komutları görmek için `/` yazın. Panoyu tarayıcıda açmak için `upleveler web` yazın; yalnızca kendi bilgisayarınızda çalışır. Raporların Türkçe olması için kurulumda Türkçe'yi seçin. Takım arkadaşlarınız hakkında not tutmak için `upleveler person` ve `upleveler note`, hedefleriniz için `upleveler goal` komutlarını kullanın. Verileriniz bilgisayarınızdan çıkmaz.
 
 ## Development
 

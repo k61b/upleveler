@@ -5,9 +5,11 @@ use crate::analyze::{self, GapReport, GapSummary, Levels};
 use crate::config::{is_local_url, Config, Paths};
 use crate::dates::Range;
 use crate::export::{self, Format};
+use crate::goals::{Goal, GoalStatus, Goals};
 use crate::import::{self, Collected, Plan};
 use crate::ladder::Ladder;
 use crate::llm::{HttpLlm, Llm};
+use crate::people::{normalize_handle, Note, NoteKind, NoteStore, People, Person};
 use crate::store::{Entry, Filter, Store};
 use crate::Progress;
 use anyhow::{bail, Context, Result};
@@ -127,6 +129,136 @@ impl Session {
 
     pub fn remove_entry(&self, id: &str) -> Result<Option<Entry>> {
         self.store.remove(id)
+    }
+
+    pub fn people(&self) -> Result<People> {
+        People::load(&self.paths.people)
+    }
+
+    pub fn add_person(&self, person: Person) -> Result<Person> {
+        let mut people = self.people()?;
+        people.add(person.clone())?;
+        people.save(&self.paths.people)?;
+        let handle = normalize_handle(&person.handle).unwrap_or_default();
+        Ok(people.get(&handle).cloned().expect("just added"))
+    }
+
+    /// Removes a person and every note about them; returns the profile and how
+    /// many notes were deleted. Log entries that mention them stay as they are.
+    pub fn remove_person(&self, handle: &str) -> Result<Option<(Person, usize)>> {
+        let mut people = self.people()?;
+        let Some(person) = people.remove(handle) else {
+            return Ok(None);
+        };
+        let removed = self.notes_store().update(|notes| {
+            let before = notes.len();
+            notes.retain(|n| n.person != person.handle);
+            before - notes.len()
+        })?;
+        people.save(&self.paths.people)?;
+        Ok(Some((person, removed)))
+    }
+
+    /// The `@handle`s in `text` that are not in your people yet.
+    pub fn unknown_mentions(&self, text: &str) -> Vec<String> {
+        let people = self.people().unwrap_or_default();
+        crate::people::mentions(text)
+            .into_iter()
+            .filter(|h| people.get(h).is_none())
+            .collect()
+    }
+
+    fn notes_store(&self) -> NoteStore {
+        NoteStore::new(&self.paths.notes)
+    }
+
+    /// All notes about people, oldest first.
+    pub fn notes(&self) -> Result<Vec<Note>> {
+        self.notes_store().load()
+    }
+
+    /// Adds a note about a known person; `None` means the same note exists.
+    pub fn add_note(
+        &self,
+        handle: &str,
+        kind: NoteKind,
+        date: NaiveDate,
+        text: &str,
+    ) -> Result<Option<Note>> {
+        if text.trim().is_empty() {
+            bail!("nothing to note");
+        }
+        let people = self.people()?;
+        let Some(person) = people.get(handle) else {
+            let handle = normalize_handle(handle).unwrap_or_else(|| handle.to_string());
+            bail!("@{handle} is not in your people yet. Add them first: upleveler person add {handle} --name \"…\"");
+        };
+        self.notes_store()
+            .add(Note::new(&person.handle, date, kind, text))
+    }
+
+    /// Marks a follow-up as done (or open again); false if no note has `id`.
+    pub fn set_note_done(&self, id: &str, done: bool) -> Result<bool> {
+        self.notes_store()
+            .update(|notes| match notes.iter_mut().find(|n| n.id == id) {
+                Some(note) => {
+                    note.done = done;
+                    true
+                }
+                None => false,
+            })
+    }
+
+    pub fn remove_note(&self, id: &str) -> Result<Option<Note>> {
+        self.notes_store().update(|notes| {
+            let pos = notes.iter().position(|n| n.id == id)?;
+            Some(notes.remove(pos))
+        })
+    }
+
+    pub fn goals(&self) -> Result<Goals> {
+        Goals::load(&self.paths.goals)
+    }
+
+    /// Adds a goal. An expectation must exist in the ladder.
+    pub fn add_goal(
+        &self,
+        text: &str,
+        expectation: Option<&str>,
+        due: Option<NaiveDate>,
+    ) -> Result<Goal> {
+        let expectation = match expectation.map(str::trim).filter(|e| !e.is_empty()) {
+            None => None,
+            Some(id) => {
+                let ladder = self
+                    .ladder()?
+                    .context("import a ladder before tying a goal to an expectation")?;
+                let exp = ladder.expectation(id).with_context(|| {
+                    format!(
+                        "there is no expectation {id} in your ladder (see `upleveler ladder show`)"
+                    )
+                })?;
+                Some(exp.id.clone())
+            }
+        };
+        let mut goals = self.goals()?;
+        let goal = goals.add(text, expectation, due, today())?.clone();
+        goals.save(&self.paths.goals)?;
+        Ok(goal)
+    }
+
+    pub fn set_goal_status(&self, id: u32, status: GoalStatus) -> Result<Goal> {
+        let mut goals = self.goals()?;
+        let goal = goals.set_status(id, status)?.clone();
+        goals.save(&self.paths.goals)?;
+        Ok(goal)
+    }
+
+    pub fn add_checkin(&self, id: u32, date: NaiveDate, text: &str) -> Result<Goal> {
+        let mut goals = self.goals()?;
+        let goal = goals.checkin(id, date, text)?.clone();
+        goals.save(&self.paths.goals)?;
+        Ok(goal)
     }
 
     /// Reads `file` into drafts and works out what would be added, writing a staging
@@ -462,5 +594,56 @@ mod tests {
         assert_eq!(s.latest_gap(), Some(summary));
         fs::write(s.paths.reports.join("gap-2026-10-05.md"), "# x").unwrap();
         assert_eq!(s.reports().len(), 1);
+    }
+
+    #[test]
+    fn people_notes_and_goals() {
+        use crate::people::Relation;
+        let dir = tempfile::tempdir().unwrap();
+        let s = Session::at(Paths::at(dir.path().to_path_buf())).unwrap();
+        let err = s
+            .add_note("ada", NoteKind::Note, d(10, 1), "x")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("person add ada"), "{err}");
+        let ada = s
+            .add_person(Person {
+                handle: "@Ada".into(),
+                name: "Ada".into(),
+                role: Some("Junior developer".into()),
+                team: None,
+                relation: Relation::Mentee,
+                about: None,
+                since: None,
+            })
+            .unwrap();
+        assert_eq!(ada.handle, "ada");
+        s.add_note("@ADA", NoteKind::FollowUp, d(10, 2), "Share the design doc")
+            .unwrap()
+            .unwrap();
+        let note = s.notes().unwrap().remove(0);
+        assert!(s.set_note_done(&note.id, true).unwrap());
+        assert!(!s.notes().unwrap()[0].is_open_follow_up());
+        s.add_log("Paired with @ada and @bo", d(10, 3), vec![])
+            .unwrap();
+        assert_eq!(s.unknown_mentions("Paired with @ada and @bo"), ["bo"]);
+        let (removed, notes) = s.remove_person("ada").unwrap().unwrap();
+        assert_eq!((removed.handle.as_str(), notes), ("ada", 1));
+        assert!(s.notes().unwrap().is_empty());
+        assert_eq!(s.entries().unwrap().len(), 1, "logs that mention them stay");
+
+        assert!(
+            s.add_goal("Mentor", Some("SD3.mentoring.1"), None).is_err(),
+            "no ladder yet"
+        );
+        let goal = s
+            .add_goal("Speak at a meetup", None, Some(d(12, 1)))
+            .unwrap();
+        s.add_checkin(goal.id, d(10, 4), "Sent the proposal")
+            .unwrap();
+        s.set_goal_status(goal.id, GoalStatus::Done).unwrap();
+        let goals = s.goals().unwrap();
+        assert_eq!(goals.get(goal.id).unwrap().checkins.len(), 1);
+        assert_eq!(goals.active().count(), 0);
     }
 }

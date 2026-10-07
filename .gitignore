@@ -29,3 +29,7 @@ logs.jsonl.tmp
 /config.toml
 /ladder.yaml
 upleveler-export-*
+/people.yaml
+notes.jsonl
+notes.jsonl.tmp
+/goals.yaml
