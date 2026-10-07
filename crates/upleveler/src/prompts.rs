@@ -10,6 +10,7 @@ pub const BRAG_ITEM: &str = include_str!("prompts/brag_item.md");
 pub const SUMMARY: &str = include_str!("prompts/summary.md");
 pub const ASK: &str = include_str!("prompts/ask.md");
 pub const ROUTE: &str = include_str!("prompts/route.md");
+pub const PREP: &str = include_str!("prompts/prep.md");
 
 /// Replaces `{{name}}` placeholders.
 pub fn render(template: &str, vars: &[(&str, &str)]) -> String {

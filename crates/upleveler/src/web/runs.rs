@@ -16,6 +16,8 @@ pub enum Kind {
     Gap,
     Brag,
     Summary,
+    /// A 1:1 preparation; the run's "period" is the person's handle.
+    Prep,
 }
 
 impl Kind {
@@ -24,6 +26,7 @@ impl Kind {
             "gap" => Some(Self::Gap),
             "brag" => Some(Self::Brag),
             "summary" => Some(Self::Summary),
+            "prep" => Some(Self::Prep),
             _ => None,
         }
     }
@@ -33,6 +36,7 @@ impl Kind {
             Self::Gap => "gap",
             Self::Brag => "brag",
             Self::Summary => "summary",
+            Self::Prep => "prep",
         }
     }
 
@@ -41,6 +45,7 @@ impl Kind {
             Self::Gap => "Gap analysis",
             Self::Brag => "Promotion document",
             Self::Summary => "Summary",
+            Self::Prep => "1:1 prep",
         }
     }
 }
@@ -118,6 +123,10 @@ fn period(kind: Kind, typed: &str) -> Result<(Option<Range>, String), StartError
             let range = parse_period(spec, today()).ok_or_else(bad)?;
             Ok((Some(range), label.to_string()))
         }
+        Kind::Prep => match crate::people::normalize_handle(typed) {
+            Some(handle) => Ok((None, format!("@{handle}"))),
+            None => Err(StartError::BadPeriod("Choose who the 1:1 is with.".into())),
+        },
         Kind::Gap | Kind::Brag if typed.is_empty() => Ok((None, "all time".into())),
         Kind::Gap | Kind::Brag => {
             let range = parse_period(typed, today()).ok_or_else(bad)?;
@@ -182,7 +191,8 @@ impl Runs {
             });
         }
         let current = self.current.clone();
-        let brag_name = match typed.trim() {
+        // The promotion document's file name, or the handle of a 1:1 prep.
+        let name = match typed.trim() {
             "" => today().to_string(),
             t => t.replace(char::is_whitespace, "-"),
         };
@@ -211,13 +221,14 @@ impl Runs {
                     Kind::Gap => session.gap(llm.as_ref(), range, &mut progress)?.path,
                     Kind::Brag => {
                         session
-                            .brag(llm.as_ref(), range, &brag_name, &mut progress)?
+                            .brag(llm.as_ref(), range, &name, &mut progress)?
                             .path
                     }
                     Kind::Summary => {
                         let range = range.expect("summaries always have a range");
                         session.summary(llm.as_ref(), range, &mut progress)?.path
                     }
+                    Kind::Prep => session.prep(llm.as_ref(), &name, &mut progress)?.path,
                 };
                 Ok(path
                     .file_stem()

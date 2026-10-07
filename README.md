@@ -56,6 +56,7 @@ Run `upleveler`. The first time, a short setup asks for the model, the report la
 | `/gap` | Where you stand for your target level |
 | `/brag` | Promotion / self-review document |
 | `/summary week` | Summary for a 1:1 |
+| `/prep @ada` | Prepare a 1:1 with someone from your notes and shared work |
 | `/import @file` | Import old notes from txt, md, csv or xlsx |
 | `/note @ada 1:1 …` | Note about someone: `1:1`, `given`, `received` or `followup` |
 | `/people [@ada]` | The people you work with, or one of them with your notes and shared work |
@@ -94,6 +95,7 @@ upleveler person add ada --name "Ada" --role "Junior developer" --relation mente
 upleveler note ada --kind one-on-one "Talked about her first on-call week"
 upleveler note ada --kind follow-up "Share the retry design doc"
 upleveler log "Paired with @ada on the ledger retries"
+upleveler prep ada
 
 upleveler goal add "Mentor a junior developer" --expectation SD3.mentoring.1 --due 2026-12-31
 upleveler goal add "Speak at a meetup"
@@ -104,11 +106,15 @@ upleveler goal list
 - Mention people in your log with `@handle`; `upleveler person show ada` lists your notes about them and the entries that mention them.
 - Notes can be a `note`, `one-on-one`, `feedback-given`, `feedback-received` or `follow-up`. `upleveler notes --open` lists open follow-ups.
 - A goal tied to a ladder expectation counts the entries mapped to it and shows its latest gap rating. Tag an entry `goal-<id>` to count it toward any goal.
+- `upleveler prep ada` (or `/prep @ada` in the app, or "Prepare a 1:1" on their page in the browser) writes a 1:1 preparation from your notes about them and the entries that mention them: open follow-ups, what happened since last time, feedback to give and topics to raise.
+- Ask about someone ("@ada ile neler konuşmalıyım?") or about your goals, and the answer uses your notes about them or your goals.
+- The gap analysis and the promotion document only see the name and role of people your entries mention, never your notes about them. The gap analysis also knows your active goals when it picks priorities.
 - `upleveler person remove ada` deletes their profile and every note about them; your log entries stay.
 
 ## Privacy
 
 - Your data is plain files in `~/.upleveler/`, including what you note about other people (`people.yaml`, `notes.jsonl`) and your goals (`goals.yaml`). Edit or delete them any time.
+- Notes about a person go to your model only for a 1:1 prep or a question about that person. They never go into the gap analysis, the promotion document or a summary.
 - Nothing is sent anywhere. To use your company's own LLM instead of Ollama, choose "OpenAI-compatible endpoint" in the setup (`/init`) and confirm that the endpoint is approved.
 - No account, no cloud, no telemetry. The browser dashboard (`upleveler web`) loads nothing from the internet.
 
@@ -118,7 +124,7 @@ Every feature is also a plain command, for example `upleveler log "..."`, `uplev
 
 ## Türkçe
 
-Upleveler, yaptığınız işi şirketinizin seviye beklentileriyle karşılaştırır. Terminalde `upleveler` yazın. Ne yaptığınızı yazarsanız log'a eklenir, soru sorarsanız cevaplanır. Komutları görmek için `/` yazın. Panoyu tarayıcıda açmak için `upleveler web` yazın; yalnızca kendi bilgisayarınızda çalışır. Raporların Türkçe olması için kurulumda Türkçe'yi seçin. Takım arkadaşlarınız hakkında not tutmak için `upleveler person` ve `upleveler note`, hedefleriniz için `upleveler goal` komutlarını kullanın. Verileriniz bilgisayarınızdan çıkmaz.
+Upleveler, yaptığınız işi şirketinizin seviye beklentileriyle karşılaştırır. Terminalde `upleveler` yazın. Ne yaptığınızı yazarsanız log'a eklenir, soru sorarsanız cevaplanır. Komutları görmek için `/` yazın. Panoyu tarayıcıda açmak için `upleveler web` yazın; yalnızca kendi bilgisayarınızda çalışır. Raporların Türkçe olması için kurulumda Türkçe'yi seçin. Takım arkadaşlarınız hakkında not tutmak için `upleveler person` ve `upleveler note`, hedefleriniz için `upleveler goal` komutlarını kullanın. Bir 1:1'e hazırlanmak için `upleveler prep ada` ya da uygulamada `/prep @ada` yazın; notlarınız terfi dokümanına hiçbir zaman girmez. Verileriniz bilgisayarınızdan çıkmaz.
 
 ## Development
 

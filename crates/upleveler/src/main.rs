@@ -153,6 +153,11 @@ enum Command {
         #[command(flatten)]
         range: RangeArgs,
     },
+    /// Prepare a 1:1 with someone from your notes about them and your shared work
+    Prep {
+        /// Their handle, e.g. ada or @ada
+        person: String,
+    },
     /// Ask a question about your logs
     Ask { question: Vec<String> },
     /// Chat about your logs (plain prompt; the interactive app is nicer)
@@ -447,6 +452,12 @@ fn run(cli: Cli) -> Result<()> {
             let range = range.resolve()?;
             let llm = session.llm()?;
             let a = session.brag(&llm, range, &name, &mut progress)?;
+            print_report(&a.output, &a.path, &a.warnings);
+            Ok(())
+        }
+        Some(Command::Prep { person }) => {
+            let llm = session.llm()?;
+            let a = session.prep(&llm, &person, &mut progress)?;
             print_report(&a.output, &a.path, &a.warnings);
             Ok(())
         }
@@ -1006,7 +1017,8 @@ fn answer(
 ) -> Result<()> {
     let cfg = &session.cfg;
     let context = analyze::retrieve(entries, question, today(), cfg.llm.input_budget_chars());
-    let messages = analyze::ask_messages(cfg, question, &context, history, today());
+    let about = session.ask_about(question)?;
+    let messages = analyze::ask_messages(cfg, question, &context, history, &about, today());
     let mut stdout = io::stdout();
     let reply = llm.stream(&messages, &mut |token| {
         let _ = write!(stdout, "{token}");

@@ -236,7 +236,14 @@ pub fn person(data: &DashboardData, handle: &str, form: &NoteForm) -> Option<Mar
                 (view_header(
                     &p.name,
                     html! { span.mono { "@" (p.handle) } " · " (p.label()) @for f in &facts { " · " (f) } },
-                    Some(ui::button(Button::Ghost, "All people", Some(Tab::People.path()))),
+                    Some(html! {
+                        form.prep-form method="post" action="/run" {
+                            input type="hidden" name="kind" value="prep";
+                            input type="hidden" name="period" value=(p.handle);
+                            button.btn.btn--outline type="submit" { "Prepare a 1:1" }
+                        }
+                        (ui::button(Button::Ghost, "All people", Some(Tab::People.path())))
+                    }),
                 ))
                 div.paper.panel.stack {
                     @if let Some(about) = &p.about { p.person-about { (about) } }
@@ -247,6 +254,17 @@ pub fn person(data: &DashboardData, handle: &str, form: &NoteForm) -> Option<Mar
                             p.muted { "No notes yet. They stay on this computer, in notes.jsonl." }
                         } @else {
                             ul.note-list { @for n in &notes { (note_item(n, false)) } }
+                        }
+                    }
+                    @let preps: Vec<_> = data.reports.iter().filter(|r| r.name.starts_with(&format!("prep-{}-", p.handle))).collect();
+                    @if !preps.is_empty() {
+                        section {
+                            h2.card-title { "1:1 preparations" }
+                            div.report-list {
+                                @for r in preps.iter().take(5) {
+                                    (ui::report_row(&r.name, r.kind.label(), &r.title, r.date))
+                                }
+                            }
                         }
                     }
                     section {

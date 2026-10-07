@@ -9,6 +9,7 @@ use crate::dates::{range_in_text, Range};
 use crate::import::text::numbers;
 use crate::ladder::{Expectation, Ladder, Level};
 use crate::llm::{complete_json, Llm, Message};
+use crate::people::{Note, NoteKind, Person};
 use crate::prompts::{self, render};
 use crate::store::{Entry, Store};
 use anyhow::{bail, Context, Result};
@@ -17,6 +18,45 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 
 pub use crate::Progress;
+
+/// What the analyses may know beyond the log: who the people mentioned in it
+/// are (name and role only, never notes about them) and the developer's active
+/// goals.
+#[derive(Debug, Clone, Default)]
+pub struct Background {
+    /// (handle, "Ada (Junior developer, mentee)") for people the entries mention.
+    pub people: Vec<(String, String)>,
+    /// Active goals, one line each.
+    pub goals: Vec<String>,
+}
+
+impl Background {
+    fn people_block(&self) -> String {
+        if self.people.is_empty() {
+            return String::new();
+        }
+        let list: Vec<String> = self
+            .people
+            .iter()
+            .map(|(h, label)| format!("- @{h}: {label}"))
+            .collect();
+        format!(
+            "People mentioned as @handle in the entries (who they are, for context only):\n{}\n",
+            list.join("\n")
+        )
+    }
+
+    fn goals_block(&self) -> String {
+        if self.goals.is_empty() {
+            return String::new();
+        }
+        let list: Vec<String> = self.goals.iter().map(|g| format!("- {g}")).collect();
+        format!(
+            "The developer's own goals (prefer priorities that also move these forward):\n{}\n",
+            list.join("\n")
+        )
+    }
+}
 
 /// The developer's current level (if set) and target level.
 pub struct Levels<'a> {
@@ -324,6 +364,7 @@ fn label(cfg: &Config, en: &'static str) -> &'static str {
     }
     match en {
         "Gap analysis" => "Gap analizi",
+        "1:1 prep" => "1:1 hazırlığı",
         "Promotion document: toward" => "Terfi dokümanı: hedef",
         "Summary" => "Özet",
         "Generated" => "Oluşturuldu",
@@ -377,6 +418,7 @@ pub fn gap(
     levels: &Levels,
     entries: &[Entry],
     range: Option<Range>,
+    background: &Background,
     progress: Progress,
 ) -> Result<GapReport> {
     let scoped = in_range(entries, range);
@@ -388,6 +430,8 @@ pub fn gap(
         ("current", levels.current_label()),
         ("target", levels.target_label()),
         ("language", cfg.language_name().to_string()),
+        ("people", background.people_block()),
+        ("goals", background.goals_block()),
     ];
     let vars: Vec<(&str, &str)> = vars.iter().map(|(k, v)| (*k, v.as_str())).collect();
     let system = render(prompts::GAP_ITEM, &vars);
@@ -609,6 +653,7 @@ pub fn brag(
     levels: &Levels,
     entries: &[Entry],
     range: Option<Range>,
+    background: &Background,
     progress: Progress,
 ) -> Result<String> {
     let scoped = in_range(entries, range);
@@ -616,9 +661,11 @@ pub fn brag(
         bail!("no log entries in this period");
     }
     let target_label = levels.target_label();
+    let people = background.people_block();
     let vars = [
         ("target", target_label.as_str()),
         ("language", cfg.language_name()),
+        ("people", people.as_str()),
     ];
     let system = render(prompts::BRAG_ITEM, &vars);
     let budget = cfg
@@ -1003,6 +1050,7 @@ pub fn ask_messages(
     question: &str,
     context: &[&Entry],
     history: &[Message],
+    about: &str,
     today: NaiveDate,
 ) -> Vec<Message> {
     let ladder = match (&cfg.current_level, &cfg.target_level) {
@@ -1026,10 +1074,94 @@ pub fn ask_messages(
     let mut messages = vec![Message::system(system)];
     let keep = history.len().saturating_sub(6);
     messages.extend(history[keep..].iter().cloned());
+    let about = if about.trim().is_empty() {
+        String::new()
+    } else {
+        format!("\n\n{}", about.trim())
+    };
     messages.push(Message::user(format!(
-        "Today is {today}.\nQuestion: {question}\n\nRelevant log entries:\n{entries}"
+        "Today is {today}.\nQuestion: {question}\n\nRelevant log entries:\n{entries}{about}"
     )));
     messages
+}
+
+/// Notes (given oldest first, as stored) as lines, newest first, within `budget`.
+pub fn note_lines(notes: &[&Note], budget: usize) -> String {
+    let mut out = Vec::new();
+    let mut used = 0;
+    for n in notes.iter().rev() {
+        let mut line = format!(
+            "- {} [{}] {}",
+            n.date,
+            n.kind.label(),
+            n.text.replace('\n', " / ")
+        );
+        if n.kind == NoteKind::FollowUp {
+            line.push_str(if n.done { " (done)" } else { " (open)" });
+        }
+        if used + line.len() > budget {
+            break;
+        }
+        used += line.len() + 1;
+        out.push(line);
+    }
+    if out.is_empty() {
+        "(no notes)".into()
+    } else {
+        out.join("\n")
+    }
+}
+
+/// A 1:1 preparation for `person` from your notes about them and the entries
+/// that mention them. Nothing else from the log goes in.
+pub fn prep(
+    llm: &dyn Llm,
+    cfg: &Config,
+    person: &Person,
+    notes: &[&Note],
+    entries: &[&Entry],
+    today: NaiveDate,
+) -> Result<String> {
+    if notes.is_empty() && entries.is_empty() {
+        bail!(
+            "nothing to prepare from yet: add a note (upleveler note {} \"…\") or mention @{} in your logs",
+            person.handle,
+            person.handle
+        );
+    }
+    let system = render(
+        prompts::PREP,
+        &[
+            ("person", &person.label()),
+            ("language", cfg.language_name()),
+        ],
+    );
+    let budget = cfg
+        .llm
+        .input_budget_chars()
+        .saturating_sub(system.len() + 400)
+        .max(1000);
+    let notes_text = note_lines(notes, budget / 2);
+    let (entry_text, _) = evidence_lines(entries, budget / 2);
+    let entry_text = if entries.is_empty() {
+        "(no entries mention them)".to_string()
+    } else {
+        entry_text
+    };
+    let user = format!(
+        "Today is {today}.\n\nMy notes about @{} (newest first):\n{notes_text}\n\nMy work-log entries that mention @{}:\n{entry_text}",
+        person.handle, person.handle
+    );
+    let out = llm.complete(&[Message::system(system), Message::user(user)], false)?;
+    Ok(format!(
+        "{}\n{}\n",
+        header(
+            &format!("{}: {}", label(cfg, "1:1 prep"), person.name),
+            entries,
+            cfg
+        ),
+        clean_markdown(&out)
+    ))
 }
 
 #[cfg(test)]
@@ -1144,7 +1276,16 @@ levels:
                 }
             },
         };
-        let report = gap(&llm, &cfg, &levels, &entries, None, &mut crate::no_progress).unwrap();
+        let report = gap(
+            &llm,
+            &cfg,
+            &levels,
+            &entries,
+            None,
+            &Background::default(),
+            &mut crate::no_progress,
+        )
+        .unwrap();
         let md = report.markdown;
         assert_eq!(report.summary.count("partial"), 1);
         assert_eq!(report.summary.count("none"), 1);
@@ -1175,7 +1316,16 @@ levels:
                 }
             },
         };
-        let md = brag(&llm, &cfg, &levels, &entries, None, &mut crate::no_progress).unwrap();
+        let md = brag(
+            &llm,
+            &cfg,
+            &levels,
+            &entries,
+            None,
+            &Background::default(),
+            &mut crate::no_progress,
+        )
+        .unwrap();
         assert!(md.contains("## SD3 · Ownership"));
         assert!(md.contains("- Led outage response → service restored _(2026-09-01)_"));
         assert!(md.contains("## Other"));

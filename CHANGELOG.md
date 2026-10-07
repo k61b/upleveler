@@ -5,6 +5,9 @@
 - People: keep profiles of the people you work with (`upleveler person add|list|show|remove`) and dated notes about them: 1:1s, feedback given and received, follow-ups (`upleveler note`, `upleveler notes --open`). Mention them in your log as `@handle`.
 - In the terminal app: `/note`, `/notes`, `/people`, `/goals`, `/goal` and `/checkin`; type `@` to pick a person; free text that is about someone becomes a note and progress on a goal becomes a check-in (the model decides and asks when unsure); `/undo` also takes back notes and check-ins. The dashboard shows your active goals.
 - In the browser dashboard: People and Goals tabs, a page per person with notes and the entries that mention them, and Goals and Follow-ups cards on the Overview. Notes, follow-ups, goals and check-ins can be added and changed there.
+- 1:1 preparation: `upleveler prep <person>`, `/prep @person` in the app and "Prepare a 1:1" on a person's page in the browser write `prep-<person>-<date>.md` from your notes about them and the entries that mention them.
+- Questions about someone (by `@handle` or name) or about your goals are answered with your notes about them or your goals.
+- The gap analysis and the promotion document know the name and role of the people your entries mention; the gap analysis also takes your active goals into account for its priorities. Notes about people never go into the gap analysis, the promotion document or a summary, and a test checks it.
 - Goals: free goals or goals tied to a ladder expectation, with a due date, check-ins and progress from your log (`upleveler goal add|list|done|drop|checkin`). Tag an entry `goal-<id>` to count it toward a goal.
 
 ## 2.0.0

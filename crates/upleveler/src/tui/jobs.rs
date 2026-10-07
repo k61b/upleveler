@@ -23,6 +23,8 @@ pub enum Job {
     Gap(Option<Range>),
     Brag(Option<Range>, String),
     Summary(Range),
+    /// A 1:1 preparation for this handle.
+    Prep(String),
     Import(PathBuf),
     LadderImport(PathBuf),
     Models(LlmConfig),
@@ -37,6 +39,7 @@ impl Job {
             Job::Gap(_) => "Analyzing your gap".into(),
             Job::Brag(..) => "Writing your promotion document".into(),
             Job::Summary(_) => "Summarizing".into(),
+            Job::Prep(h) => format!("Preparing your 1:1 with @{h}"),
             Job::Import(p) => format!("Reading {}", file_name(p)),
             Job::LadderImport(p) => format!("Reading {}", file_name(p)),
             Job::Models(_) => "Looking for models".into(),
@@ -57,6 +60,7 @@ pub enum Output {
     Gap(Analysis<GapReport>),
     Brag(Analysis<String>),
     Summary(Analysis<String>),
+    Prep(Analysis<String>),
     Import(Box<ImportPreview>),
     Ladder(Ladder, PathBuf),
     Models(Result<Vec<String>, String>),
@@ -140,7 +144,9 @@ fn run(session: &Session, job: Job, tx: &Sender<Event>, cancel: &Cancel) -> Resu
             let cfg = &session.cfg;
             let context =
                 analyze::retrieve(&entries, &question, today(), cfg.llm.input_budget_chars());
-            let messages = analyze::ask_messages(cfg, &question, &context, &history, today());
+            let about = session.ask_about(&question)?;
+            let messages =
+                analyze::ask_messages(cfg, &question, &context, &history, &about, today());
             let answer = llm.stream(&messages, &mut |token| {
                 if cancel.is_cancelled() {
                     return false;
@@ -163,6 +169,11 @@ fn run(session: &Session, job: Job, tx: &Sender<Event>, cancel: &Cancel) -> Resu
         Job::Summary(range) => Ok(Output::Summary(session.summary(
             &session.llm()?.with_cancel(cancel.flag()),
             range,
+            &mut progress,
+        )?)),
+        Job::Prep(handle) => Ok(Output::Prep(session.prep(
+            &session.llm()?.with_cancel(cancel.flag()),
+            &handle,
             &mut progress,
         )?)),
         Job::Import(path) => {

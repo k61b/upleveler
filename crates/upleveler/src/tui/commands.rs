@@ -41,6 +41,12 @@ pub const COMMANDS: &[Command] = &[
         runs_bare: true,
     },
     Command {
+        name: "prep",
+        args: "@person",
+        help: "prepare a 1:1 from your notes and shared work",
+        runs_bare: false,
+    },
+    Command {
         name: "import",
         args: "@file",
         help: "import old notes (txt, md, csv, xlsx)",

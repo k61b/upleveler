@@ -578,6 +578,16 @@ impl App {
                 }
                 Err(e) => self.error(&e),
             },
+            "prep" => match self
+                .session
+                .people()
+                .map(|p| p.get(args).map(|p| p.handle.clone()))
+            {
+                Ok(Some(handle)) => self.start(Job::Prep(handle)),
+                Ok(None) if args.is_empty() => self.info("Usage: /prep @person  (see /people)"),
+                Ok(None) => self.info(&format!("{args} is not in your people (see /people).")),
+                Err(e) => self.error(&format!("{e:#}")),
+            },
             "summary" => {
                 let period = match args {
                     "" => "7d",
@@ -1546,7 +1556,7 @@ impl App {
                 self.print(lines);
                 self.refresh_status();
             }
-            Output::Brag(a) | Output::Summary(a) => {
+            Output::Brag(a) | Output::Summary(a) | Output::Prep(a) => {
                 for w in &a.warnings {
                     self.info(&format!("warning: {w}"));
                 }

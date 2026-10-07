@@ -1,7 +1,7 @@
 //! Everything a front end (the CLI subcommands or the TUI) does with the data,
 //! without printing or prompting.
 
-use crate::analyze::{self, GapReport, GapSummary, Levels};
+use crate::analyze::{self, Background, GapReport, GapSummary, Levels};
 use crate::config::{is_local_url, Config, Paths};
 use crate::dates::Range;
 use crate::export::{self, Format};
@@ -399,7 +399,16 @@ impl Session {
     ) -> Result<Analysis<GapReport>> {
         let (ladder, entries, warnings) = self.prepare(llm, range, progress)?;
         let levels = Levels::resolve(&self.cfg, &ladder)?;
-        let report = analyze::gap(llm, &self.cfg, &levels, &entries, range, progress)?;
+        let background = self.background(&entries)?;
+        let report = analyze::gap(
+            llm,
+            &self.cfg,
+            &levels,
+            &entries,
+            range,
+            &background,
+            progress,
+        )?;
         let name = format!("gap-{}", today());
         let path = self.save_report(&name, &report.markdown)?;
         fs::write(
@@ -422,7 +431,18 @@ impl Session {
     ) -> Result<Analysis<String>> {
         let (ladder, entries, warnings) = self.prepare(llm, range, progress)?;
         let levels = Levels::resolve(&self.cfg, &ladder)?;
-        let md = analyze::brag(llm, &self.cfg, &levels, &entries, range, progress)?;
+        let mut background = self.background(&entries)?;
+        // The promotion document is about the developer's own work.
+        background.goals.clear();
+        let md = analyze::brag(
+            llm,
+            &self.cfg,
+            &levels,
+            &entries,
+            range,
+            &background,
+            progress,
+        )?;
         let path = self.save_report(&format!("brag-{name}"), &md)?;
         Ok(Analysis {
             output: md,
@@ -439,6 +459,151 @@ impl Session {
     ) -> Result<Analysis<String>> {
         let md = analyze::summary(llm, &self.cfg, &self.store.load()?, range, progress)?;
         let path = self.save_report(&format!("summary-{}_{}", range.0, range.1), &md)?;
+        Ok(Analysis {
+            output: md,
+            path,
+            warnings: Vec::new(),
+        })
+    }
+
+    /// Who the people `entries` mention are (name and role only, never notes)
+    /// and the active goals, for the analyses.
+    pub fn background(&self, entries: &[Entry]) -> Result<Background> {
+        let people = self.people()?;
+        let mut seen = HashSet::new();
+        let mentioned = entries
+            .iter()
+            .flat_map(|e| e.mentions())
+            .filter(|h| seen.insert(h.clone()))
+            .filter_map(|h| people.get(&h).map(|p| (p.handle.clone(), p.label())))
+            .collect();
+        let goals = self.goals()?.active().map(goal_line).collect();
+        Ok(Background {
+            people: mentioned,
+            goals,
+        })
+    }
+
+    /// The people a question is about: `@handle` mentions, and known names
+    /// written as words ("Ada'yla" counts for Ada).
+    pub fn people_in(&self, text: &str) -> Result<Vec<Person>> {
+        let people = self.people()?;
+        let words: HashSet<String> = text
+            .to_lowercase()
+            .split(|c: char| !c.is_alphanumeric())
+            .filter(|w| !w.is_empty())
+            .map(String::from)
+            .collect();
+        let mentioned = crate::people::mentions(text);
+        Ok(people
+            .people
+            .iter()
+            .filter(|p| {
+                mentioned.contains(&p.handle)
+                    || words.contains(&p.name.to_lowercase())
+                    || p.name.split_whitespace().next().is_some_and(|first| {
+                        first.chars().count() > 2 && words.contains(&first.to_lowercase())
+                    })
+            })
+            .cloned()
+            .collect())
+    }
+
+    /// Extra context for a question: for each person it is about, who they are,
+    /// your notes and the entries that mention them; your goals if it asks about
+    /// goals. Empty when the question is about neither.
+    pub fn ask_about(&self, question: &str) -> Result<String> {
+        let budget = self.cfg.llm.input_budget_chars() / 3;
+        let mut parts = Vec::new();
+        let people = self.people_in(question)?;
+        if !people.is_empty() {
+            let notes = self.notes()?;
+            let entries = self.entries()?;
+            let share = budget / people.len().min(3);
+            for p in people.iter().take(3) {
+                let about: Vec<&Note> = notes.iter().filter(|n| n.person == p.handle).collect();
+                let mut block = format!("About @{}: {}", p.handle, p.label());
+                if let Some(team) = &p.team {
+                    block.push_str(&format!(", team {team}"));
+                }
+                if let Some(text) = &p.about {
+                    block.push_str(&format!(". {text}"));
+                }
+                block.push_str(&format!(
+                    "\nMy notes about them (newest first):\n{}",
+                    analyze::note_lines(&about, share / 2)
+                ));
+                let mentioned: Vec<String> = entries
+                    .iter()
+                    .rev()
+                    .filter(|e| e.mentions().contains(&p.handle))
+                    .take(15)
+                    .map(|e| format!("- {}", e.line()))
+                    .collect();
+                if !mentioned.is_empty() {
+                    block.push_str(&format!(
+                        "\nMy entries that mention them:\n{}",
+                        mentioned.join("\n")
+                    ));
+                }
+                parts.push(block);
+            }
+        }
+        let lower = question.to_lowercase();
+        let about_goals = lower.split(|c: char| !c.is_alphanumeric()).any(|w| {
+            w.starts_with("goal") || w.starts_with("hedef") || w == "objective" || w == "objectives"
+        });
+        if about_goals {
+            let goals = self.goals()?;
+            let entries = self.entries()?;
+            let gap = self.latest_gap();
+            let lines: Vec<String> = goals
+                .active()
+                .map(|g| {
+                    let p = crate::goals::progress(g, &entries, gap.as_ref());
+                    format!(
+                        "- {} · {} entries · {} check-ins{}",
+                        goal_line(g),
+                        p.evidence + p.tagged,
+                        p.checkins,
+                        p.rating
+                            .map(|r| format!(" · rated {r}"))
+                            .unwrap_or_default()
+                    )
+                })
+                .collect();
+            parts.push(if lines.is_empty() {
+                "My goals: none set.".to_string()
+            } else {
+                format!("My active goals:\n{}", lines.join("\n"))
+            });
+        }
+        Ok(parts.join("\n\n"))
+    }
+
+    /// A 1:1 preparation for someone, saved as `prep-<handle>-<date>.md`.
+    pub fn prep(
+        &self,
+        llm: &dyn Llm,
+        handle: &str,
+        progress: Progress,
+    ) -> Result<Analysis<String>> {
+        let people = self.people()?;
+        let Some(person) = people.get(handle) else {
+            let handle = normalize_handle(handle).unwrap_or_else(|| handle.to_string());
+            bail!("@{handle} is not in your people yet. Add them first: upleveler person add {handle} --name \"…\"");
+        };
+        let notes = self.notes()?;
+        let about: Vec<&Note> = notes.iter().filter(|n| n.person == person.handle).collect();
+        let entries = self.entries()?;
+        let mentioned: Vec<&Entry> = entries
+            .iter()
+            .filter(|e| e.mentions().contains(&person.handle))
+            .collect();
+        progress("Preparing your 1:1", 0, 1)?;
+        let md = analyze::prep(llm, &self.cfg, person, &about, &mentioned, today())?;
+        progress("Preparing your 1:1", 1, 1)?;
+        let path = self.save_report(&format!("prep-{}-{}", person.handle, today()), &md)?;
         Ok(Analysis {
             output: md,
             path,
@@ -540,6 +705,22 @@ pub fn streak(days: &BTreeMap<NaiveDate, usize>, today: NaiveDate) -> usize {
     count
 }
 
+/// "Speak at a meetup (toward SD3.mentoring.1, due 2026-12-31)".
+fn goal_line(g: &Goal) -> String {
+    let mut extra = Vec::new();
+    if let Some(exp) = &g.expectation {
+        extra.push(format!("toward {exp}"));
+    }
+    if let Some(due) = g.due {
+        extra.push(format!("due {due}"));
+    }
+    if extra.is_empty() {
+        g.text.clone()
+    } else {
+        format!("{} ({})", g.text, extra.join(", "))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -602,6 +783,138 @@ mod tests {
         assert_eq!(s.latest_gap(), Some(summary));
         fs::write(s.paths.reports.join("gap-2026-10-05.md"), "# x").unwrap();
         assert_eq!(s.reports().len(), 1);
+    }
+
+    /// Notes about people and what you wrote in someone's profile never reach
+    /// the gap analysis, the promotion document or a summary; only the name and
+    /// role of people the entries mention do. A 1:1 prep and questions about
+    /// someone do use the notes.
+    #[test]
+    fn analyses_never_see_notes_about_people() {
+        use crate::llm::{FakeLlm, Message};
+        use crate::people::Relation;
+        use std::sync::Mutex;
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut s = Session::at(Paths::at(dir.path().to_path_buf())).unwrap();
+        let ladder = Ladder::from_yaml(include_str!("../ladder.example.yaml")).unwrap();
+        s.save_ladder(&ladder).unwrap();
+        s.set_levels(Some("SD2"), Some("SD3")).unwrap();
+        s.add_person(Person {
+            handle: "ada".into(),
+            name: "Ada".into(),
+            role: Some("Junior developer".into()),
+            team: None,
+            relation: Relation::Mentee,
+            about: Some("PRIVATE-ABOUT prefers written feedback".into()),
+            since: None,
+        })
+        .unwrap();
+        s.add_note(
+            "ada",
+            NoteKind::OneOnOne,
+            d(10, 2),
+            "PRIVATE-NOTE nervous about on-call",
+        )
+        .unwrap();
+        s.add_note(
+            "ada",
+            NoteKind::FollowUp,
+            d(10, 3),
+            "PRIVATE-FOLLOWUP share the retry doc",
+        )
+        .unwrap();
+        s.add_log(
+            "Paired with @ada on the ledger retries, mentoring her",
+            d(10, 1),
+            vec![],
+        )
+        .unwrap();
+        s.add_goal("Speak at a meetup", None, None).unwrap();
+
+        let sent = Mutex::new(Vec::<String>::new());
+        let llm = FakeLlm {
+            reply: |messages: &[Message], _| {
+                let all: Vec<String> = messages.iter().map(|m| m.content.clone()).collect();
+                sent.lock().unwrap().push(all.join("\n---\n"));
+                let system = &messages[0].content;
+                let user = &messages[messages.len() - 1].content;
+                if system.starts_with("You map") {
+                    let mappings: Vec<_> = user
+                        .lines()
+                        .filter_map(|l| l.split_once(". ")?.0.parse::<usize>().ok())
+                        .map(|n| serde_json::json!({ "entry": n, "expectations": ["SD3.mentoring.1"] }))
+                        .collect();
+                    serde_json::json!({ "mappings": mappings }).to_string()
+                } else if system.contains("per-expectation assessment") {
+                    r#"{"overview":"On track.","priorities":["Mentor more"]}"#.into()
+                } else if system.contains("ONE expectation") {
+                    r#"{"rating":"partial","assessment":"Some.","evidence":[],"next_steps":["More"]}"#.into()
+                } else if system.contains("promotion document") {
+                    r#"{"statements":[{"text":"Paired with Ada on the ledger retries","evidence":["2026-10-01"]}]}"#.into()
+                } else {
+                    "- Paired with Ada on the ledger retries".into()
+                }
+            },
+        };
+        let take =
+            |sent: &Mutex<Vec<String>>| std::mem::take(&mut *sent.lock().unwrap()).join("\n===\n");
+
+        s.gap(&llm, None, &mut crate::no_progress).unwrap();
+        let gap = take(&sent);
+        s.brag(&llm, None, "test", &mut crate::no_progress).unwrap();
+        let brag = take(&sent);
+        s.summary(&llm, (d(9, 1), d(10, 31)), &mut crate::no_progress)
+            .unwrap();
+        let summary = take(&sent);
+        for (name, prompts) in [("gap", &gap), ("brag", &brag), ("summary", &summary)] {
+            assert!(!prompts.is_empty(), "{name} called the model");
+            assert!(!prompts.contains("PRIVATE"), "{name} saw a note: {prompts}");
+        }
+        for prompts in [&gap, &brag] {
+            assert!(
+                prompts.contains("- @ada: Ada (Junior developer, mentee)"),
+                "{prompts}"
+            );
+        }
+        assert!(
+            gap.contains("Speak at a meetup"),
+            "the gap overview knows the goals"
+        );
+        assert!(
+            !brag.contains("Speak at a meetup"),
+            "the promotion document does not"
+        );
+
+        // The 1:1 prep is made from the notes.
+        let prep = s.prep(&llm, "@ada", &mut crate::no_progress).unwrap();
+        let prompts = take(&sent);
+        assert!(
+            prompts.contains("PRIVATE-NOTE")
+                && prompts.contains("PRIVATE-FOLLOWUP share the retry doc (open)")
+        );
+        assert!(prompts.contains("Paired with @ada"));
+        assert!(prep
+            .path
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .starts_with("prep-ada-"));
+        assert!(s.prep(&llm, "bo", &mut crate::no_progress).is_err());
+
+        // Questions get the person's notes when they are about them, by handle or name.
+        for q in ["What should I discuss with @ada?", "Ada'yla neler konuştuk"] {
+            let about = s.ask_about(q).unwrap();
+            assert!(
+                about.contains("PRIVATE-NOTE") && about.contains("Junior developer"),
+                "{q}"
+            );
+        }
+        assert_eq!(s.ask_about("what did I ship last week").unwrap(), "");
+        assert!(s
+            .ask_about("hedeflerim nasıl gidiyor")
+            .unwrap()
+            .contains("Speak at a meetup"));
     }
 
     #[test]

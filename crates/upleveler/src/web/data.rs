@@ -39,6 +39,7 @@ pub enum ReportKind {
     Gap,
     Brag,
     Summary,
+    Prep,
     Other,
 }
 
@@ -50,6 +51,8 @@ impl ReportKind {
             Self::Brag
         } else if name.starts_with("summary-") {
             Self::Summary
+        } else if name.starts_with("prep-") {
+            Self::Prep
         } else {
             Self::Other
         }
@@ -60,6 +63,7 @@ impl ReportKind {
             Self::Gap => "Gap analysis",
             Self::Brag => "Promotion document",
             Self::Summary => "Summary",
+            Self::Prep => "1:1 prep",
             Self::Other => "Report",
         }
     }

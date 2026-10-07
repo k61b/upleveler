@@ -786,6 +786,19 @@ async fn start_run(
     let Some(kind) = Kind::parse(&input.kind) else {
         return (StatusCode::BAD_REQUEST, "Unknown analysis.\n").into_response();
     };
+    if kind == Kind::Prep {
+        let paths = state.paths.clone();
+        let handle = input.period.clone();
+        let known = tokio::task::spawn_blocking(move || {
+            Session::at(paths)
+                .and_then(|s| s.people())
+                .map(|p| p.get(&handle).is_some())
+        })
+        .await;
+        if !matches!(known, Ok(Ok(true))) {
+            return missing();
+        }
+    }
     match state.runs.start(
         state.paths.clone(),
         state.make_llm.clone(),
@@ -1503,6 +1516,71 @@ mod tests {
                 "{path}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn a_one_on_one_prep_from_the_person_page() {
+        let home = tempfile::tempdir().unwrap();
+        let paths = Paths::at(home.path().to_path_buf());
+        let session = Session::at(paths.clone()).unwrap();
+        session
+            .add_person(crate::people::Person {
+                handle: "ada".into(),
+                name: "Ada".into(),
+                role: None,
+                team: None,
+                relation: crate::people::Relation::Mentee,
+                about: None,
+                since: None,
+            })
+            .unwrap();
+        session
+            .add_note(
+                "ada",
+                crate::people::NoteKind::FollowUp,
+                crate::session::today(),
+                "Share the retry design doc",
+            )
+            .unwrap();
+        let mut state = AppState::new(4747, TOKEN.into(), paths);
+        state.make_llm = Arc::new(|_: &Session, _| {
+            Ok(Box::new(crate::llm::FakeLlm {
+                reply: |_: &[crate::llm::Message], _| {
+                    "- [ ] Share the retry design doc".to_string()
+                },
+            }) as Box<dyn crate::llm::Llm>)
+        });
+        let state = Arc::new(state);
+        let same = |req: axum::http::request::Builder| {
+            req.header("origin", "http://127.0.0.1:4747")
+                .header("sec-fetch-site", "same-origin")
+        };
+
+        let page = body(send(&state, Request::get("/people/ada"), "").await).await;
+        assert!(page.contains("Prepare a 1:1") && page.contains(r#"name="kind" value="prep""#));
+        assert_eq!(
+            send(&state, same(Request::post("/run")), "kind=prep&period=bo")
+                .await
+                .status(),
+            StatusCode::NOT_FOUND
+        );
+        let start = send(&state, same(Request::post("/run")), "kind=prep&period=ada").await;
+        assert_eq!(start.headers()[header::LOCATION], "/run");
+        let mut finished = String::new();
+        for _ in 0..500 {
+            let page = body(send(&state, Request::get("/run"), "").await).await;
+            if page.contains("Open the report") {
+                finished = page;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert!(finished.contains("/reports/prep-ada-"), "{finished}");
+        let person = body(send(&state, Request::get("/people/ada"), "").await).await;
+        assert!(
+            person.contains("1:1 preparations") && person.contains("1:1 prep"),
+            "{person}"
+        );
     }
 
     #[test]
