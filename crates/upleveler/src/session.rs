@@ -509,6 +509,9 @@ impl Session {
         if entries.is_empty() {
             bail!("no log entries yet; add some first");
         }
+        // Who the people mentioned are (name and role, never notes), so pairing
+        // with a mentee counts as mentoring.
+        let background = self.background(&entries)?;
         let warnings = analyze::map_entries(
             llm,
             &self.cfg,
@@ -516,6 +519,7 @@ impl Session {
             &self.store,
             &mut entries,
             range,
+            &background,
             progress,
         )?;
         Ok((ladder, entries, warnings))
@@ -1007,6 +1011,11 @@ mod tests {
                 "{prompts}"
             );
         }
+        assert!(
+            gap.split("\n===\n").any(|call| call.starts_with("You map")
+                && call.contains("- @ada: Ada (Junior developer, mentee)")),
+            "the mapping step knows who @ada is"
+        );
         assert!(
             gap.contains("Speak at a meetup"),
             "the gap overview knows the goals"

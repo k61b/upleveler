@@ -183,10 +183,15 @@ impl HttpLlm {
         let temperature = if json { 0.1 } else { 0.4 };
         match self.cfg.provider {
             Provider::Ollama => {
+                // Models that think first (Gemma 4, Qwen 3) spend most of a reply
+                // on hidden reasoning: a 7-entry mapping took over five minutes
+                // with gemma4:12b. The prompts ask for short, structured answers,
+                // so thinking is off; models without it ignore the field.
                 let mut body = json!({
                     "model": self.cfg.model,
                     "messages": messages,
                     "stream": stream,
+                    "think": false,
                     "options": { "num_ctx": self.cfg.context_tokens, "temperature": temperature },
                 });
                 if json {
@@ -437,6 +442,14 @@ mod tests {
             ..LlmConfig::default()
         })
         .unwrap()
+    }
+
+    #[test]
+    fn ollama_requests_turn_thinking_off() {
+        let llm = client("http://localhost:11434".into());
+        let body = llm.body(&[Message::user("x")], true, false);
+        assert_eq!(body["think"], json!(false));
+        assert_eq!(body["format"], json!("json"));
     }
 
     #[test]

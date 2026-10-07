@@ -171,6 +171,7 @@ fn import_map_gap_export() {
         &store,
         &mut entries,
         None,
+        &analyze::Background::default(),
         &mut upleveler::no_progress,
     )
     .unwrap();

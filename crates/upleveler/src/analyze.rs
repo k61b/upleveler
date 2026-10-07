@@ -126,6 +126,9 @@ const MAX_ENTRIES_PER_MAPPING: usize = 8;
 
 /// Maps entries in `range` to expectations of the current and target levels, caching
 /// the result in the store. Returns warnings for batches the model failed on.
+// Each argument is a different input of one batch job; grouping them would
+// only move the list into a struct used nowhere else.
+#[allow(clippy::too_many_arguments)]
 pub fn map_entries(
     llm: &dyn Llm,
     cfg: &Config,
@@ -133,6 +136,7 @@ pub fn map_entries(
     store: &Store,
     entries: &mut [Entry],
     range: Option<Range>,
+    background: &Background,
     progress: Progress,
 ) -> Result<Vec<String>> {
     let hash = levels.ladder.hash();
@@ -152,7 +156,13 @@ pub fn map_entries(
         .map(|e| format!("{}: [{}] {}", e.id, e.area, e.text))
         .collect::<Vec<_>>()
         .join("\n");
-    let system = render(prompts::TAG_ENTRIES, &[("expectations", &list)]);
+    let system = render(
+        prompts::TAG_ENTRIES,
+        &[
+            ("expectations", &list),
+            ("people", &background.people_block()),
+        ],
+    );
     let budget = cfg
         .llm
         .input_budget_chars()
@@ -1235,6 +1245,7 @@ levels:
             &store,
             &mut entries,
             None,
+            &Background::default(),
             &mut crate::no_progress,
         )
         .unwrap();
@@ -1254,6 +1265,7 @@ levels:
             &store,
             &mut entries,
             None,
+            &Background::default(),
             &mut crate::no_progress,
         )
         .unwrap();

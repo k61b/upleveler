@@ -1,18 +1,34 @@
 # Changelog
 
-## Unreleased
+## 2.2.0
 
-- The recommended model is now `gemma4:12b` (`ollama pull gemma4:12b`); it is the default for new setups and comes first in the model picker. Existing setups keep the model they chose, and `gemma3:12b` still works.
-- Close, reopen or delete a note from the command line (`upleveler notes done|reopen|delete <id>`) and the terminal app (`/notes done <id>`, with `/undo`). Note lists show a short id for this.
-- Change a goal's text, expectation or due date: `upleveler goal edit <id>`, or "Edit goal" on the Goals page in the browser.
-- Delete a check-in: `upleveler goal drop-checkin <id> <n>` (numbers from `upleveler goal show <id>`), `/checkin delete <id> <n>` in the app (with `/undo`), or "Delete" next to it in the browser, which now lists every check-in.
-- Change someone's profile: `upleveler person edit`, or "Edit profile" on their page in the browser, where they can also be removed after a confirmation page.
-- Everything about people, notes and goals can be done inside the terminal app and the browser:
-  - `/people add @ada Ada, Junior developer, mentee`, `/people edit @ada role: Developer, team: Payments` and `/people remove @ada`;
-  - `/notes edit <id> [kind] <text>`, and "Edit" under each note in the browser;
-  - `/goal edit 2 text: …, due: …, expectation: …`;
-  - `/undo` takes each of these back.
-- `/goal` in the terminal app ties the goal to a ladder expectation when its last word is one (`/goal Mentor a junior developer SD3.mentoring.1`).
+Everything about people, notes and goals can now be done inside the terminal app and the browser dashboard, and the recommended model is Gemma 4.
+
+### Model
+
+- The recommended model is now `gemma4:12b` (`ollama pull gemma4:12b`): the default for new setups and first in the model picker. Existing setups keep the model they chose, and `gemma3:12b` still works.
+- Requests to Ollama turn off the model's hidden thinking step. With `gemma4:12b` it made a gap analysis time out while mapping entries; with it off the same analysis takes under a minute. Models without thinking are not affected.
+
+### Analyses
+
+- Mapping entries to the ladder now knows the name and role of the people they mention, so pairing with a mentee counts as mentoring evidence. Notes about people still never reach the analyses.
+
+### Terminal app
+
+- People: `/people add @ada Ada, Junior developer, mentee`, `/people edit @ada role: Developer, team: Payments` (an empty value clears a field) and `/people remove @ada`.
+- Notes: `/notes done|reopen|edit|delete <id>`; note lists show a short id, and the first 4 characters are enough.
+- Goals: `/goal edit 2 text: …, due: …, expectation: …`, `/goal show 2` with numbered check-ins, `/checkin delete 2 1`, and `/goal <text> SD3.mentoring.1` ties a new goal to a ladder expectation.
+- `/undo` takes each of these back, including removing someone with their notes.
+
+### Browser dashboard
+
+- "Edit profile" on a person's page, and removing someone after a confirmation page.
+- "Edit" under each note: text, kind and date.
+- "Edit goal" on each goal, and "Delete" next to each check-in; goal cards list every check-in.
+
+### Command line
+
+- `upleveler notes done|reopen|delete <id>`, `upleveler person edit`, `upleveler goal edit|show|drop-checkin`.
 
 ## 2.1.0
 
