@@ -3,6 +3,7 @@
 
 use super::{layout, view_header, Tab};
 use crate::people::{Note, NoteKind, Person, Relation};
+use crate::plural;
 use crate::web::data::DashboardData;
 use crate::web::illustrations;
 use crate::web::ui::{self, Alert, Button, Chip};
@@ -44,10 +45,6 @@ impl NoteForm {
 
 pub fn person_path(handle: &str) -> String {
     format!("{}/{handle}", Tab::People.path())
-}
-
-fn plural(n: usize, one: &str, many: &str) -> String {
-    format!("{n} {}", if n == 1 { one } else { many })
 }
 
 /// The last day you noted something about them or logged work with them.

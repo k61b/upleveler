@@ -4,6 +4,7 @@
 
 use super::{layout, view_header, Tab};
 use crate::goals::{Goal, GoalStatus};
+use crate::plural;
 use crate::web::data::DashboardData;
 use crate::web::illustrations;
 use crate::web::ui::{self, Alert};
@@ -35,10 +36,6 @@ impl GoalForm {
 
 pub fn goal_path(id: u32) -> String {
     format!("{}/{id}", Tab::Goals.path())
-}
-
-fn plural(n: usize, one: &str, many: &str) -> String {
-    format!("{n} {}", if n == 1 { one } else { many })
 }
 
 /// "due in 12 days", "due today", "3 days overdue".

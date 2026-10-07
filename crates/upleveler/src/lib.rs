@@ -22,6 +22,11 @@ pub mod store;
 pub mod tui;
 pub mod web;
 
+/// "1 note", "3 notes".
+pub fn plural(n: usize, one: &str, many: &str) -> String {
+    format!("{n} {}", if n == 1 { one } else { many })
+}
+
 /// Progress callback: `(label, done, total)`. Returning an error (e.g. because the
 /// user pressed Esc) stops the operation at the next step.
 pub type Progress<'a> = &'a mut dyn FnMut(&str, usize, usize) -> anyhow::Result<()>;

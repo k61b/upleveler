@@ -509,6 +509,16 @@ mod tests {
             key(&mut app, KeyCode::Char(c));
         }
         assert!(render(&app).contains("@ada"), "people popup");
+        // Redraws use the cached people; the file is read again only after it changes.
+        let reads = app.people_reads.get();
+        for _ in 0..20 {
+            render(&app);
+        }
+        assert_eq!(
+            app.people_reads.get(),
+            reads,
+            "no reads while nothing changes"
+        );
         key(&mut app, KeyCode::Tab);
         assert_eq!(app.composer_text(), "Paired with @ada ");
         key(&mut app, KeyCode::Esc);
@@ -609,7 +619,15 @@ mod tests {
         assert_eq!(app.session.notes().unwrap().last().unwrap().short_id(), id);
 
         // People can be added without leaving the app.
+        let reads = app.people_reads.get();
         app.submit("/people add @bo Bo, Staff engineer, peer");
+        app.panel = Some(Panel::Choice("@bo said the rollout can wait".into()));
+        assert!(
+            render(&app).contains("note about @bo"),
+            "the change is seen"
+        );
+        assert_eq!(app.people_reads.get(), reads + 1);
+        app.panel = None;
         let bo = app.session.people().unwrap().get("bo").cloned().unwrap();
         assert_eq!(bo.label(), "Bo (Staff engineer, peer)");
         // A goal whose last word is a ladder expectation is tied to it.

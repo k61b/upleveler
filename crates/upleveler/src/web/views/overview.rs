@@ -1,15 +1,12 @@
 //! Overview (shell): where you stand, at a glance.
 
 use super::{layout, view_header, Tab};
+use crate::plural;
 use crate::web::brand::{self, LockupSize};
 use crate::web::data::DashboardData;
 use crate::web::illustrations;
 use crate::web::ui::{self, Button, Card, Chip};
 use maud::{html, Markup};
-
-fn plural(n: usize, one: &str, many: &str) -> String {
-    format!("{n} {}", if n == 1 { one } else { many })
-}
 
 fn readiness_card(data: &DashboardData) -> Markup {
     let target = data.target.as_deref();

@@ -12,6 +12,7 @@ use upleveler::import;
 use upleveler::ladder::Ladder;
 use upleveler::llm::{Llm, Message};
 use upleveler::people::{NoteKind, Person, Relation};
+use upleveler::plural;
 use upleveler::session::{today, Session};
 use upleveler::store::{Entry, Filter};
 
@@ -818,10 +819,6 @@ fn log(
 }
 
 /// "1 note", "2 notes".
-fn plural(n: usize, one: &str, many: &str) -> String {
-    format!("{n} {}", if n == 1 { one } else { many })
-}
-
 fn date_arg(date: Option<String>) -> Result<NaiveDate> {
     match date {
         Some(d) => parse_date(&d, today()).with_context(|| format!("unrecognized date {d:?}")),

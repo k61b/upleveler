@@ -7,7 +7,7 @@
 //! rebinding. Static assets (styles, fonts, favicon) hold no data and are served
 //! without the token so the "open the link" page can render.
 
-use super::data::DashboardData;
+use super::data::{DashboardData, Report};
 use super::runs::{self, Kind, MakeLlm, Runs, StartError};
 use super::ui::Alert;
 use super::views::{AddForm, GoalForm, NoteForm, PersonForm, RunForm};
@@ -1005,13 +1005,16 @@ async fn cancel_run(State(state): State<Arc<AppState>>, headers: HeaderMap) -> R
 
 /// Only names of existing reports resolve, so the URL cannot reach other files.
 async fn report(State(state): State<Arc<AppState>>, Path(name): Path<String>) -> Response {
-    with_data(state, move |data| match data.report(&name) {
-        Some(report) => page(views::report(report)),
-        None => (
-            StatusCode::NOT_FOUND,
-            Html(views::not_found().into_string()),
-        )
-            .into_response(),
+    with_data(state, move |data| {
+        match data.report(&name).map(Report::loaded) {
+            Some(Ok(report)) => page(views::report(&report)),
+            Some(Err(err)) => error_page(&format!("{err:#}")),
+            None => (
+                StatusCode::NOT_FOUND,
+                Html(views::not_found().into_string()),
+            )
+                .into_response(),
+        }
     })
     .await
 }

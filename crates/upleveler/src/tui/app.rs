@@ -153,8 +153,17 @@ pub enum Popup {
     People(Vec<(String, String)>),
 }
 
+/// `people.yaml` as last read, and the (modified time, size) it had then.
+type PeopleCache = Option<((Option<std::time::SystemTime>, u64), crate::people::People)>;
+
 pub struct App {
     pub session: Session,
+    /// The screen redraws every 80 ms and the `@` popup needs the people each
+    /// time; they are read again only when the file changes (here, in the
+    /// browser or in another process).
+    people_cache: std::cell::RefCell<PeopleCache>,
+    /// How often `people.yaml` was actually read (for tests).
+    pub(crate) people_reads: std::cell::Cell<usize>,
     pub status: Status,
     pub composer: TextArea<'static>,
     pub panel: Option<Panel>,
@@ -218,6 +227,8 @@ impl App {
         let status = session.status().unwrap_or_else(|_| empty_status(&session));
         let (tx, rx) = channel();
         let mut app = Self {
+            people_cache: std::cell::RefCell::new(None),
+            people_reads: std::cell::Cell::new(0),
             session,
             status,
             composer: new_textarea(PLACEHOLDER),
@@ -307,7 +318,7 @@ impl App {
             }
         }
         if let Some(typed) = complete::mention(&text) {
-            let people = self.session.people().unwrap_or_default();
+            let people = self.known_people();
             let typed = typed.to_lowercase();
             let list: Vec<_> = complete::people(&typed, &people, 8)
                 .into_iter()
@@ -1350,9 +1361,25 @@ impl App {
         }
     }
 
+    /// The people you work with, from the cache unless `people.yaml` changed.
+    fn known_people(&self) -> crate::people::People {
+        let stamp = std::fs::metadata(&self.session.paths.people)
+            .map(|m| (m.modified().ok(), m.len()))
+            .unwrap_or((None, 0));
+        if let Some((seen, people)) = &*self.people_cache.borrow() {
+            if *seen == stamp {
+                return people.clone();
+            }
+        }
+        let people = self.session.people().unwrap_or_default();
+        self.people_reads.set(self.people_reads.get() + 1);
+        *self.people_cache.borrow_mut() = Some((stamp, people.clone()));
+        people
+    }
+
     /// The first known person a text mentions, for the "note about" choice.
     pub fn mentioned_person(&self, text: &str) -> Option<String> {
-        let people = self.session.people().ok()?;
+        let people = self.known_people();
         crate::people::mentions(text)
             .into_iter()
             .find(|h| people.get(h).is_some())

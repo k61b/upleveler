@@ -75,23 +75,67 @@ pub struct Report {
     pub kind: ReportKind,
     pub title: String,
     pub date: NaiveDate,
+    /// The full text; empty for a report on disk until `loaded()` reads it.
     pub markdown: String,
+    /// Where the report is on disk, if it is.
+    path: Option<std::path::PathBuf>,
+}
+
+fn title_of<'a>(lines: impl Iterator<Item = &'a str>, name: &str) -> String {
+    lines
+        .take(30)
+        .find_map(|l| l.strip_prefix("# "))
+        .map(|t| t.trim().to_string())
+        .unwrap_or_else(|| name.replace(['-', '_'], " "))
 }
 
 impl Report {
     pub fn new(name: &str, date: NaiveDate, markdown: String) -> Self {
-        let title = markdown
-            .lines()
-            .find_map(|l| l.strip_prefix("# "))
-            .map(|t| t.trim().to_string())
-            .unwrap_or_else(|| name.replace(['-', '_'], " "));
         Self {
+            name: name.to_string(),
+            kind: ReportKind::from_name(name),
+            title: title_of(markdown.lines(), name),
+            date,
+            markdown,
+            path: None,
+        }
+    }
+
+    /// A report on disk with only its title read: lists show many reports and
+    /// need nothing else, so a page load does not read every report in full.
+    fn on_disk(name: &str, date: NaiveDate, path: std::path::PathBuf) -> Option<Self> {
+        use std::io::{BufReader, Read};
+        let file = fs::File::open(&path).ok()?;
+        let mut head = String::new();
+        BufReader::new(file)
+            .take(4096)
+            .read_to_string(&mut head)
+            .ok()?;
+        let title = title_of(head.lines(), name);
+        Some(Self {
             name: name.to_string(),
             kind: ReportKind::from_name(name),
             title,
             date,
+            markdown: String::new(),
+            path: Some(path),
+        })
+    }
+
+    /// The report with its full text, read from disk if it is there.
+    pub fn loaded(&self) -> Result<Self> {
+        let markdown = match &self.path {
+            Some(path) => fs::read_to_string(path)?,
+            None => self.markdown.clone(),
+        };
+        Ok(Self {
+            name: self.name.clone(),
+            kind: self.kind,
+            title: self.title.clone(),
+            date: self.date,
             markdown,
-        }
+            path: self.path.clone(),
+        })
     }
 }
 
@@ -110,9 +154,8 @@ impl DashboardData {
             .reports()
             .into_iter()
             .filter_map(|r| {
-                let markdown = fs::read_to_string(&r.path).ok()?;
                 let date = chrono::DateTime::<chrono::Local>::from(r.modified).date_naive();
-                Some(Report::new(&r.name, date, markdown))
+                Report::on_disk(&r.name, date, r.path)
             })
             .collect();
         Ok(Self {
@@ -217,6 +260,22 @@ impl DashboardData {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reports_on_disk_are_read_in_full_only_when_opened() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("brag-h2.md");
+        let body = format!("# Promotion document\n\n{}", "- item\n".repeat(5000));
+        fs::write(&path, &body).unwrap();
+        let date = NaiveDate::from_ymd_opt(2026, 10, 4).unwrap();
+        let listed = Report::on_disk("brag-h2", date, path).unwrap();
+        assert_eq!(listed.title, "Promotion document");
+        assert!(
+            listed.markdown.is_empty(),
+            "a list does not read the whole file"
+        );
+        assert_eq!(listed.loaded().unwrap().markdown, body);
+    }
 
     #[test]
     fn report_title_and_kind_come_from_the_file() {

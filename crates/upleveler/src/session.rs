@@ -1102,6 +1102,43 @@ mod tests {
         assert!(stray.is_empty(), "{stray:?}");
     }
 
+    /// Editing a note keeps its id; writing the old text again the same day is
+    /// a new note, not "already there".
+    #[test]
+    fn a_note_written_again_after_an_edit_is_kept() {
+        use crate::people::Relation;
+        let dir = tempfile::tempdir().unwrap();
+        let s = Session::at(Paths::at(dir.path().to_path_buf())).unwrap();
+        s.add_person(Person {
+            handle: "ada".into(),
+            name: "Ada".into(),
+            role: None,
+            team: None,
+            relation: Relation::Mentee,
+            about: None,
+            since: None,
+        })
+        .unwrap();
+        let first = s
+            .add_note("ada", NoteKind::Note, d(10, 1), "Likes Rust")
+            .unwrap()
+            .unwrap();
+        s.edit_note(&first.id, NoteKind::Note, d(10, 1), "Likes Go")
+            .unwrap();
+        let again = s
+            .add_note("ada", NoteKind::Note, d(10, 1), "Likes Rust")
+            .unwrap();
+        let again = again.expect("a new note, not a duplicate");
+        assert_ne!(again.id, first.id);
+        assert_ne!(again.short_id(), first.short_id());
+        // The same note twice is still one note.
+        assert!(s
+            .add_note("ada", NoteKind::Note, d(10, 1), "likes  RUST")
+            .unwrap()
+            .is_none());
+        assert_eq!(s.notes().unwrap().len(), 2);
+    }
+
     #[test]
     fn people_notes_and_goals() {
         use crate::people::Relation;

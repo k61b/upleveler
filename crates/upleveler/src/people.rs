@@ -336,11 +336,36 @@ impl NoteStore {
         Ok(notes)
     }
 
-    /// Appends `note` unless the same note exists; returns it if it was added.
-    pub fn add(&self, note: Note) -> Result<Option<Note>> {
+    /// Appends `note` unless the same note (person, date, kind and text) exists;
+    /// returns it if it was added. An edited note keeps the id its first text
+    /// gave it, so a new note can hash to a taken id; it then gets another one.
+    pub fn add(&self, mut note: Note) -> Result<Option<Note>> {
         crate::fsio::with_lock(self.dir(), || {
-            if self.load()?.iter().any(|n| n.id == note.id) {
+            let notes = self.load()?;
+            let same = |n: &Note| {
+                n.person == note.person
+                    && n.date == note.date
+                    && n.kind == note.kind
+                    && n.text
+                        .to_lowercase()
+                        .split_whitespace()
+                        .eq(note.text.to_lowercase().split_whitespace())
+            };
+            if notes.iter().any(same) {
                 return Ok(None);
+            }
+            let mut extra = 1;
+            while notes.iter().any(|n| n.id == note.id) {
+                extra += 1;
+                note.id = make_id(
+                    note.date,
+                    &format!(
+                        "{} {} {} #{extra}",
+                        note.person,
+                        note.kind.as_str(),
+                        note.text
+                    ),
+                );
             }
             let mut file = OpenOptions::new()
                 .create(true)
