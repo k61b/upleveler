@@ -11,16 +11,28 @@ Everything stays on your computer. The AI runs locally with [Ollama](https://oll
 
 ## Install
 
-You need [Rust](https://rustup.rs) (1.82+), [Ollama](https://ollama.com) and about 16 GB of RAM.
+You need [Ollama](https://ollama.com) and about 16 GB of RAM.
+
+On macOS and Linux:
+
+```sh
+curl -fsSL https://upleveler.dev/install.sh | sh
+ollama pull gemma3:12b
+```
+
+The script downloads the [latest release](https://github.com/k61b/upleveler/releases/latest) for your system, checks it against the release's checksums and installs `upleveler` to `~/.local/bin`. Run it again to update.
+
+On Windows, download `upleveler-x86_64-pc-windows-msvc.zip` from the [latest release](https://github.com/k61b/upleveler/releases/latest) and put `upleveler.exe` on your PATH.
+
+From source, with [Rust](https://rustup.rs) 1.82+:
 
 ```sh
 git clone https://github.com/k61b/upleveler.git
 cd upleveler
 cargo install --path crates/upleveler --locked
-ollama pull gemma3:12b
 ```
 
-To update: `git pull && cargo install --path crates/upleveler --locked --force`
+To update a source install: `git pull && cargo install --path crates/upleveler --locked --force`
 
 ## Use
 

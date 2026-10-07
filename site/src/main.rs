@@ -24,9 +24,7 @@ const DESCRIPTION: &str = "A work log for software developers. Upleveler compare
 const INSTALL_SCRIPT: &str = include_str!("../install.sh");
 
 const INSTALL: &[&str] = &[
-    "git clone https://github.com/k61b/upleveler.git",
-    "cd upleveler",
-    "cargo install --path crates/upleveler --locked",
+    "curl -fsSL https://upleveler.dev/install.sh | sh",
     "ollama pull gemma3:12b",
     "upleveler",
 ];
@@ -133,7 +131,7 @@ fn hero() -> Markup {
                     (ui::button(Button::Primary, "Install Upleveler", Some("#install")))
                     (ui::button(Button::Ghost, "View on GitHub", Some(REPO)))
                 }
-                p.hint { "Needs Rust, Ollama and about 16 GB of RAM." }
+                p.hint { "Needs Ollama and about 16 GB of RAM. macOS, Linux and Windows." }
             }
             div.hero-panel.rise.rise-2 {
                 (ui::terminal("upleveler", &session, None))
@@ -249,8 +247,9 @@ fn install() -> Markup {
         section.band.container.install #install {
             div.stack {
                 (ui::label("Install"))
-                (ui::heading(2, "Install it", "from source", ""))
-                p.lead { "Needs Rust 1.82 or newer, Ollama and about 16 GB of RAM. The first run asks for your model, report language, ladder and levels." }
+                (ui::heading(2, "Install it with", "one command", ""))
+                p.lead { "On macOS and Linux the script installs the latest release and checks its checksum. It needs Ollama and about 16 GB of RAM. The first run asks for your model, report language, ladder and levels." }
+                p.hint { "Windows and from-source steps are in the README." }
                 div.actions {
                     (ui::button(Button::Outline, "Read the README", Some(&format!("{REPO}#readme"))))
                 }
