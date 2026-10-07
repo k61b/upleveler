@@ -2,6 +2,7 @@
 
 [![CI](https://github.com/k61b/upleveler/actions/workflows/ci.yml/badge.svg)](https://github.com/k61b/upleveler/actions/workflows/ci.yml)
 [![License: AGPL-3.0](https://img.shields.io/badge/License-AGPL--3.0-blue.svg)](LICENSE)
+[![Tech stack of Upleveler on STACK IT FAST](https://stackitfast.com/badge/upleveler.svg)](https://stackitfast.com/project/upleveler)
 
 **Level up against your own career ladder.** · [upleveler.dev](https://upleveler.dev)
 

@@ -1000,6 +1000,17 @@ samp {
   color: var(--on-shell);
 }
 
+.footer-badge {
+  display: inline-block;
+  margin-top: 24px;
+}
+
+.footer-badge img {
+  display: block;
+  max-width: 100%;
+  height: auto;
+}
+
 .lang-note {
   margin-top: 24px;
   max-width: var(--w-prose);

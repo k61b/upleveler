@@ -89,6 +89,12 @@ fn footer() -> Markup {
                     li { a href=(format!("{REPO}/blob/main/LICENSE")) { "License (AGPL-3.0)" } }
                 }
             }
+            // The STACK IT FAST card, as its embed snippet gives it: the image is served live so
+            // it follows the stack. It holds no user data; the page itself still loads nothing else.
+            a.footer-badge href="https://stackitfast.com/project/upleveler" {
+                // design-lint-allow remote-asset: live stack card (design-lint-allow all-caps-copy: the product's name)
+                img src="https://stackitfast.com/badge/upleveler/card.png" alt="Tech stack of Upleveler on STACK IT FAST" width="340" height="104";
+            }
             p.lang-note lang="tr" {
                 "Türkçe: Upleveler, yaptığınız işi şirketinizin seviye beklentileriyle karşılaştırır. "
                 "Kurulumda rapor dilini Türkçe seçebilirsiniz. Verileriniz bilgisayarınızdan çıkmaz."
@@ -407,6 +413,11 @@ mod tests {
         ] {
             assert!(html.contains(tag), "missing {tag}");
         }
+        // The STACK IT FAST card in the footer is the one remote image, by design.
+        let html = html.replace(
+            r#"src="https://stackitfast.com/badge/upleveler/card.png""#,
+            "",
+        );
         assert!(!html.contains(r#"src="http"#), "remote script or image");
     }
 
