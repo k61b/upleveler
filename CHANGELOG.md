@@ -1,5 +1,24 @@
 # Changelog
 
+## Unreleased
+
+Upleveler runs its model with [llama.cpp](https://github.com/ggml-org/llama.cpp), the open-source engine, with no app in between.
+
+### llama.cpp on this computer
+
+- The setup offers llama.cpp on this computer (recommended) or an OpenAI-compatible endpoint. It checks that llama.cpp is installed (`brew install llama.cpp`, or its releases on Windows), then downloads Google's Gemma 4 E4B (Google's own 4-bit file, 5.2 GB) from Hugging Face into `~/.upleveler/llama/`, with progress. An interrupted download goes on where it stopped.
+- Upleveler starts `llama-server` when it needs the model: on 127.0.0.1 only, with the context it needs, and with a random key only Upleveler knows, so a web page open in your browser cannot use the model. The key is kept in a file only you can read and passed in the environment, not on the command line.
+- After five idle minutes the server frees the model's memory (from 5.4 GB to 0.3 GB) and takes it back in about a second and a half on the next request.
+- A server Upleveler started with another model or less context is replaced. A server someone else started is never touched.
+- Any GGUF model on Hugging Face can be chosen with `/model`: type its repository (`owner/name`, optionally `owner/name:Q4_K_M`) and Upleveler downloads it.
+- On the sample files, Gemma 4 E4B through llama.cpp mapped 7 of 7 diary entries as expected (5 of 7 through LM Studio), with every note, goal and fact as before, waiting 177 s for the model in all.
+- The terminal app's status line and the browser show the model's short name (`gemma-4-E4B-it-qat-q4_0`).
+
+### Ollama and LM Studio
+
+- Upleveler no longer downloads, loads or starts models through Ollama or LM Studio. Both still work as OpenAI-compatible endpoints: a setup that used them is switched to their OpenAI-compatible address (`http://localhost:11434/v1`, `http://localhost:1234/v1`) on its own, with the same model.
+- Through those addresses Upleveler cannot set the model's context size. If answers come back cut off, set `context_tokens` under `[llm]` in `config.toml` to the context your server uses, or switch to llama.cpp with `/init`.
+
 ## 2.4.0
 
 Bringing your existing files in works with small local models: your company's ladder workbook and the 1:1 workbook you keep with your lead.

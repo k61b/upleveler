@@ -1,8 +1,9 @@
 //! Upleveler: a local-first work log for software developers.
 //!
 //! Logs live in a JSONL file under `~/.upleveler` (or `$UPLEVELER_HOME`). The career
-//! ladder is a YAML file the user imports once. AI features talk to a local Ollama
-//! instance by default, or to an OpenAI-compatible endpoint the user explicitly allows.
+//! ladder is a YAML file the user imports once. AI features talk to llama.cpp on this
+//! computer by default (started by Upleveler, see `llama`), or to an OpenAI-compatible
+//! endpoint the user explicitly allows.
 
 pub mod analyze;
 pub mod config;
@@ -14,6 +15,7 @@ pub mod import;
 pub mod intent;
 pub mod ladder;
 pub mod limits;
+pub mod llama;
 pub mod llm;
 pub mod people;
 pub mod prompts;

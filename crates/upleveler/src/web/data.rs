@@ -171,7 +171,7 @@ impl DashboardData {
             target: session.cfg.target_level.clone(),
             gap: session.latest_gap(),
             reports,
-            model: session.cfg.llm.model.clone(),
+            model: session.cfg.llm.model_name().to_string(),
             model_local: crate::config::is_local_url(&session.cfg.llm.base_url),
             people: session.people()?,
             notes: session.notes()?,

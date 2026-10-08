@@ -206,7 +206,7 @@ pub fn data(today: NaiveDate) -> DashboardData {
         target: Some("L3".into()),
         gap,
         reports: reports(today),
-        model: "gemma4:12b".into(),
+        model: "gemma-4-E4B-it-qat-q4_0".into(),
         model_local: true,
         people: people(),
         notes: notes(today),

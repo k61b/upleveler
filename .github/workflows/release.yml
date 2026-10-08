@@ -149,7 +149,7 @@ jobs:
             echo "cargo install --path crates/upleveler --locked --force"
             echo '```'
             echo
-            echo "Upleveler needs a local model: [LM Studio](https://lmstudio.ai) (recommended; the setup downloads \`google/gemma-4-e4b\`) or [Ollama](https://ollama.com)."
+            echo "Upleveler needs [llama.cpp](https://github.com/ggml-org/llama.cpp) (\`brew install llama.cpp\`); the setup downloads the model. Your company's model or another OpenAI-compatible server works too."
           } >> notes.md
 
       - name: Create the release

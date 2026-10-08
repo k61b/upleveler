@@ -49,41 +49,35 @@ impl Paths {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Provider {
-    /// Ollama's native API (`/api/chat`), which lets us set the context window.
-    Ollama,
-    /// Any OpenAI-compatible `/chat/completions` endpoint (vLLM, company gateways).
+    /// llama.cpp on this computer: Upleveler downloads the model from Hugging
+    /// Face and starts `llama-server` itself, reachable only from here.
+    Llamacpp,
+    /// Any OpenAI-compatible `/chat/completions` endpoint (a company gateway,
+    /// or a model server you run yourself).
     Openai,
-    /// LM Studio: its OpenAI-compatible endpoint for answers, its own API to
-    /// list, load (with our context size) and download models. On a Mac it
-    /// runs MLX models, which are faster there than llama.cpp.
-    Lmstudio,
 }
 
 impl Provider {
-    /// The model the setup suggests (and can download) for this provider.
+    /// The model the setup suggests (and can download): Google's own
+    /// 4-bit Gemma 4 E4B, a Hugging Face repository.
     pub fn recommended_model(self) -> &'static str {
         match self {
-            Provider::Lmstudio => "google/gemma-4-e4b",
-            _ => "gemma4:12b",
+            Provider::Llamacpp => "google/gemma-4-E4B-it-qat-q4_0-gguf",
+            Provider::Openai => "",
         }
     }
 
-    /// Where it listens by default.
+    /// Where it listens by default: llama.cpp next to the dashboard's 4747.
     pub fn default_url(self) -> &'static str {
         match self {
-            Provider::Ollama => "http://localhost:11434",
-            Provider::Openai => "http://localhost:1234/v1",
-            Provider::Lmstudio => "http://localhost:1234",
+            Provider::Llamacpp => "http://127.0.0.1:4748",
+            Provider::Openai => "http://localhost:8080/v1",
         }
-    }
-
-    /// Whether answers go through an OpenAI-compatible endpoint.
-    pub fn openai_style(self) -> bool {
-        self != Provider::Ollama
     }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(from = "StoredLlmConfig")]
 pub struct LlmConfig {
     pub provider: Provider,
     pub base_url: String,
@@ -100,6 +94,56 @@ pub struct LlmConfig {
     pub timeout_secs: u64,
 }
 
+/// `[llm]` as it may be written, including providers Upleveler no longer
+/// has: Ollama and LM Studio (before 2.5) are read as the OpenAI-compatible
+/// endpoints they also offer, so an existing setup keeps working.
+#[derive(Deserialize)]
+struct StoredLlmConfig {
+    provider: StoredProvider,
+    base_url: String,
+    model: String,
+    #[serde(default)]
+    api_key_env: Option<String>,
+    #[serde(default)]
+    allow_remote: bool,
+    #[serde(default = "default_context_tokens")]
+    context_tokens: usize,
+    #[serde(default = "default_timeout_secs")]
+    timeout_secs: u64,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum StoredProvider {
+    Llamacpp,
+    Openai,
+    Ollama,
+    Lmstudio,
+}
+
+impl From<StoredLlmConfig> for LlmConfig {
+    fn from(s: StoredLlmConfig) -> Self {
+        let (provider, base_url) = match s.provider {
+            StoredProvider::Llamacpp => (Provider::Llamacpp, s.base_url),
+            StoredProvider::Openai => (Provider::Openai, s.base_url),
+            StoredProvider::Ollama | StoredProvider::Lmstudio => {
+                let base = s.base_url.trim_end_matches('/');
+                let base = base.strip_suffix("/v1").unwrap_or(base);
+                (Provider::Openai, format!("{base}/v1"))
+            }
+        };
+        Self {
+            provider,
+            base_url,
+            model: s.model,
+            api_key_env: s.api_key_env,
+            allow_remote: s.allow_remote,
+            context_tokens: s.context_tokens,
+            timeout_secs: s.timeout_secs,
+        }
+    }
+}
+
 fn default_context_tokens() -> usize {
     8192
 }
@@ -111,9 +155,9 @@ fn default_timeout_secs() -> u64 {
 impl Default for LlmConfig {
     fn default() -> Self {
         Self {
-            provider: Provider::Lmstudio,
-            base_url: Provider::Lmstudio.default_url().into(),
-            model: Provider::Lmstudio.recommended_model().into(),
+            provider: Provider::Llamacpp,
+            base_url: Provider::Llamacpp.default_url().into(),
+            model: Provider::Llamacpp.recommended_model().into(),
             api_key_env: None,
             allow_remote: false,
             context_tokens: default_context_tokens(),
@@ -123,6 +167,18 @@ impl Default for LlmConfig {
 }
 
 impl LlmConfig {
+    /// The model's name for a status line: a Hugging Face repository without
+    /// its owner and `-gguf` ("gemma-4-E4B-it-qat-q4_0"); other names as they are.
+    pub fn model_name(&self) -> &str {
+        if self.provider != Provider::Llamacpp {
+            return &self.model;
+        }
+        let name = self.model.rsplit('/').next().unwrap_or(&self.model);
+        name.strip_suffix("-gguf")
+            .or_else(|| name.strip_suffix("-GGUF"))
+            .unwrap_or(name)
+    }
+
     /// Rough number of characters of log text we can put in one prompt while leaving
     /// room for instructions and the model's answer.
     pub fn input_budget_chars(&self) -> usize {
@@ -214,12 +270,60 @@ mod tests {
     }
 
     #[test]
+    fn ollama_and_lm_studio_setups_keep_working_through_their_openai_endpoints() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths::at(dir.path().to_path_buf());
+        for (provider, url, want) in [
+            (
+                "ollama",
+                "http://localhost:11434",
+                "http://localhost:11434/v1",
+            ),
+            (
+                "lmstudio",
+                "http://localhost:1234/",
+                "http://localhost:1234/v1",
+            ),
+            (
+                "lmstudio",
+                "http://localhost:1234/v1",
+                "http://localhost:1234/v1",
+            ),
+        ] {
+            std::fs::write(
+                &paths.config,
+                format!(
+                    "language = \"tr\"\n[llm]\nprovider = \"{provider}\"\nbase_url = \"{url}\"\nmodel = \"gemma4:12b\"\n"
+                ),
+            )
+            .unwrap();
+            let cfg = Config::load(&paths).unwrap();
+            assert_eq!(cfg.llm.provider, Provider::Openai, "{provider}");
+            assert_eq!(cfg.llm.base_url, want);
+            assert_eq!(cfg.llm.model, "gemma4:12b");
+            assert_eq!(cfg.language, "tr");
+        }
+    }
+
+    #[test]
+    fn model_names_are_short_in_status_lines() {
+        let llama = LlmConfig::default();
+        assert_eq!(llama.model_name(), "gemma-4-E4B-it-qat-q4_0");
+        let other = LlmConfig {
+            provider: Provider::Openai,
+            model: "acme/model-gguf".into(),
+            ..LlmConfig::default()
+        };
+        assert_eq!(other.model_name(), "acme/model-gguf");
+    }
+
+    #[test]
     fn config_roundtrip_and_defaults() {
         let dir = tempfile::tempdir().unwrap();
         let paths = Paths::at(dir.path().to_path_buf());
         assert_eq!(
             Config::load(&paths).unwrap().llm.provider,
-            Provider::Lmstudio
+            Provider::Llamacpp
         );
 
         let cfg = Config {
