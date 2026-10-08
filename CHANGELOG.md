@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 2.5.0
 
 Upleveler runs its model with [llama.cpp](https://github.com/ggml-org/llama.cpp), the open-source engine, with no app in between.
 
