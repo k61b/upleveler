@@ -1,25 +1,25 @@
 # Example career ladder for upleveler. Replace it with your company's own:
 #   upleveler ladder import my-company-levels.md   (any txt/md/xlsx; AI structures it)
 #   upleveler ladder import ladder.example.yaml    (YAML is taken as-is)
-# Expectation ids are generated when missing (e.g. SD3.ownership.1).
+# Expectation ids are generated when missing (e.g. L3.ownership.1).
 levels:
-  - id: SD1
-    title: Software Developer 1
+  - id: L1
+    title: Associate Engineer
     summary: Delivers well-defined tasks with guidance.
     expectations:
       - { area: Delivery, text: "Completes well-scoped tasks with guidance from senior engineers" }
       - { area: Technical, text: "Writes tested, readable code that follows team conventions" }
       - { area: Learning, text: "Learns the codebase, tools and processes quickly and asks for help early" }
-  - id: SD2
-    title: Software Developer 2
+  - id: L2
+    title: Engineer
     summary: Delivers features independently.
     expectations:
       - { area: Delivery, text: "Delivers medium-sized features end to end with little guidance" }
       - { area: Delivery, text: "Breaks down own work and gives reliable estimates" }
       - { area: Technical, text: "Debugs production issues in services they work on" }
       - { area: Collaboration, text: "Gives useful code reviews to teammates" }
-  - id: SD3
-    title: Software Developer 3
+  - id: L3
+    title: Senior Engineer
     summary: Owns a domain and raises the level of the team.
     expectations:
       - { area: Ownership, text: "Owns a service or domain, including its reliability and on-call health" }
@@ -27,13 +27,13 @@ levels:
       - { area: Technical, text: "Designs solutions that span multiple services and documents the trade-offs" }
       - { area: Mentoring, text: "Mentors junior developers and helps them grow" }
       - { area: Communication, text: "Communicates technical plans and risks clearly to non-engineers" }
-  - id: SD4
-    title: Senior Software Developer
+  - id: L4
+    title: Staff Engineer
     expectations:
       - { area: Technical, text: "Sets technical direction for a team and its roadmap" }
       - { area: Impact, text: "Delivers projects with measurable business impact across teams" }
-  - id: SD5
-    title: Staff Software Developer
+  - id: L5
+    title: Principal Engineer
     expectations:
       - { area: Impact, text: "Drives technical strategy across multiple teams" }
       - { area: Mentoring, text: "Grows senior engineers and technical leaders" }

@@ -1,6 +1,6 @@
 //! Personal goals in `goals.yaml` (edit by hand any time): free ones ("speak at
 //! a meetup") and ones tied to an expectation of the ladder ("strong evidence
-//! for SD3.mentoring.1 by December"). Progress comes from the log and check-ins.
+//! for L3.mentoring.1 by December"). Progress comes from the log and check-ins.
 
 use crate::analyze::GapSummary;
 use crate::store::Entry;
@@ -40,7 +40,7 @@ pub struct Goal {
     /// Small number used in commands (`goal done 2`) and the `goal-2` log tag.
     pub id: u32,
     pub text: String,
-    /// A ladder expectation id this goal is about (`SD3.mentoring.1`).
+    /// A ladder expectation id this goal is about (`L3.mentoring.1`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expectation: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -50,6 +50,9 @@ pub struct Goal {
     pub created: NaiveDate,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub checkins: Vec<Checkin>,
+    /// `import:<file>:<location>` for a goal imported from a file; empty otherwise.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub source: String,
 }
 
 impl Goal {
@@ -164,6 +167,7 @@ impl Goals {
             status: GoalStatus::Active,
             created: today,
             checkins: Vec::new(),
+            source: String::new(),
         });
         Ok(self.goals.last().expect("just pushed"))
     }
@@ -234,7 +238,7 @@ mod tests {
         let mentoring = goals
             .add(
                 "Mentor a junior developer",
-                Some("SD3.mentoring.1".into()),
+                Some("L3.mentoring.1".into()),
                 None,
                 d(10, 1),
             )
@@ -258,11 +262,11 @@ mod tests {
     fn progress_counts_mapped_and_tagged_entries() {
         let mut goals = Goals::default();
         goals
-            .add("Mentor", Some("SD3.mentoring.1".into()), None, d(9, 1))
+            .add("Mentor", Some("L3.mentoring.1".into()), None, d(9, 1))
             .unwrap();
         let goal = goals.get(1).unwrap().clone();
         let mut mapped = Entry::new(d(9, 10), "Paired with @ada", vec![], "manual");
-        mapped.expectations = vec!["SD3.mentoring.1".into()];
+        mapped.expectations = vec!["L3.mentoring.1".into()];
         let tagged = Entry::new(
             d(9, 20),
             "Wrote the mentoring plan",
@@ -273,13 +277,14 @@ mod tests {
         let gap = GapSummary {
             date: d(9, 30),
             current: None,
-            target: "SD3".into(),
+            target: "L3".into(),
             rows: vec![GapRow {
-                id: "SD3.mentoring.1".into(),
+                id: "L3.mentoring.1".into(),
                 area: "Mentoring".into(),
                 text: "Mentors juniors".into(),
                 rating: "partial".into(),
                 count: 1,
+                below: 0,
                 last: None,
             }],
             overview: String::new(),

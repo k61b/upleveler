@@ -317,14 +317,33 @@ pub fn ladder(ladder: &Ladder, current: Option<&str>, target: Option<&str>, widt
             Span::styled(l.title.clone(), theme::bold()),
             mark,
         ]));
+        let about = [
+            l.summary.clone(),
+            l.years.as_ref().map(|y| format!("Typical experience: {y}")),
+            (!l.verbs.is_empty()).then(|| format!("Verbs: {}", l.verbs.join(", "))),
+            (!l.focus.is_empty()).then(|| format!("Focus: {}", l.focus.join(" · "))),
+        ];
+        for line in about.into_iter().flatten() {
+            out.extend(wrapped(
+                &line,
+                width,
+                Span::raw("    "),
+                Span::raw("    "),
+                theme::dim(),
+            ));
+        }
         let mut area = "";
         for e in &l.expectations {
             if e.area != area {
                 area = &e.area;
                 out.push(Line::styled(format!("    {area}"), theme::dim()));
             }
+            let text = match &e.title {
+                Some(title) => format!("{title}: {}", e.text),
+                None => e.text.clone(),
+            };
             out.extend(wrapped(
-                &e.text,
+                &text,
                 width,
                 Span::raw("      • "),
                 Span::raw("        "),
@@ -586,12 +605,13 @@ mod tests {
             text: "Leads incidents and follows up actions until they are closed".into(),
             rating: rating.into(),
             count,
+            below: 0,
             last: None,
         };
         GapSummary {
             date: chrono::NaiveDate::from_ymd_opt(2026, 10, 5).unwrap(),
-            current: Some("SD2".into()),
-            target: "SD3".into(),
+            current: Some("L2".into()),
+            target: "L3".into(),
             rows: vec![
                 row("strong", 4),
                 row("partial", 1),
@@ -621,8 +641,8 @@ mod tests {
             last: None,
             streak: 4,
             ladder_levels: Some(5),
-            current: Some("SD2".into()),
-            target: Some("SD3".into()),
+            current: Some("L2".into()),
+            target: Some("L3".into()),
             model: "gemma4:12b".into(),
             base_url: "http://localhost:11434".into(),
             local: true,
@@ -647,7 +667,7 @@ mod tests {
         let text: Vec<String> = welcome(&status, 80).iter().map(markdown::plain).collect();
         assert!(text
             .iter()
-            .any(|l| l.contains("SD2 → SD3") && l.contains("1/4 strong")));
+            .any(|l| l.contains("L2 → L3") && l.contains("1/4 strong")));
         assert!(text.iter().any(|l| l.contains("🔥 4-day streak")));
     }
 }

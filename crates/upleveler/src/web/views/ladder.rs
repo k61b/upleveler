@@ -36,6 +36,16 @@ fn level_view(data: &DashboardData, level: &Level) -> Markup {
                 @if is_target { (ui::seam("Target level")) }
             }
             @if let Some(summary) = &level.summary { p { (summary) } }
+            @if let Some(years) = &level.years { p.muted { "Typical experience: " (years) } }
+            @if !level.verbs.is_empty() {
+                p.level-verbs {
+                    span.muted { "Verbs " }
+                    @for v in &level.verbs { (ui::chip(Chip::Plain, v)) " " }
+                }
+            }
+            @if !level.focus.is_empty() {
+                p.muted { "Focus areas: " (level.focus.join(" · ")) }
+            }
         }
         @if !ratings.is_empty() {
             p.muted.ladder-note { "Markers show the latest gap analysis: filled is strong evidence, half is partial, empty is missing." }
@@ -48,7 +58,10 @@ fn level_view(data: &DashboardData, level: &Level) -> Markup {
                         @let ev = evidence.get(&x.id).copied().unwrap_or_default();
                         li.row {
                             @if let Some(rating) = ratings.get(x.id.as_str()) { (ui::rating_marker(rating)) }
-                            span.row-text { (x.text) }
+                            span.row-text {
+                                @if let Some(title) = &x.title { strong { (title) } " — " }
+                                (x.text)
+                            }
                             span.row-meta.mono {
                                 (ev.count) @if ev.count == 1 { " entry" } @else { " entries" }
                                 @if let Some(last) = ev.last { " · " (last) }

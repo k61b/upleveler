@@ -25,9 +25,13 @@ pub enum Job {
     Summary(Range),
     /// A 1:1 preparation for this handle.
     Prep(String),
-    Import(PathBuf),
-    LadderImport(PathBuf),
+    /// A file to import, and where each sheet of a workbook goes.
+    Import(PathBuf, crate::import::workbook::Choices),
+    /// A ladder document, and what each sheet of a workbook is for.
+    LadderImport(PathBuf, Vec<(String, crate::ladder::SheetRole)>),
     Models(LlmConfig),
+    /// Downloads the model named in the config (Ollama).
+    Pull(LlmConfig),
 }
 
 impl Job {
@@ -40,9 +44,10 @@ impl Job {
             Job::Brag(..) => "Writing your promotion document".into(),
             Job::Summary(_) => "Summarizing".into(),
             Job::Prep(h) => format!("Preparing your 1:1 with @{h}"),
-            Job::Import(p) => format!("Reading {}", file_name(p)),
-            Job::LadderImport(p) => format!("Reading {}", file_name(p)),
+            Job::Import(p, _) => format!("Reading {}", file_name(p)),
+            Job::LadderImport(p, _) => format!("Reading {}", file_name(p)),
             Job::Models(_) => "Looking for models".into(),
+            Job::Pull(cfg) => format!("Downloading {}", cfg.model),
         }
     }
 }
@@ -56,14 +61,23 @@ fn file_name(p: &std::path::Path) -> String {
 
 pub enum Output {
     Routed(Intent),
-    Answer { question: String, answer: String },
+    Answer {
+        question: String,
+        answer: String,
+    },
     Gap(Analysis<GapReport>),
     Brag(Analysis<String>),
     Summary(Analysis<String>),
     Prep(Analysis<String>),
     Import(Box<ImportPreview>),
-    Ladder(Ladder, PathBuf),
+    Ladder {
+        ladder: Ladder,
+        file: PathBuf,
+        warnings: Vec<String>,
+    },
     Models(Result<Vec<String>, String>),
+    /// This model was downloaded.
+    Pulled(String),
 }
 
 pub enum Event {
@@ -72,6 +86,34 @@ pub enum Event {
     Done(Output),
     Failed(String),
     Cancelled,
+    /// The model answered a test question: (time to load, time to answer).
+    /// Sent outside any job, so it never blocks one.
+    ModelReady {
+        model: String,
+        result: Result<(std::time::Duration, std::time::Duration), String>,
+    },
+}
+
+/// Loads the model and asks it a test question on its own thread; the answer
+/// arrives as `Event::ModelReady`.
+pub fn check_model(cfg: LlmConfig, tx: Sender<Event>) {
+    std::thread::spawn(move || {
+        let result = HttpLlm::new(&cfg)
+            .and_then(|llm| llm.check())
+            .map_err(|e| format!("{e:#}"));
+        let _ = tx.send(Event::ModelReady {
+            model: cfg.model,
+            result,
+        });
+    });
+}
+
+/// Loads the model in the background so the first request is quick; a
+/// failure here shows up on that request instead.
+pub fn preload(cfg: LlmConfig) {
+    std::thread::spawn(move || {
+        let _ = HttpLlm::new(&cfg).and_then(|llm| llm.preload());
+    });
 }
 
 #[derive(Clone, Default)]
@@ -176,7 +218,7 @@ fn run(session: &Session, job: Job, tx: &Sender<Event>, cancel: &Cancel) -> Resu
             &handle,
             &mut progress,
         )?)),
-        Job::Import(path) => {
+        Job::Import(path, choices) => {
             let llm = if crate::import::is_staging(&path) {
                 None
             } else {
@@ -187,24 +229,44 @@ fn run(session: &Session, job: Job, tx: &Sender<Event>, cancel: &Cancel) -> Resu
                 llm.as_ref().map(|l| l as &dyn Llm),
                 None,
                 None,
+                &choices,
                 &mut progress,
             )?;
             Ok(Output::Import(Box::new(preview)))
         }
-        Job::LadderImport(path) => {
+        Job::LadderImport(path, roles) => {
             let llm = session.llm().ok().map(|l| l.with_cancel(cancel.flag()));
-            let ladder = session.ladder_from_file(
+            let (ladder, warnings) = session.ladder_from_file(
                 &path,
+                &roles,
                 llm.as_ref().map(|l| l as &dyn Llm),
                 &mut progress,
             )?;
-            Ok(Output::Ladder(ladder, path))
+            Ok(Output::Ladder {
+                ladder,
+                file: path,
+                warnings,
+            })
         }
         Job::Models(cfg) => {
             let models = HttpLlm::new(&cfg)
                 .and_then(|llm| llm.list_models())
                 .map_err(|e| format!("{e:#}"));
             Ok(Output::Models(models))
+        }
+        Job::Pull(cfg) => {
+            let label = format!("{} MB", cfg.model);
+            HttpLlm::new(&cfg)?.pull(&mut |_, done, total| {
+                if total == 0 {
+                    return progress("Preparing", 0, 1);
+                }
+                progress(
+                    &label,
+                    (done / 1_000_000) as usize,
+                    (total / 1_000_000) as usize,
+                )
+            })?;
+            Ok(Output::Pulled(cfg.model))
         }
     }
 }

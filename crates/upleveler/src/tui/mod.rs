@@ -122,6 +122,10 @@ pub fn run(session: Session, wizard: bool) -> Result<()> {
 
 fn event_loop(session: Session, wizard: bool) -> Result<()> {
     let (width, _) = terminal::size()?;
+    if session.configured() && session.cfg.llm.provider != crate::config::Provider::Openai {
+        // Typed text is routed by the model; load it while the screen draws.
+        jobs::preload(session.cfg.llm.clone());
+    }
     let mut app = App::new(session, width.saturating_sub(1), wizard);
     let mut screen = Screen::new(6)?;
     loop {

@@ -8,7 +8,7 @@ use crate::config::Config;
 use crate::dates::{range_in_text, Range};
 use crate::import::text::numbers;
 use crate::ladder::{Expectation, Ladder, Level};
-use crate::llm::{complete_json, Llm, Message};
+use crate::llm::{complete_json, schema, Format, Llm, Message};
 use crate::people::{Note, NoteKind, Person};
 use crate::prompts::{self, render};
 use crate::store::{Entry, Store};
@@ -102,8 +102,52 @@ impl<'a> Levels<'a> {
         })
     }
 
+    /// The current level's expectation with the same short title as `exp`:
+    /// the same skill one level down.
+    fn below(&self, exp: &Expectation) -> Option<&'a Expectation> {
+        let title = exp.title.as_deref()?;
+        self.current?.expectations.iter().find(|e| {
+            e.title
+                .as_deref()
+                .is_some_and(|t| t.eq_ignore_ascii_case(title))
+        })
+    }
+
     fn target_label(&self) -> String {
         format!("{} ({})", self.target.title, self.target.id)
+    }
+
+    /// What the company's framework says about the target level beyond its
+    /// expectations: a summary, the verbs it uses, the areas to focus on.
+    /// Empty when it says nothing more.
+    fn target_context(&self) -> String {
+        let t = self.target;
+        let mut lines = Vec::new();
+        if let Some(summary) = &t.summary {
+            lines.push(format!("- How the framework sums up {}: {summary}", t.id));
+        }
+        if !t.verbs.is_empty() {
+            lines.push(format!(
+                "- Verbs the framework uses for {}: {}",
+                t.id,
+                t.verbs.join(", ")
+            ));
+        }
+        if !t.focus.is_empty() {
+            lines.push(format!(
+                "- Areas the framework asks people growing into {} to focus on: {}",
+                t.id,
+                t.focus.join("; ")
+            ));
+        }
+        if lines.is_empty() {
+            return String::new();
+        }
+        format!(
+            "What the company's framework says about {}:\n{}\n",
+            t.id,
+            lines.join("\n")
+        )
     }
 }
 
@@ -148,12 +192,14 @@ pub fn map_entries(
         return Ok(Vec::new());
     }
 
-    let expectations: Vec<&Expectation> =
-        levels.all().iter().flat_map(|l| &l.expectations).collect();
-    let valid: HashSet<&str> = expectations.iter().map(|e| e.id.as_str()).collect();
-    let list = expectations
+    let handles = readable_ids(&levels.all());
+    let real: HashMap<&str, &str> = handles
         .iter()
-        .map(|e| format!("{}: [{}] {}", e.id, e.area, e.text))
+        .map(|(handle, e)| (handle.as_str(), e.id.as_str()))
+        .collect();
+    let list = handles
+        .iter()
+        .map(|(handle, e)| format!("{handle}: [{}] {}", e.area, e.described()))
         .collect::<Vec<_>>()
         .join("\n");
     let system = render(
@@ -185,14 +231,20 @@ pub fn map_entries(
             .collect::<Vec<_>>()
             .join("\n");
         let messages = vec![Message::system(&system), Message::user(numbered)];
-        match complete_json::<Mappings>(llm, messages) {
+        let ids: Vec<&str> = handles.iter().map(|(h, _)| h.as_str()).collect();
+        match complete_json::<Mappings>(
+            llm,
+            messages,
+            mappings_schema(batch.len(), &ids),
+            batch.len() * 60 + 64,
+        ) {
             Ok(out) => {
                 let mut found: HashMap<usize, Vec<String>> = HashMap::new();
                 for m in out.mappings {
                     let ids = m
                         .expectations
-                        .into_iter()
-                        .filter(|id| valid.contains(id.as_str()));
+                        .iter()
+                        .filter_map(|h| real.get(h.trim()).map(|id| id.to_string()));
                     found.entry(m.entry).or_default().extend(ids);
                 }
                 let mut updates: HashMap<String, Vec<String>> = HashMap::new();
@@ -225,6 +277,33 @@ pub fn map_entries(
         progress("Mapping logs to your ladder", done, todo.len())?;
     }
     Ok(warnings)
+}
+
+/// The ids the model sees when mapping entries: `L3.knowledge-sharing` for
+/// an expectation with a short title, its id otherwise. A small model given
+/// `L3.collaboration.2` and `L3.collaboration.3` often picks the neighbour;
+/// a name it can read it rarely mixes up.
+fn readable_ids<'a>(levels: &[&'a Level]) -> Vec<(String, &'a Expectation)> {
+    let named: Vec<(String, &Expectation)> = levels
+        .iter()
+        .flat_map(|l| {
+            l.expectations.iter().map(|e| match &e.title {
+                Some(title) => (format!("{}.{}", l.id, crate::ladder::slug(title)), e),
+                None => (e.id.clone(), e),
+            })
+        })
+        .collect();
+    let count = |h: &str| named.iter().filter(|(x, _)| x == h).count();
+    named
+        .iter()
+        .map(|(h, e)| {
+            if count(h) == 1 {
+                (h.clone(), *e)
+            } else {
+                (e.id.clone(), *e)
+            }
+        })
+        .collect()
 }
 
 /// Groups items into batches that fit `budget` (by `size`) and `max` items.
@@ -276,6 +355,51 @@ fn in_range(entries: &[Entry], range: Option<Range>) -> Vec<&Entry> {
         .collect()
 }
 
+/// One item per entry, numbered 1..=`n`, each with at most 5 ids from `ids`.
+fn mappings_schema(n: usize, ids: &[&str]) -> serde_json::Value {
+    schema::object(&[(
+        "mappings",
+        schema::list(
+            schema::object(&[
+                ("entry", schema::integer(1, n as i64)),
+                ("expectations", schema::list(schema::one_of(ids), 0, 5)),
+            ]),
+            n,
+            n,
+        ),
+    )])
+}
+
+fn assessment_schema() -> serde_json::Value {
+    schema::object(&[
+        ("rating", schema::one_of(&["strong", "partial", "none"])),
+        ("assessment", schema::short(800)),
+        ("evidence", schema::list(schema::short(240), 0, 4)),
+        ("next_steps", schema::list(schema::short(300), 1, 3)),
+    ])
+}
+
+fn overview_schema() -> serde_json::Value {
+    schema::object(&[
+        ("overview", schema::short(1200)),
+        ("priorities", schema::list(schema::short(300), 1, 3)),
+    ])
+}
+
+fn brag_schema() -> serde_json::Value {
+    schema::object(&[(
+        "statements",
+        schema::list(
+            schema::object(&[
+                ("text", schema::short(600)),
+                ("evidence", schema::list(schema::short(200), 0, 6)),
+            ]),
+            1,
+            8,
+        ),
+    )])
+}
+
 #[derive(Deserialize)]
 struct Assessment {
     rating: String,
@@ -297,11 +421,28 @@ struct Overview {
 struct Assessed<'a> {
     exp: &'a Expectation,
     count: usize,
+    /// Entries for the same expectation at the current level, when the
+    /// framework names both alike ("Incidents" at L3 and at L4).
+    below: usize,
     last: Option<NaiveDate>,
     result: Result<Assessment, String>,
 }
 
 impl Assessed<'_> {
+    /// "3 entries", or "0 entries (+2 at L3)" when work one level down counted.
+    fn entries(&self, word: &str, current: &str) -> String {
+        let count = if word.is_empty() {
+            self.count.to_string()
+        } else {
+            format!("{} {word}", self.count)
+        };
+        if self.below == 0 {
+            count
+        } else {
+            format!("{count} (+{} {current})", self.below)
+        }
+    }
+
     fn rating(&self) -> &str {
         match &self.result {
             Ok(a) => a.rating.as_str(),
@@ -319,7 +460,14 @@ pub struct GapRow {
     /// "strong", "partial", "none" or "unknown" (assessment failed).
     pub rating: String,
     pub count: usize,
+    /// Entries for the same expectation one level down, counted as groundwork.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub below: usize,
     pub last: Option<NaiveDate>,
+}
+
+fn is_zero(n: &usize) -> bool {
+    *n == 0
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -347,9 +495,14 @@ pub struct GapReport {
 
 /// Clamps the model's rating to what the evidence can support: no entries means
 /// "none", and a single entry is never "strong".
-fn normalize_rating(r: &str, count: usize) -> String {
+/// The model's rating, held to the evidence: no entries is "none", one entry
+/// is at most "partial", and work only one level down is "partial" (the
+/// rubric's "below the target level"; a model sometimes says "none").
+fn normalize_rating(r: &str, count: usize, below: usize) -> String {
     let r = r.to_lowercase();
-    if count == 0 || r.contains("none") || r.contains("no ") {
+    if count == 0 && below > 0 {
+        "partial".into()
+    } else if count == 0 || r.contains("none") || r.contains("no ") {
         "none".into()
     } else if r.contains("strong") && count >= 2 {
         "strong".into()
@@ -436,12 +589,14 @@ pub fn gap(
     if target.expectations.is_empty() {
         bail!("level {} has no expectations in the ladder", target.id);
     }
+    let current_id = levels.current.map_or("", |c| c.id.as_str());
     let vars = [
         ("current", levels.current_label()),
         ("target", levels.target_label()),
         ("language", cfg.language_name().to_string()),
         ("people", background.people_block()),
         ("goals", background.goals_block()),
+        ("level", levels.target_context()),
     ];
     let vars: Vec<(&str, &str)> = vars.iter().map(|(k, v)| (*k, v.as_str())).collect();
     let system = render(prompts::GAP_ITEM, &vars);
@@ -459,8 +614,21 @@ pub fn gap(
             .copied()
             .filter(|e| e.expectations.contains(&exp.id))
             .collect();
-        let (lines, shown) = evidence_lines(&matched, budget);
-        let evidence = if matched.is_empty() {
+        let below_exp = levels.below(exp);
+        let below: Vec<&Entry> = below_exp.map_or_else(Vec::new, |b| {
+            scoped
+                .iter()
+                .copied()
+                .filter(|e| e.expectations.contains(&b.id) && !e.expectations.contains(&exp.id))
+                .collect()
+        });
+        let own_budget = if below.is_empty() {
+            budget
+        } else {
+            budget * 2 / 3
+        };
+        let (lines, shown) = evidence_lines(&matched, own_budget);
+        let mut evidence = if matched.is_empty() {
             "No work-log entries were matched to this expectation.".to_string()
         } else {
             format!(
@@ -468,20 +636,38 @@ pub fn gap(
                 matched.len()
             )
         };
+        if let (Some(b), false) = (below_exp, below.is_empty()) {
+            let (lines, shown) = evidence_lines(&below, budget - own_budget);
+            evidence.push_str(&format!(
+                "\n\nEntries matched to the same expectation one level down ({} {}: {}), {} total, {shown} newest shown. They show the groundwork, not yet the {} level:\n{lines}",
+                current_id,
+                b.area,
+                b.described(),
+                below.len(),
+                target.id
+            ));
+        }
         let user = format!(
             "Expectation {} [{}]: {}\n\n{evidence}",
-            exp.id, exp.area, exp.text
+            exp.id,
+            exp.area,
+            exp.described()
         );
-        let result =
-            complete_json::<Assessment>(llm, vec![Message::system(&system), Message::user(user)])
-                .map(|mut a| {
-                    a.rating = normalize_rating(&a.rating, matched.len());
-                    a
-                })
-                .map_err(|e| e.to_string());
+        let result = complete_json::<Assessment>(
+            llm,
+            vec![Message::system(&system), Message::user(user)],
+            assessment_schema(),
+            1200,
+        )
+        .map(|mut a| {
+            a.rating = normalize_rating(&a.rating, matched.len(), below.len());
+            a
+        })
+        .map_err(|e| e.to_string());
         rows.push(Assessed {
             exp,
             count: matched.len(),
+            below: below.len(),
             last: matched.iter().map(|e| e.date).max(),
             result,
         });
@@ -492,11 +678,11 @@ pub fn gap(
         .iter()
         .map(|r| {
             format!(
-                "- [{}] {} — {} ({} entries)",
+                "- [{}] {} — {} ({})",
                 r.rating(),
                 r.exp.area,
-                r.exp.text,
-                r.count
+                r.exp.described(),
+                r.entries("entries", current_id)
             )
         })
         .collect::<Vec<_>>()
@@ -507,6 +693,8 @@ pub fn gap(
             Message::system(render(prompts::GAP_OVERVIEW, &vars)),
             Message::user(ratings),
         ],
+        overview_schema(),
+        1000,
     );
 
     let mut md = header(
@@ -557,7 +745,7 @@ pub fn gap(
             rating_icon(r.rating()),
             r.exp.area,
             r.exp.text.replace('|', "/"),
-            r.count,
+            r.entries("", current_id),
             r.last.map_or("—".into(), |d| d.to_string())
         ));
     }
@@ -582,9 +770,8 @@ pub fn gap(
                     _ => label(cfg, "none"),
                 };
                 md.push_str(&format!(
-                    "_{rating} · {} {}_\n\n{}\n",
-                    r.count,
-                    label(cfg, "entries"),
+                    "_{rating} · {}_\n\n{}\n",
+                    r.entries(label(cfg, "entries"), current_id),
                     a.assessment.trim()
                 ));
                 if !a.evidence.is_empty() {
@@ -615,6 +802,7 @@ pub fn gap(
                 text: r.exp.text.clone(),
                 rating: r.rating().to_string(),
                 count: r.count,
+                below: r.below,
                 last: r.last,
             })
             .collect(),
@@ -638,6 +826,17 @@ struct Statement {
     text: String,
     #[serde(default)]
     evidence: Vec<String>,
+}
+
+/// True when `item` is the date of one of `entries` or written in one of them
+/// (a ticket, PR or link). Small models sometimes garble a date ("2026-08--11")
+/// or cite something that is not there; such items are left out.
+fn is_evidence(item: &str, entries: &[&Entry]) -> bool {
+    let item = item.trim();
+    !item.is_empty()
+        && entries.iter().any(|e| {
+            e.date.to_string() == item || e.text.contains(item) || e.links.iter().any(|l| l == item)
+        })
 }
 
 /// True when a statement contains a number that none of its entries contains.
@@ -696,7 +895,7 @@ pub fn brag(
             if !matched.is_empty() {
                 sections.push((
                     format!("{} · {}", level.id, exp.area),
-                    exp.text.clone(),
+                    exp.described(),
                     matched,
                 ));
             }
@@ -735,15 +934,26 @@ pub fn brag(
         md.push_str(&format!("\n### {exp_text}\n\n"));
         let (lines, _) = evidence_lines(&matched, budget);
         let user = format!("Expectation: {exp_text}\n\nEntries:\n{lines}");
-        match complete_json::<BragOut>(llm, vec![Message::system(&system), Message::user(user)]) {
+        match complete_json::<BragOut>(
+            llm,
+            vec![Message::system(&system), Message::user(user)],
+            brag_schema(),
+            2048,
+        ) {
             Ok(out) if !out.statements.is_empty() && !invents_numbers(&out, &matched) => {
                 for s in out.statements {
-                    let evidence = if s.evidence.is_empty() {
+                    let evidence: Vec<&String> = s
+                        .evidence
+                        .iter()
+                        .filter(|item| is_evidence(item, &matched))
+                        .collect();
+                    let evidence = if evidence.is_empty() {
                         String::new()
                     } else {
-                        format!(" _({})_", s.evidence.join(", "))
+                        let items: Vec<&str> = evidence.iter().map(|e| e.as_str()).collect();
+                        format!(" _({})_", items.join(", "))
                     };
-                    md.push_str(&format!("- {}{evidence}\n", s.text.trim()));
+                    md.push_str(&format!("- {}{evidence}\n", plain_arrows(s.text.trim())));
                 }
             }
             _ => {
@@ -810,7 +1020,10 @@ pub fn summary(
                 .collect::<Vec<_>>()
                 .join("\n");
             let text = clip(&text, budget).to_string();
-            let part = llm.complete(&[Message::system(&system), Message::user(text)], false)?;
+            let part = llm.complete(
+                &[Message::system(&system), Message::user(text)],
+                &Format::Text,
+            )?;
             partials.push(format!("### {from} – {to}\n{}", part.trim()));
             progress("Summarizing weeks", n + 1, chunks.len())?;
         }
@@ -826,13 +1039,22 @@ pub fn summary(
             Message::system(system),
             Message::user(format!("Work log:\n{material}")),
         ],
-        false,
+        &Format::Text,
     )?;
     Ok(format!(
         "{}\n{}\n",
         header(&format!("{} {period}", label(cfg, "Summary")), &scoped, cfg),
         clean_markdown(&out)
     ))
+}
+
+/// Small models sometimes write the arrow the prompt asks for as LaTeX
+/// (`$\rightarrow$`), whose `\r` JSON then turns into a line break.
+fn plain_arrows(text: &str) -> String {
+    text.replace("$\\rightarrow$", "→")
+        .replace("$\rightarrow$", "→")
+        .replace("\\rightarrow", "→")
+        .replace("\rightarrow", "→")
 }
 
 /// Removes what models add around Markdown answers: a code fence, a title of their
@@ -1162,7 +1384,10 @@ pub fn prep(
         "Today is {today}.\n\nMy notes about @{} (newest first):\n{notes_text}\n\nMy work-log entries that mention @{}:\n{entry_text}",
         person.handle, person.handle
     );
-    let out = llm.complete(&[Message::system(system), Message::user(user)], false)?;
+    let out = llm.complete(
+        &[Message::system(system), Message::user(user)],
+        &Format::Text,
+    )?;
     Ok(format!(
         "{}\n{}\n",
         header(
@@ -1185,22 +1410,90 @@ mod tests {
 
     const LADDER: &str = "
 levels:
-  - id: SD2
-    title: Software Developer 2
+  - id: L2
+    title: Engineer
     expectations:
       - { area: Delivery, text: Ships features independently }
-  - id: SD3
-    title: Software Developer 3
+  - id: L3
+    title: Senior Engineer
     expectations:
       - { area: Ownership, text: Leads incident response }
       - { area: Mentoring, text: Mentors juniors }
 ";
 
+    #[test]
+    fn the_target_levels_verbs_and_focus_reach_the_prompts() {
+        let ladder = Ladder::from_yaml(
+            "levels:
+  - id: L2
+    title: Engineer
+    expectations: [{ area: Delivery, text: Ships features }]
+  - id: L3
+    title: Senior Engineer
+    summary: Owns features end to end
+    verbs: [leads, designs]
+    focus: [Design reviews, Mentoring]
+    expectations: [{ area: Delivery, text: Leads projects }]
+",
+        )
+        .unwrap();
+        let cfg = Config {
+            current_level: Some("L2".into()),
+            target_level: Some("L3".into()),
+            ..Config::default()
+        };
+        let levels = Levels::resolve(&cfg, &ladder).unwrap();
+        let context = levels.target_context();
+        assert!(context.contains("Owns features end to end"), "{context}");
+        assert!(context.contains("leads, designs"), "{context}");
+        assert!(context.contains("Design reviews; Mentoring"), "{context}");
+        let system = render(prompts::GAP_ITEM, &[("level", &context)]);
+        assert!(system.contains("Verbs the framework uses for L3"));
+        // Nothing more to say: nothing is added.
+        let plain = Ladder::from_yaml(LADDER).unwrap();
+        let cfg = setup().1;
+        assert_eq!(Levels::resolve(&cfg, &plain).unwrap().target_context(), "");
+    }
+
+    #[test]
+    fn evidence_must_come_from_the_entries() {
+        let mut e = Entry::new(
+            d(8, 11),
+            "Wrote RFC-17 for the payments split",
+            vec![],
+            "manual",
+        );
+        e.links.push("https://wiki.example.com/pm/42".into());
+        let entries = vec![&e];
+        assert!(is_evidence("2026-08-11", &entries));
+        assert!(is_evidence("RFC-17", &entries));
+        assert!(is_evidence("https://wiki.example.com/pm/42", &entries));
+        assert!(!is_evidence("2026-08--11", &entries), "a garbled date");
+        assert!(!is_evidence("PR #999", &entries), "not in the entry");
+        assert!(!is_evidence(" ", &entries));
+    }
+
+    #[test]
+    fn mapping_replies_are_held_to_the_batch_and_the_ids() {
+        let schema = mappings_schema(3, &["L3.ownership.1", "L3.mentoring.1"]);
+        let item = &schema["properties"]["mappings"];
+        assert_eq!(
+            (item["minItems"].as_u64(), item["maxItems"].as_u64()),
+            (Some(3), Some(3))
+        );
+        let props = &item["items"]["properties"];
+        assert_eq!(props["entry"]["maximum"], 3);
+        assert_eq!(
+            props["expectations"]["items"]["enum"],
+            serde_json::json!(["L3.ownership.1", "L3.mentoring.1"])
+        );
+    }
+
     fn setup() -> (Ladder, Config, Vec<Entry>) {
         let ladder = Ladder::from_yaml(LADDER).unwrap();
         let cfg = Config {
-            current_level: Some("SD2".into()),
-            target_level: Some("SD3".into()),
+            current_level: Some("L2".into()),
+            target_level: Some("L3".into()),
             ..Config::default()
         };
         let entries = vec![
@@ -1234,8 +1527,8 @@ levels:
                 calls.set(calls.get() + 1);
                 assert!(msgs[0]
                     .content
-                    .contains("SD3.ownership.1: [Ownership] Leads incident response"));
-                r#"{"mappings":[{"entry":1,"expectations":["SD3.ownership.1","BOGUS"]},{"entry":2,"expectations":["SD2.delivery.1"]}]}"#.into()
+                    .contains("L3.ownership.1: [Ownership] Leads incident response"));
+                r#"{"mappings":[{"entry":1,"expectations":["L3.ownership.1","BOGUS"]},{"entry":2,"expectations":["L2.delivery.1"]}]}"#.into()
             },
         };
         let warnings = map_entries(
@@ -1250,12 +1543,12 @@ levels:
         )
         .unwrap();
         assert!(warnings.is_empty());
-        assert_eq!(entries[0].expectations, vec!["SD3.ownership.1"]);
+        assert_eq!(entries[0].expectations, vec!["L3.ownership.1"]);
         assert!(entries[2].expectations.is_empty());
         assert_eq!(entries[2].tagged_with, Some(ladder.hash()));
         assert_eq!(
             store.load().unwrap()[0].expectations,
-            vec!["SD3.ownership.1"]
+            vec!["L3.ownership.1"]
         );
 
         map_entries(
@@ -1273,9 +1566,57 @@ levels:
     }
 
     #[test]
+    fn titled_expectations_are_mapped_by_names_the_model_can_read() {
+        let (_, cfg, mut entries) = setup();
+        let ladder = Ladder::from_yaml(
+            "
+levels:
+  - id: L2
+    title: Engineer
+    expectations:
+      - { area: Delivery, text: Ships features independently }
+  - id: L3
+    title: Senior Engineer
+    expectations:
+      - { area: Collaboration, title: Pairing, text: Mentors through pairing }
+      - { area: Collaboration, title: Knowledge sharing, text: Runs knowledge-sharing sessions }
+",
+        )
+        .unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::new(dir.path().join("logs.jsonl"));
+        store.append(&entries).unwrap();
+        let levels = Levels::resolve(&cfg, &ladder).unwrap();
+        let llm = FakeLlm {
+            reply: |msgs: &[Message], _| {
+                let list = &msgs[0].content;
+                assert!(list.contains(
+                    "L3.knowledge-sharing: [Collaboration] Knowledge sharing: Runs knowledge-sharing sessions"
+                ));
+                assert!(list.contains("L2.delivery.1: [Delivery] Ships features independently"));
+                r#"{"mappings":[{"entry":1,"expectations":["L3.knowledge-sharing","L3.collaboration.1"]},{"entry":2,"expectations":["L2.delivery.1"]}]}"#.into()
+            },
+        };
+        map_entries(
+            &llm,
+            &cfg,
+            &levels,
+            &store,
+            &mut entries,
+            None,
+            &Background::default(),
+            &mut crate::no_progress,
+        )
+        .unwrap();
+        // Back to the real ids; a real id the model was not shown is dropped.
+        assert_eq!(entries[0].expectations, vec!["L3.collaboration.2"]);
+        assert_eq!(entries[1].expectations, vec!["L2.delivery.1"]);
+    }
+
+    #[test]
     fn gap_report_marks_missing_evidence() {
         let (ladder, cfg, mut entries) = setup();
-        entries[0].expectations = vec!["SD3.ownership.1".into()];
+        entries[0].expectations = vec!["L3.ownership.1".into()];
         let levels = Levels::resolve(&cfg, &ladder).unwrap();
         let llm = FakeLlm {
             reply: |msgs: &[Message], _| {
@@ -1302,7 +1643,7 @@ levels:
         assert_eq!(report.summary.count("partial"), 1);
         assert_eq!(report.summary.count("none"), 1);
         assert_eq!(report.summary.priorities, vec!["Mentor someone"]);
-        assert!(md.contains("# Gap analysis: SD2 → SD3"));
+        assert!(md.contains("# Gap analysis: L2 → L3"));
         // A single entry is never "strong", whatever the model says.
         assert!(md.contains("| 🟡 | Ownership | Leads incident response | 1 | 2026-09-01 |"));
         // No evidence forces "none" even if the model says otherwise.
@@ -1312,9 +1653,70 @@ levels:
     }
 
     #[test]
+    fn work_one_level_down_counts_as_groundwork() {
+        let (_, mut cfg, mut entries) = setup();
+        let ladder = Ladder::from_yaml(
+            "
+levels:
+  - id: L3
+    title: Senior Engineer
+    expectations:
+      - { area: Ownership, title: Incidents, text: Leads incident response }
+  - id: L4
+    title: Staff Engineer
+    expectations:
+      - { area: Ownership, title: Incidents, text: Leads complex incidents across teams }
+      - { area: Ownership, title: Reliability, text: Owns a domain's reliability }
+",
+        )
+        .unwrap();
+        cfg.current_level = Some("L3".into());
+        cfg.target_level = Some("L4".into());
+        entries[0].expectations = vec!["L3.ownership.1".into()];
+        entries[1].expectations = vec!["L3.ownership.1".into()];
+        let levels = Levels::resolve(&cfg, &ladder).unwrap();
+        let llm = FakeLlm {
+            reply: |msgs: &[Message], _| {
+                let user = &msgs[1].content;
+                if msgs[0].content.contains("per-expectation assessment") {
+                    assert!(user.contains("(0 entries (+2 L3))"), "{user}");
+                    r#"{"overview":"Close.","priorities":["Lead a cross-team incident"]}"#.into()
+                } else if user.contains("Incidents: Leads complex incidents") {
+                    assert!(user.contains("one level down (L3 Ownership: Incidents: Leads incident response), 2 total"));
+                    assert!(user.contains("Led the payment outage incident call"));
+                    r#"{"rating":"none","assessment":"Groundwork is there."}"#.into()
+                } else {
+                    assert!(!user.contains("one level down"), "no title in common");
+                    r#"{"rating":"none","assessment":"Nothing logged."}"#.into()
+                }
+            },
+        };
+        let report = gap(
+            &llm,
+            &cfg,
+            &levels,
+            &entries,
+            None,
+            &Background::default(),
+            &mut crate::no_progress,
+        )
+        .unwrap();
+        // Only work one level down: "partial", whatever the model says.
+        assert_eq!(report.summary.rows[0].rating, "partial");
+        assert_eq!(report.summary.rows[1].rating, "none");
+        assert!(
+            report.markdown.contains(
+                "| 🟡 | Ownership | Leads complex incidents across teams | 0 (+2 L3) | — |"
+            ),
+            "{}",
+            report.markdown
+        );
+    }
+
+    #[test]
     fn brag_falls_back_to_raw_entries() {
         let (ladder, cfg, mut entries) = setup();
-        entries[0].expectations = vec!["SD3.ownership.1".into()];
+        entries[0].expectations = vec!["L3.ownership.1".into()];
         let levels = Levels::resolve(&cfg, &ladder).unwrap();
         let llm = FakeLlm {
             reply: |msgs: &[Message], _| {
@@ -1338,7 +1740,7 @@ levels:
             &mut crate::no_progress,
         )
         .unwrap();
-        assert!(md.contains("## SD3 · Ownership"));
+        assert!(md.contains("## L3 · Ownership"));
         assert!(md.contains("- Led outage response → service restored _(2026-09-01)_"));
         assert!(md.contains("## Other"));
         assert!(md.contains("- 2026-09-02 Shipped the export feature"));
@@ -1379,6 +1781,18 @@ levels:
             calls.get()
         );
         assert!(md.starts_with("# Summary 2026-01-01 → 2026-12-31"));
+    }
+
+    #[test]
+    fn latex_arrows_become_arrows() {
+        assert_eq!(
+            plain_arrows("düzelttim $\rightarrow$ p95 240ms"),
+            "düzelttim → p95 240ms",
+            "as JSON decodes `$\\rightarrow$`"
+        );
+        assert_eq!(plain_arrows("a $\\rightarrow$ b"), "a → b");
+        assert_eq!(plain_arrows("a \\rightarrow b"), "a → b");
+        assert_eq!(plain_arrows("a → b"), "a → b");
     }
 
     #[test]

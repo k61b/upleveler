@@ -2,7 +2,7 @@
 //! person, a check-in on a goal, or a question.
 
 use crate::dates::date_prefix;
-use crate::llm::{complete_json, Llm, Message};
+use crate::llm::{complete_json, schema, Llm, Message};
 use crate::people::{normalize_handle, NoteKind};
 use crate::prompts::{self, render};
 use chrono::{Duration, NaiveDate};
@@ -192,6 +192,37 @@ struct Route {
     goal: u32,
 }
 
+/// One of the intents, with a person and goal only from `ctx` (empty and 0
+/// for none).
+fn route_schema(ctx: &RouteContext) -> serde_json::Value {
+    let mut people: Vec<&str> = vec![""];
+    people.extend(ctx.people.iter().map(|(h, _)| h.as_str()));
+    let last_goal = ctx.goals.iter().map(|(id, _)| *id).max().unwrap_or(0);
+    schema::object(&[
+        (
+            "intent",
+            schema::one_of(&["log", "note", "checkin", "ask", "unclear"]),
+        ),
+        (
+            "tags",
+            schema::list(schema::one_of(crate::import::text::TAGS), 0, 3),
+        ),
+        ("person", schema::one_of(&people)),
+        (
+            "kind",
+            schema::one_of(&[
+                "",
+                "note",
+                "one-on-one",
+                "feedback-given",
+                "feedback-received",
+                "follow-up",
+            ]),
+        ),
+        ("goal", schema::integer(0, last_goal as i64)),
+    ])
+}
+
 /// Decides what to do with free text. Obvious questions skip the model. A note
 /// or check-in the model names for someone or something not in `ctx` is unclear
 /// rather than guessed.
@@ -208,7 +239,7 @@ pub fn classify(text: &str, llm: Option<&dyn Llm>, today: NaiveDate, ctx: &Route
         &[("people", &ctx.people_list()), ("goals", &ctx.goals_list())],
     );
     let messages = vec![Message::system(system), Message::user(text)];
-    let Ok(r) = complete_json::<Route>(llm, messages) else {
+    let Ok(r) = complete_json::<Route>(llm, messages, route_schema(ctx), 120) else {
         return Intent::Unclear;
     };
     let (date, rest) = split_date(text, today);
@@ -256,7 +287,7 @@ mod tests {
             "geçen ay hangi incident'larda yer aldım"
         ));
         assert!(looks_like_question("what did I ship last week"));
-        assert!(looks_like_question("SD3 için hazır mıyım"));
+        assert!(looks_like_question("L3 için hazır mıyım"));
         assert!(looks_like_question("Fixed it?"));
         assert!(!looks_like_question("PAY-412 circuit breaker eklendi"));
         assert!(!looks_like_question("Reviewed 3 PRs for billing"));

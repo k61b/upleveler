@@ -1572,6 +1572,7 @@ select.input {
 .log-text {
   color: var(--fg);
   overflow-wrap: anywhere;
+  white-space: pre-line;
 }
 
 .log-meta {
@@ -1729,6 +1730,8 @@ select.input {
 
 .note-text {
   margin-top: 4px;
+  /* Notes from a sheet keep their lines ("Gündem: …", "Notlar: …"). */
+  white-space: pre-line;
   color: var(--fg);
   overflow-wrap: anywhere;
 }
@@ -1939,4 +1942,20 @@ select.input {
 
 .gallery-stickers .empty-art {
   width: 120px;
+}
+
+.imports {
+  margin-bottom: 24px;
+  padding-bottom: 24px;
+  border-bottom: 1px solid var(--rule);
+}
+
+.imports summary {
+  color: var(--fg);
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.imports[open] summary {
+  margin-bottom: 8px;
 }

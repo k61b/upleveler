@@ -1,8 +1,10 @@
 //! Prompt templates, embedded at build time from `src/prompts/*.md`.
 
 pub const LADDER_IMPORT: &str = include_str!("prompts/ladder_import.md");
+pub const LADDER_AREAS: &str = include_str!("prompts/ladder_areas.md");
 pub const IMPORT_TEXT: &str = include_str!("prompts/import_text.md");
 pub const SHEET_MAPPING: &str = include_str!("prompts/sheet_mapping.md");
+pub const GOAL_MATCH: &str = include_str!("prompts/goal_match.md");
 pub const TAG_ENTRIES: &str = include_str!("prompts/tag_entries.md");
 pub const GAP_ITEM: &str = include_str!("prompts/gap_item.md");
 pub const GAP_OVERVIEW: &str = include_str!("prompts/gap_overview.md");

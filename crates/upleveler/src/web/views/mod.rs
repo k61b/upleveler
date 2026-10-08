@@ -13,7 +13,7 @@ mod reports;
 pub use gallery::gallery;
 pub use goals::{goals, goals_with, GoalForm};
 pub use ladder::ladder;
-pub use logs::{log_results, logs, logs_with, AddForm};
+pub use logs::{log_results, logs, logs_with, remove_import, AddForm, REMOVE_IMPORT};
 pub use overview::{demo_frame, overview, overview_body};
 pub use people::{people, people_with, person, person_path, remove_person, NoteForm, PersonForm};
 pub use reports::{render_markdown, report, reports, reports_with, run, RunForm};
@@ -204,7 +204,7 @@ mod tests {
         assert!(person(&data, "nobody", &NoteForm::empty(data.today)).is_none());
 
         let goals = goals(&data).into_string();
-        assert!(goals.contains("Mentor a junior developer") && goals.contains("SD3.mentoring.1"));
+        assert!(goals.contains("Mentor a junior developer") && goals.contains("L3.mentoring.1"));
         assert!(goals.contains("Sent the talk proposal") && goals.contains("1 check-in"));
 
         let overview = overview(&data).into_string();

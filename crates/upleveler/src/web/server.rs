@@ -151,6 +151,10 @@ fn router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/", get(overview))
         .route("/logs", get(logs).post(add_log))
+        .route(
+            views::REMOVE_IMPORT,
+            get(confirm_remove_import).post(remove_import),
+        )
         .route("/people", get(people).post(add_person))
         .route("/people/{handle}", get(person))
         .route("/people/{handle}/notes", axum::routing::post(add_note))
@@ -232,6 +236,11 @@ struct LogsQuery {
     logged: Option<String>,
     /// Set when the same text was already logged that day.
     duplicate: Option<String>,
+    /// Set after removing an import: the file it came from, what went and the
+    /// name of the copy of its log entries in the staging folder.
+    removed: Option<String>,
+    what: Option<String>,
+    copy: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -254,14 +263,28 @@ async fn overview(State(state): State<Arc<AppState>>) -> Response {
 }
 
 async fn logs(State(state): State<Arc<AppState>>, Query(query): Query<LogsQuery>) -> Response {
+    let staging = state.paths.staging.clone();
     with_data(state, move |data| {
         let mut form = AddForm::empty(data.today);
-        form.notice = match (&query.logged, &query.duplicate) {
-            (Some(date), _) => Some((Alert::Success, format!("Logged for {date}."))),
-            (None, Some(date)) => Some((
+        form.notice = match (&query.logged, &query.duplicate, &query.removed) {
+            (Some(date), _, _) => Some((Alert::Success, format!("Logged for {date}."))),
+            (None, Some(date), _) => Some((
                 Alert::Info,
                 format!("That entry is already logged for {date}."),
             )),
+            (None, None, Some(file)) => {
+                let what = query.what.as_deref().unwrap_or("everything");
+                let mut text = format!("Removed {what} imported from {file}.");
+                let copy = query.copy.as_deref().map(std::path::Path::new);
+                if let Some(name) = copy.and_then(|c| c.file_name()) {
+                    let copy = staging.join(name);
+                    text.push_str(&format!(
+                        " A copy of the log entries is kept; to put them back, run: upleveler import {}",
+                        copy.display()
+                    ));
+                }
+                Some((Alert::Success, text))
+            }
             _ => None,
         };
         page(views::logs_with(data, &query.q, &form))
@@ -579,6 +602,58 @@ async fn edit_person(
                 })
             }
         }
+    })
+    .await
+}
+
+#[derive(Deserialize)]
+struct ImportFile {
+    #[serde(default)]
+    file: String,
+}
+
+async fn confirm_remove_import(
+    State(state): State<Arc<AppState>>,
+    Query(input): Query<ImportFile>,
+) -> Response {
+    with_data(state, move |data| {
+        match views::remove_import(data, &input.file) {
+            Some(markup) => page(markup),
+            None => missing(),
+        }
+    })
+    .await
+}
+
+async fn remove_import(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Form(input): Form<ImportFile>,
+) -> Response {
+    write(state, &headers, move |session| {
+        Ok(match session.remove_import(&input.file)? {
+            Some(removed) => {
+                let what = crate::import::counts(
+                    removed.entries.len(),
+                    removed.notes.len(),
+                    removed.goals.len(),
+                );
+                let copy = removed
+                    .backup
+                    .as_deref()
+                    .and_then(|b| b.file_name())
+                    .and_then(|n| n.to_str())
+                    .map(|n| format!("&copy={}", crate::web::ui::query_escape(n)))
+                    .unwrap_or_default();
+                see_other(format!(
+                    "{}?removed={}&what={}{copy}",
+                    views::Tab::Logs.path(),
+                    crate::web::ui::query_escape(&removed.name),
+                    crate::web::ui::query_escape(&what),
+                ))
+            }
+            None => missing(),
+        })
     })
     .await
 }
@@ -1681,7 +1756,7 @@ mod tests {
         )
         .await;
         assert_eq!(location(&goal), "/goals?saved=goal");
-        let tied = send(&state, post("/goals"), "text=Mentor&expectation=SD9.nope.1").await;
+        let tied = send(&state, post("/goals"), "text=Mentor&expectation=L9.nope.1").await;
         assert_eq!(tied.status(), StatusCode::UNPROCESSABLE_ENTITY);
         assert!(body(tied).await.contains("import a ladder"));
         let checked = send(&state, post("/goals/1/checkin"), "text=Sent+the+proposal").await;
@@ -1822,6 +1897,100 @@ mod tests {
         assert_eq!(
             send(&state, post("/people/ada/remove"), "").await.status(),
             StatusCode::NOT_FOUND
+        );
+    }
+
+    #[tokio::test]
+    async fn removing_an_import_from_the_browser() {
+        use crate::store::Entry;
+        let home = tempfile::tempdir().unwrap();
+        let paths = Paths::at(home.path().to_path_buf());
+        let session = Session::at(paths.clone()).unwrap();
+        let day = chrono::NaiveDate::from_ymd_opt(2025, 3, 4).unwrap();
+        session
+            .store
+            .append(&[
+                Entry::new(
+                    day,
+                    "Fixed the retry bug",
+                    vec![],
+                    "import:old notes.xlsx:Log:R2",
+                ),
+                Entry::new(
+                    day,
+                    "Wrote the queue runbook",
+                    vec![],
+                    "import:old notes.xlsx:Log:R3",
+                ),
+                Entry::new(day, "Paired on the cache warmup", vec![], "manual"),
+            ])
+            .unwrap();
+        let state = Arc::new(AppState::new(4747, TOKEN.into(), paths.clone()));
+        let post = |path: &str| {
+            Request::post(path)
+                .header("origin", "http://127.0.0.1:4747")
+                .header("sec-fetch-site", "same-origin")
+        };
+
+        let logs = body(send(&state, Request::get("/logs"), "").await).await;
+        assert!(
+            logs.contains("Imported files")
+                && logs.contains("/logs/imports/remove?file=old%20notes.xlsx"),
+            "{logs}"
+        );
+        let confirm = body(
+            send(
+                &state,
+                Request::get("/logs/imports/remove?file=old%20notes.xlsx"),
+                "",
+            )
+            .await,
+        )
+        .await;
+        assert!(confirm.contains("Remove 2 entries"), "{confirm}");
+        assert_eq!(
+            session.entries().unwrap().len(),
+            3,
+            "asking removes nothing"
+        );
+        assert_eq!(
+            send(&state, Request::get("/logs/imports/remove?file=x.csv"), "")
+                .await
+                .status(),
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            send(
+                &state,
+                Request::post("/logs/imports/remove")
+                    .header("origin", "http://evil.example")
+                    .header("sec-fetch-site", "cross-site"),
+                "file=old+notes.xlsx",
+            )
+            .await
+            .status(),
+            StatusCode::FORBIDDEN
+        );
+
+        let removed = send(&state, post("/logs/imports/remove"), "file=old+notes.xlsx").await;
+        let to = removed.headers()[header::LOCATION]
+            .to_str()
+            .unwrap()
+            .to_string();
+        assert!(
+            to.starts_with(
+                "/logs?removed=old%20notes.xlsx&what=2%20entries&copy=removed-old-notes-"
+            ),
+            "{to}"
+        );
+        let left = session.entries().unwrap();
+        assert_eq!((left.len(), left[0].source.as_str()), (1, "manual"));
+        let notice = body(send(&state, Request::get(&to), "").await).await;
+        assert!(
+            notice.contains("Removed 2 entries imported from old notes.xlsx")
+                && notice.contains("upleveler import ")
+                && !notice.contains("Imported files"),
+            "{notice}"
         );
     }
 

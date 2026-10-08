@@ -289,6 +289,9 @@ pub fn readiness(gap: &GapSummary) -> Markup {
                                 span.row-text { (row.text) }
                                 span.row-meta.mono title="Entries that back this expectation" {
                                     (row.count) @if row.count == 1 { " entry" } @else { " entries" }
+                                    @if row.below > 0 {
+                                        " (+" (row.below) " one level down)"
+                                    }
                                 }
                             }
                         }
@@ -420,5 +423,38 @@ pub fn step_card(sticker: Markup, title: &str, body: &str, spec: Markup) -> Mark
             p { (body) }
             p.step-spec { (spec) }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::analyze::GapRow;
+
+    #[test]
+    fn readiness_shows_work_one_level_down() {
+        let row = |text: &str, rating: &str, count, below| GapRow {
+            id: format!("L4.ownership.{count}"),
+            area: "Ownership".into(),
+            text: text.into(),
+            rating: rating.into(),
+            count,
+            below,
+            last: None,
+        };
+        let gap = GapSummary {
+            date: NaiveDate::from_ymd_opt(2026, 10, 8).unwrap(),
+            current: Some("L3".into()),
+            target: "L4".into(),
+            rows: vec![
+                row("Leads complex incidents across teams", "partial", 0, 2),
+                row("Owns a domain's reliability", "strong", 3, 0),
+            ],
+            overview: String::new(),
+            priorities: Vec::new(),
+        };
+        let html = readiness(&gap).into_string();
+        assert!(html.contains("0 entries (+2 one level down)"), "{html}");
+        assert!(html.contains("3 entries</span>"), "{html}");
     }
 }
