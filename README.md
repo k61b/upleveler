@@ -8,11 +8,11 @@
 
 Upleveler is a work log for software developers. You write down what you do. Upleveler compares it with what your company expects at the next level, shows what is missing, and writes your promotion document.
 
-Everything stays on your computer. The AI runs locally with [LM Studio](https://lmstudio.ai) (or [Ollama](https://ollama.com)).
+Everything stays on your computer. The AI runs locally with [llama.cpp](https://github.com/ggml-org/llama.cpp), the open-source engine: no account, no app in between.
 
 ## Install
 
-You need [LM Studio](https://lmstudio.ai) and about 16 GB of RAM. Install it and open it once (on a Mac also `brew install --cask lm-studio`).
+You need [llama.cpp](https://github.com/ggml-org/llama.cpp) and about 16 GB of RAM. On macOS and Linux: `brew install llama.cpp`. On Windows, download it from [its releases](https://github.com/ggml-org/llama.cpp/releases) and put `llama-server.exe` on your PATH.
 
 On macOS and Linux:
 
@@ -20,7 +20,7 @@ On macOS and Linux:
 curl -fsSL https://upleveler.dev/install.sh | sh
 ```
 
-The script downloads the [latest release](https://github.com/k61b/upleveler/releases/latest) for your system, checks it against the release's checksums and installs `upleveler` to `~/.local/bin`. Run it again to update. The first run downloads the model (`google/gemma-4-e4b`, about 7 GB) through LM Studio, and starts LM Studio's server whenever it is not running. [Ollama](https://ollama.com) works as well; choose it in the setup.
+The script downloads the [latest release](https://github.com/k61b/upleveler/releases/latest) for your system, checks it against the release's checksums and installs `upleveler` to `~/.local/bin`. Run it again to update. The setup downloads the model (Google's Gemma 4 E4B, about 5 GB) from Hugging Face into `~/.upleveler/llama/`. Upleveler starts llama.cpp's server when it needs the model: on this computer only (`127.0.0.1`), with a key only Upleveler knows, so no web page in your browser can use it. After five idle minutes the server gives the model's memory back, and takes it again in a second or two.
 
 On Windows, download `upleveler-x86_64-pc-windows-msvc.zip` from the [latest release](https://github.com/k61b/upleveler/releases/latest) and put `upleveler.exe` on your PATH.
 
@@ -162,24 +162,23 @@ upleveler goal list
 
 Upleveler is built for small models that run on a laptop: about 16 GB of memory is enough.
 
-**LM Studio with `google/gemma-4-e4b` is recommended.** On a 16 GB Mac, with the invented sample files in this repository (a seven-sheet career framework, a 1:1 workbook with a next-level sheet, notes with a colleague and an old diary), it read every note correctly, tied all 8 goals to the right expectation, kept every fact of the diary word for word and wrote clean Turkish. The ladder itself is read without the model. The whole first setup, analyses included, waited about three minutes for the model. LM Studio is [free for use at work](https://lmstudio.ai/blog/free-for-work); check its current terms if your company has rules about local AI tools.
+**llama.cpp with Google's Gemma 4 E4B (`google/gemma-4-E4B-it-qat-q4_0-gguf`) is recommended.** On a 16 GB Mac, with the invented sample files in this repository (a seven-sheet career framework, a 1:1 workbook with a next-level sheet, notes with a colleague and an old diary), it read every note correctly, tied all 8 goals to the right expectation, mapped every diary entry we checked to the right expectation, kept every fact of the diary word for word and wrote clean Turkish. The ladder itself is read without the model. The whole first setup, analyses included, waited about three minutes for the model.
 
-| Model (LM Studio, MLX, about 7 GB each) | Waiting for the model | Log entries mapped as expected | What it got wrong |
+| Model (llama.cpp) | Waiting for the model | Log entries mapped as expected | What it got wrong |
 |---|---|---|---|
-| `google/gemma-4-e4b` | 175 s | 5 of 7 | took a training session for mentoring; left a bare "4 PR review" unmapped |
-| `google/gemma-4-12b` | 327 s | 6 of 7 | left "4 PR review" unmapped |
-| `qwen/qwen3.5-9b` | 247 s | 4 of 7 | merged 11 pieces of work in the diary into 6 and lost two facts |
+| Gemma 4 E4B, Google's 4-bit file (5.2 GB) | 177 s | 7 of 7 | nothing that mattered |
 
-The "E4B" in Gemma 4 E4B means about 4 billion parameters do the work for each word, so it is quick, while its files take as much memory as the 12B.
+The "E4B" in Gemma 4 E4B means about 4 billion parameters do the work for each word, so it is quick on a laptop. The file comes from Google itself: Google trained the model to keep its quality at 4 bits (quantization-aware training). In earlier runs through LM Studio, Gemma 4 12B mapped one more diary entry but took twice as long, and Qwen 3.5 9B merged separate pieces of work in the diary.
 
-Run the same comparison for any model: `cargo run --release --example eval -- --model <name>`.
+Run the same comparison for any model: `cargo run --release --example eval -- --model <owner/repo>`.
 
-- **Ollama** works as well: choose it in the setup (`gemma4:12b`). On the same Mac it answered structured questions somewhat faster than LM Studio's MLX engine, with the same results; some companies do not allow it.
-- Every structured answer is held to a JSON schema while the model writes it. A list has exactly as many items as asked for, an id can only be one from your ladder, and answers have a length limit, so a model that starts repeating itself stops. With plain JSON mode, `gemma4:12b` repeated words forever on long lists.
+- **Why llama.cpp:** it is the engine many local model apps are built on, and open source (MIT). It needs no account, runs no background service of its own and does not update itself. Upleveler starts its server, `llama-server`, only when it needs the model, and only on this computer.
+- **Another model:** any GGUF model on Hugging Face works. Pick it with `/model` and type its repository (`owner/name`, optionally with a quantization such as `owner/name:Q4_K_M`); Upleveler downloads it.
+- Every structured answer is held to a JSON schema while the model writes it. A list has exactly as many items as asked for, an id can only be one from your ladder, and answers and the free text in them have a length limit, so a model that starts repeating itself stops.
 - Text is kept as you wrote it where possible: ladder expectations, 1:1 notes and goals are read from your files as written, and the model only names areas, picks columns and ties goals to expectations.
-- The model does not "think" before answering: LM Studio runs Gemma 4 and Qwen 3.5 with thinking on, which made a three-word answer take 7 seconds instead of half a second.
-- LM Studio would load a model with its own default context, which can be too small; Upleveler loads it with the context it needs, and loads it when the app starts so the first answer does not wait for it.
-- To use another model, pick it with `/model`. Through an OpenAI-compatible endpoint (your company's approved LLM, vLLM), Upleveler asks for a JSON schema and falls back to plain JSON when the server does not support it.
+- The model does not "think" before answering: Gemma 4 does by default, and in llama.cpp a 200-token answer went entirely to hidden reasoning.
+- The server is started with the context Upleveler needs (8K tokens). A server Upleveler started with another model or less context is replaced; one started by someone else is never touched.
+- **Your company's model, or another server:** choose "OpenAI-compatible endpoint" in the setup. Ollama, LM Studio and vLLM work this way too, through their OpenAI-compatible address (`http://localhost:11434/v1`, `http://localhost:1234/v1`); Upleveler then neither downloads nor starts the model. Upleveler asks for a JSON schema and falls back to plain JSON when the server does not support it.
 
 ## Privacy
 
@@ -187,6 +186,8 @@ Run the same comparison for any model: `cargo run --release --example eval -- --
 - Notes about a person go to your model only for a 1:1 prep or a question about that person. They never go into the gap analysis, the promotion document or a summary.
 - Nothing is sent anywhere. To use your company's own LLM instead of a model on your computer, choose "OpenAI-compatible endpoint" in the setup (`/init`) and confirm that the endpoint is approved.
 - No account, no cloud, no telemetry. The browser dashboard (`upleveler web`) loads nothing from the internet.
+- The only download is the model, from Hugging Face, when you choose it in the setup.
+- To remove the model: `rm -rf ~/.upleveler/llama` (and `pkill llama-server` if it is running). To remove everything, your data included: `rm -rf ~/.upleveler`.
 
 ## Scripts
 
@@ -196,7 +197,7 @@ Every feature is also a plain command, for example `upleveler log "..."`, `uplev
 
 ## Türkçe
 
-Upleveler, yaptığınız işi şirketinizin seviye beklentileriyle karşılaştırır. Terminalde `upleveler` yazın. Ne yaptığınızı yazarsanız log'a eklenir, soru sorarsanız cevaplanır. Komutları görmek için `/` yazın. Panoyu tarayıcıda açmak için `upleveler web` yazın; yalnızca kendi bilgisayarınızda çalışır. Raporların Türkçe olması için kurulumda Türkçe'yi seçin. Takım arkadaşlarınız hakkında not tutmak için `upleveler person` ve `upleveler note`, hedefleriniz için `upleveler goal` komutlarını kullanın. Şirketinizin kariyer dokümanı çok sayfalıysa seviyelerin yazdığı sayfayı seçersiniz. Liderinizle tuttuğunuz 1:1 Excel'indeki her sayfa log'a, o kişi hakkındaki notlara ya da hedeflerinize gidebilir. Dosyayı her 1:1'den sonra tekrar import edin, yalnızca yeni satırlar eklenir. Upleveler 16 GB belleği olan bir dizüstünde [LM Studio](https://lmstudio.ai) ve `google/gemma-4-e4b` ile çalışacak şekilde tasarlandı (Ollama da çalışır); kurulum modeli indirir ve LM Studio'nun sunucusu kapalıysa onu açar. Bir 1:1'e hazırlanmak için `upleveler prep ada` ya da uygulamada `/prep @ada` yazın; notlarınız terfi dokümanına hiçbir zaman girmez. Verileriniz bilgisayarınızdan çıkmaz.
+Upleveler, yaptığınız işi şirketinizin seviye beklentileriyle karşılaştırır. Terminalde `upleveler` yazın. Ne yaptığınızı yazarsanız log'a eklenir, soru sorarsanız cevaplanır. Komutları görmek için `/` yazın. Panoyu tarayıcıda açmak için `upleveler web` yazın; yalnızca kendi bilgisayarınızda çalışır. Raporların Türkçe olması için kurulumda Türkçe'yi seçin. Takım arkadaşlarınız hakkında not tutmak için `upleveler person` ve `upleveler note`, hedefleriniz için `upleveler goal` komutlarını kullanın. Şirketinizin kariyer dokümanı çok sayfalıysa her sayfanın ne işe yaradığı (beklentiler, seviyeler, fiiller, odak alanları ya da atla) önerilir; ←/→ ile değiştirebilirsiniz. Liderinizle tuttuğunuz 1:1 Excel'indeki her sayfa log'a, o kişi hakkındaki notlara ya da hedeflerinize gidebilir. Dosyayı her 1:1'den sonra tekrar import edin, yalnızca yeni satırlar eklenir. Upleveler 16 GB belleği olan bir dizüstünde [llama.cpp](https://github.com/ggml-org/llama.cpp) (`brew install llama.cpp`) ve Google'ın Gemma 4 E4B modeliyle çalışacak şekilde tasarlandı; kurulum modeli Hugging Face'ten indirir, llama.cpp'yi gerektiğinde yalnızca bu bilgisayardan erişilebilir şekilde kendisi başlatır. Şirketinizin onaylı modelini ya da Ollama, LM Studio gibi başka bir sunucuyu kurulumdaki "OpenAI-compatible endpoint" seçeneğiyle kullanabilirsiniz. Bir 1:1'e hazırlanmak için `upleveler prep ada` ya da uygulamada `/prep @ada` yazın; notlarınız terfi dokümanına hiçbir zaman girmez. Verileriniz bilgisayarınızdan çıkmaz.
 
 ## Development
 
@@ -220,9 +221,9 @@ cargo fmt --all
 Invented sample files of the kinds people bring to their first setup (a career framework workbook, a 1:1 workbook with a lead, notes with a colleague and an old diary) are written by `cargo run --example sample_files -- <folder>`; the tests check that they read exactly as expected. To compare models on them, run the first setup with a real model and print a scorecard:
 
 ```sh
-cargo run --release --example eval                                        # LM Studio, google/gemma-4-e4b
-cargo run --release --example eval -- --model qwen/qwen3.5-9b
-cargo run --release --example eval -- --provider ollama --model gemma4:12b
+cargo run --release --example eval                                        # llama.cpp, Gemma 4 E4B
+cargo run --release --example eval -- --model unsloth/gemma-4-E4B-it-GGUF
+cargo run --release --example eval -- --provider openai --base-url http://localhost:8080/v1 --model <name>
 ```
 
 ## License

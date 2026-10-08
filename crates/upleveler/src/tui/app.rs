@@ -60,7 +60,8 @@ impl Item {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Purpose {
     Provider,
-    OllamaModel,
+    /// The model, chosen in the setup.
+    SetupModel,
     ModelsFailed,
     ModelName,
     OpenaiUrl,
@@ -248,6 +249,14 @@ fn select(title: &str, hint: &str, items: Vec<Item>, purpose: Purpose) -> Panel 
         items,
         selected: 0,
         purpose,
+    }
+}
+
+/// What to type as a model's name.
+fn model_hint(provider: Provider) -> &'static str {
+    match provider {
+        Provider::Llamacpp => "a Hugging Face repository with a GGUF file, e.g. google/gemma-4-E4B-it-qat-q4_0-gguf · enter to use it (downloaded first if needed)",
+        Provider::Openai => "as the server calls it · enter to continue",
     }
 }
 
@@ -1563,14 +1572,13 @@ impl App {
             "↑↓ choose · enter select · esc skip setup",
             vec![
                 Item::new(
-                    "LM Studio on this computer",
-                    "recommended · private",
-                    "lmstudio",
+                    "llama.cpp on this computer",
+                    "recommended · private · open source",
+                    "llamacpp",
                 ),
-                Item::new("Ollama on this computer", "private", "ollama"),
                 Item::new(
                     "OpenAI-compatible endpoint",
-                    "your company's approved LLM, vLLM",
+                    "your company's approved LLM, or a model server you run",
                     "openai",
                 ),
             ],
@@ -2002,25 +2010,33 @@ impl App {
         let cfg = &mut self.session.cfg;
         match purpose {
             Purpose::Provider => {
-                let local = match value.as_str() {
-                    "ollama" => Some(Provider::Ollama),
-                    "lmstudio" => Some(Provider::Lmstudio),
-                    _ => None,
-                };
-                if let Some(provider) = local {
-                    if cfg.llm.provider != provider {
-                        cfg.llm.base_url = provider.default_url().into();
+                if value == "llamacpp" {
+                    if cfg.llm.provider != Provider::Llamacpp {
+                        cfg.llm.base_url = Provider::Llamacpp.default_url().into();
+                        cfg.llm.model = Provider::Llamacpp.recommended_model().into();
                         cfg.llm.api_key_env = None;
                     }
-                    cfg.llm.provider = provider;
+                    cfg.llm.provider = Provider::Llamacpp;
                     cfg.llm.allow_remote = false;
+                    if crate::llama::server_binary().is_none() {
+                        self.panel = Some(select(
+                            "llama.cpp is not installed yet",
+                            "Install it with `brew install llama.cpp` (macOS, Linux) or from github.com/ggml-org/llama.cpp/releases, then check again.",
+                            vec![
+                                Item::new("Check again", "after installing it", "llamacpp"),
+                                Item::new("Use another server", "OpenAI-compatible", "openai"),
+                            ],
+                            Purpose::Provider,
+                        ));
+                        return;
+                    }
                     let llm = cfg.llm.clone();
                     self.start(Job::Models(llm));
                 } else {
                     let url = if cfg.llm.provider == Provider::Openai {
                         cfg.llm.base_url.clone()
                     } else {
-                        "http://localhost:1234/v1".into()
+                        Provider::Openai.default_url().into()
                     };
                     cfg.llm.provider = Provider::Openai;
                     self.panel = Some(input(
@@ -2031,12 +2047,12 @@ impl App {
                     ));
                 }
             }
-            Purpose::OllamaModel | Purpose::Model => {
+            Purpose::SetupModel | Purpose::Model => {
                 if value == "__manual" {
                     let current = cfg.llm.model.clone();
                     self.panel = Some(input(
                         "Model name",
-                        "e.g. gemma4:12b · enter to continue",
+                        model_hint(cfg.llm.provider),
                         &current,
                         Purpose::ModelName,
                     ));
@@ -2048,7 +2064,7 @@ impl App {
                     let mut llm = cfg.llm.clone();
                     llm.model = llm.provider.recommended_model().into();
                     self.info(&format!(
-                        "Downloading {} (about 8 GB, once). Esc stops it.",
+                        "Downloading {} from Hugging Face (about 5 GB, once). Esc stops it.",
                         llm.model
                     ));
                     self.start(Job::Pull(llm));
@@ -2061,7 +2077,7 @@ impl App {
                     let mut llm = cfg.llm.clone();
                     llm.model = llm.provider.recommended_model().into();
                     self.info(&format!(
-                        "Downloading {} (about 8 GB, once). Esc stops it.",
+                        "Downloading {} from Hugging Face (about 5 GB, once). Esc stops it.",
                         llm.model
                     ));
                     self.start(Job::Pull(llm));
@@ -2074,7 +2090,7 @@ impl App {
                     let current = cfg.llm.model.clone();
                     self.panel = Some(input(
                         "Model name",
-                        "e.g. gemma4:12b · enter to continue",
+                        model_hint(cfg.llm.provider),
                         &current,
                         Purpose::ModelName,
                     ));
@@ -2195,6 +2211,19 @@ impl App {
         match purpose {
             Purpose::ModelName => {
                 if value.is_empty() {
+                    return;
+                }
+                if cfg.llm.provider == Provider::Llamacpp
+                    && !matches!(crate::llama::model_file(&value), Ok(Some(_)))
+                {
+                    // Used once it is downloaded (`Output::Pulled`).
+                    let mut llm = cfg.llm.clone();
+                    llm.model = value;
+                    self.info(&format!(
+                        "Downloading {} from Hugging Face. Esc stops it.",
+                        llm.model
+                    ));
+                    self.start(Job::Pull(llm));
                     return;
                 }
                 cfg.llm.model = value;
@@ -2447,32 +2476,32 @@ impl App {
 
     fn on_models(&mut self, result: Result<Vec<String>, String>) {
         let purpose = if self.wizard {
-            Purpose::OllamaModel
+            Purpose::SetupModel
         } else {
             Purpose::Model
         };
         match result {
             Ok(models) if !models.is_empty() => {
                 let current = self.session.cfg.llm.model.clone();
+                let provider = self.session.cfg.llm.provider;
+                let recommended = provider.recommended_model();
                 let mut items: Vec<Item> = models
                     .iter()
                     .map(|m| {
-                        let detail = match (m.as_str(), *m == current) {
-                            (_, true) => "current",
-                            ("gemma4:12b" | "google/gemma-4-e4b", _) => "recommended",
-                            ("google/gemma-4-12b", _) => "also works · slower",
-                            ("gemma3:12b", _) => "also works",
-                            _ => "",
+                        let detail = if *m == current {
+                            "current"
+                        } else if m == recommended {
+                            "recommended"
+                        } else {
+                            ""
                         };
                         Item::new(m.clone(), detail, m.clone())
                     })
                     .collect();
-                let provider = self.session.cfg.llm.provider;
-                let recommended = provider.recommended_model();
-                if provider != Provider::Openai && !models.iter().any(|m| m == recommended) {
+                if provider == Provider::Llamacpp && !models.iter().any(|m| m == recommended) {
                     items.push(Item::new(
                         format!("Download {recommended}"),
-                        "recommended · about 7 GB, once",
+                        "recommended · about 5 GB, once",
                         "__pull",
                     ));
                 }
@@ -2480,8 +2509,7 @@ impl App {
                 let selected = models
                     .iter()
                     .position(|m| *m == current)
-                    .or_else(|| models.iter().position(|m| m == "gemma4:12b"))
-                    .or_else(|| models.iter().position(|m| m == "gemma3:12b"))
+                    .or_else(|| models.iter().position(|m| m == recommended))
                     .unwrap_or(0);
                 self.panel = Some(Panel::Select {
                     title: "Which model?".into(),
@@ -2494,11 +2522,11 @@ impl App {
             Ok(_) => {
                 let provider = self.session.cfg.llm.provider;
                 let mut items = Vec::new();
-                // Only Ollama and LM Studio can download a model for us.
-                if provider != Provider::Openai {
+                // Only for llama.cpp does Upleveler download the model.
+                if provider == Provider::Llamacpp {
                     items.push(Item::new(
                         format!("Download {}", provider.recommended_model()),
-                        "about 7 GB, once · needs 16 GB of memory",
+                        "about 5 GB from Hugging Face, once · needs 16 GB of memory",
                         "__pull",
                     ));
                 }
@@ -2509,7 +2537,7 @@ impl App {
                     if provider == Provider::Openai {
                         "The endpoint lists no models. Type the model's name, or retry."
                     } else {
-                        "No models are installed yet. Download the recommended one here."
+                        "No model is downloaded yet. Download the recommended one here."
                     },
                     items,
                     Purpose::ModelsFailed,
@@ -2590,7 +2618,7 @@ fn empty_status(session: &Session) -> Status {
         ladder_levels: None,
         current: None,
         target: None,
-        model: session.cfg.llm.model.clone(),
+        model: session.cfg.llm.model_name().to_string(),
         base_url: session.cfg.llm.base_url.clone(),
         local: is_local_url(&session.cfg.llm.base_url),
         latest_gap: None,
@@ -2762,9 +2790,9 @@ mod setup_tests {
         let Some(Panel::Select { items, .. }) = &app.panel else {
             panic!("lists the models");
         };
-        assert!(items
-            .iter()
-            .any(|i| i.value == "__pull" && i.label.contains("google/gemma-4-e4b")));
+        assert!(items.iter().any(
+            |i| i.value == "__pull" && i.label.contains("google/gemma-4-E4B-it-qat-q4_0-gguf")
+        ));
 
         app.on_models(Ok(Vec::new()));
         let Some(Panel::Select { title, items, .. }) = &app.panel else {
@@ -2787,13 +2815,13 @@ mod setup_tests {
             panic!("offers what it can");
         };
         assert!(items.iter().all(|i| i.value != "__pull"));
-        app.session.cfg.llm.provider = Provider::Lmstudio;
+        app.session.cfg.llm.provider = Provider::Llamacpp;
 
         // After a download the model is used and saved.
         app.panel = None;
-        app.on_output(Output::Pulled("google/gemma-4-e4b".into()));
-        assert_eq!(app.session.cfg.llm.model, "google/gemma-4-e4b");
-        assert!(printed(&app).contains("Model set to google/gemma-4-e4b"));
+        app.on_output(Output::Pulled("acme/tiny-gguf".into()));
+        assert_eq!(app.session.cfg.llm.model, "acme/tiny-gguf");
+        assert!(printed(&app).contains("Model set to acme/tiny-gguf"));
     }
 
     /// A 1:1 workbook with only an agenda: notes, no log entries.

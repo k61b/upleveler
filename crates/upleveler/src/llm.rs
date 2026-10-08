@@ -1,4 +1,4 @@
-//! Minimal chat client for Ollama and OpenAI-compatible endpoints.
+//! Minimal chat client for llama.cpp and other OpenAI-compatible endpoints.
 
 use crate::config::{is_local_url, LlmConfig, Provider};
 use anyhow::{anyhow, bail, Context, Result};
@@ -45,7 +45,7 @@ impl Message {
 pub enum Format {
     /// Free text: reports and answers.
     Text,
-    /// A JSON object matching `schema`, at most `max_tokens` long. Ollama
+    /// A JSON object matching `schema`, at most `max_tokens` long. llama.cpp
     /// enforces the schema while the model writes, so the number of items and
     /// the allowed ids cannot come out wrong; the cap stops a model that starts
     /// repeating itself (gemma4:12b did, endlessly, with plain JSON mode).
@@ -106,7 +106,7 @@ pub fn complete_json<T: DeserializeOwned>(
     bail!("model did not return valid JSON: {last_err}")
 }
 
-/// Builders for the JSON schemas replies are held to. Ollama turns a schema
+/// Builders for the JSON schemas replies are held to. llama.cpp turns a schema
 /// into a grammar the model cannot step outside of: a list has exactly the
 /// length asked for, an id is one of the given ones.
 pub mod schema {
@@ -189,15 +189,17 @@ pub fn parse_json<T: DeserializeOwned>(raw: &str) -> Result<T> {
 pub struct HttpLlm {
     cfg: LlmConfig,
     agent: ureq::Agent,
+    /// From `api_key_env`; llama.cpp's own key is read when first needed.
     api_key: Option<String>,
+    llama_key: std::cell::OnceCell<Option<String>>,
     /// How an OpenAI-compatible server is asked for JSON: 2 = a JSON schema,
     /// 1 = any JSON object, 0 = not at all. Lowered each time the server
     /// rejects one with HTTP 400.
     json_mode: Cell<u8>,
-    /// LM Studio: ask the model not to think first (`reasoning_effort:
-    /// "none"`). Cleared if the server rejects it for a model.
+    /// Ask the model not to think first (`reasoning_effort: "none"`).
+    /// Cleared if the server rejects it.
     no_reasoning: Cell<bool>,
-    /// LM Studio: the model was found loaded with our context (or loaded so).
+    /// llama.cpp: the server was found running our model with our context.
     ready: Cell<bool>,
     /// Set by the caller to stop a reply mid-way (see `with_cancel`).
     cancel: Option<Arc<AtomicBool>>,
@@ -235,38 +237,31 @@ impl HttpLlm {
             cfg: cfg.clone(),
             agent,
             api_key,
+            llama_key: std::cell::OnceCell::new(),
             json_mode: Cell::new(2),
-            no_reasoning: Cell::new(cfg.provider == Provider::Lmstudio),
+            no_reasoning: Cell::new(cfg.provider == Provider::Llamacpp),
             ready: Cell::new(false),
             cancel: None,
         })
     }
 
-    /// Model names the endpoint offers (Ollama: installed models).
+    /// The models there are: for llama.cpp the ones downloaded, otherwise
+    /// the ones the endpoint offers.
     pub fn list_models(&self) -> Result<Vec<String>> {
-        let path = match self.cfg.provider {
-            Provider::Ollama => "api/tags",
-            Provider::Openai => "models",
-            Provider::Lmstudio => "api/v1/models",
-        };
+        if self.cfg.provider == Provider::Llamacpp {
+            return crate::llama::downloaded();
+        }
         let value: Value = self
-            .get(path)
+            .get("models")
             .call()
             .map_err(|err| self.describe(err))?
             .into_json()
             .context("model list was not JSON")?;
-        let (list, field) = match self.cfg.provider {
-            Provider::Ollama => (&value["models"], "name"),
-            Provider::Openai => (&value["data"], "id"),
-            Provider::Lmstudio => (&value["models"], "key"),
-        };
-        let mut names: Vec<String> = list
+        let mut names: Vec<String> = value["data"]
             .as_array()
             .map(|a| {
                 a.iter()
-                    // LM Studio lists embedding models too.
-                    .filter(|m| m["type"].as_str().is_none_or(|t| t == "llm"))
-                    .filter_map(|m| m[field].as_str().map(String::from))
+                    .filter_map(|m| m["id"].as_str().map(String::from))
                     .collect()
             })
             .unwrap_or_default();
@@ -278,115 +273,125 @@ impl HttpLlm {
         &self.cfg
     }
 
-    /// Loads the model into memory so the next request does not wait for it:
-    /// 5–15 s for a 12B model. Ollama keeps it for 10 minutes, with the context
-    /// size of later requests (or it would load it again). LM Studio would load
-    /// it on the first request with its own default context, which can be too
-    /// small for our prompts, so it is loaded here with ours; a copy loaded
-    /// with less is unloaded first.
+    /// Makes sure llama.cpp's server runs the configured model with our
+    /// context, starting it when it is not running (or replacing one
+    /// Upleveler started with another model or a smaller context), and waits
+    /// until the model is loaded. Nothing to do for other endpoints.
     pub fn preload(&self) -> Result<()> {
-        match self.cfg.provider {
-            Provider::Ollama => {
-                let body = json!({
-                    "model": self.cfg.model,
-                    "messages": [],
-                    "keep_alive": "10m",
-                    "options": { "num_ctx": self.cfg.context_tokens },
-                });
-                self.post(&body)?;
-            }
-            Provider::Lmstudio => {
-                // Several clients in one process (the app's start-up preload,
-                // the model check, a job) would otherwise load the model at
-                // the same time, twice over on a 16 GB machine. The second
-                // one waits here and then finds it loaded.
-                static LOADING: std::sync::Mutex<()> = std::sync::Mutex::new(());
-                let _one_at_a_time = LOADING.lock().unwrap_or_else(|e| e.into_inner());
-                let models: Value = match self.get("api/v1/models").call() {
-                    Err(ureq::Error::Transport(_)) if self.start_lmstudio() => {
-                        self.get("api/v1/models").call()
-                    }
-                    other => other,
-                }
-                .map_err(|err| self.describe(err))?
-                .into_json()?;
-                let model = models["models"]
-                    .as_array()
-                    .and_then(|list| list.iter().find(|m| m["key"] == self.cfg.model.as_str()))
-                    .with_context(|| {
-                        format!(
-                            "LM Studio has no model {}; download it in LM Studio or with `lms get {}`",
-                            self.cfg.model, self.cfg.model
-                        )
-                    })?;
-                let instances = model["loaded_instances"]
-                    .as_array()
-                    .cloned()
-                    .unwrap_or_default();
-                let fits = |i: &Value| {
-                    i["config"]["context_length"]
-                        .as_u64()
-                        .is_some_and(|c| c as usize >= self.cfg.context_tokens)
-                };
-                if instances.iter().any(fits) {
-                    self.ready.set(true);
-                    return Ok(());
-                }
-                for i in &instances {
-                    self.post_to("api/v1/models/unload")
-                        .send_json(json!({ "instance_id": i["id"] }))
-                        .map_err(|err| self.describe(err))?;
-                }
-                self.post_to("api/v1/models/load")
-                    .send_json(json!({
-                        "model": self.cfg.model,
-                        "context_length": self.cfg.context_tokens,
-                    }))
-                    .map_err(|err| self.describe(err))?;
-                self.ready.set(true);
-            }
-            Provider::Openai => {}
+        if self.cfg.provider != Provider::Llamacpp || self.ready.get() {
+            return Ok(());
         }
-        Ok(())
-    }
-
-    /// Starts LM Studio's server with its `lms` command when it is not
-    /// answering at its usual address, and waits up to 30 s for it. Only for
-    /// the default address, so another setup is never touched.
-    fn start_lmstudio(&self) -> bool {
-        let base = self
+        // The terminal app's start-up preload, the model check and a job can
+        // all get here at once; the others wait and then find it running.
+        static STARTING: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _one_at_a_time = STARTING.lock().unwrap_or_else(|e| e.into_inner());
+        let port = self
             .cfg
             .base_url
-            .trim_end_matches('/')
-            .trim_end_matches("/v1");
-        let usual = ["http://localhost:1234", "http://127.0.0.1:1234"];
-        if self.cfg.provider != Provider::Lmstudio || !usual.contains(&base) {
-            return false;
-        }
-        let lms = std::env::var_os("HOME")
-            .map(|home| std::path::Path::new(&home).join(".lmstudio/bin/lms"))
-            .filter(|p| p.exists())
-            .unwrap_or_else(|| "lms".into());
-        let started = std::process::Command::new(lms)
-            .args(["server", "start"])
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status()
-            .is_ok_and(|s| s.success());
-        if !started {
-            return false;
-        }
-        (0..30).any(|_| {
-            let up = self.get("api/v1/models").call().is_ok();
-            if !up {
-                std::thread::sleep(Duration::from_secs(1));
+            .rsplit(':')
+            .next()
+            .and_then(|p| p.trim_end_matches('/').parse::<u16>().ok());
+        let mut child = None;
+        for _ in 0..3 {
+            match self.get("props").call() {
+                Ok(resp) => {
+                    let props: Value = resp
+                        .into_json()
+                        .context("llama.cpp's /props was not JSON")?;
+                    let model = props["model_alias"].as_str().unwrap_or("");
+                    let context = props["default_generation_settings"]["n_ctx"]
+                        .as_u64()
+                        .unwrap_or(0) as usize;
+                    if model == self.cfg.model && context >= self.cfg.context_tokens {
+                        self.ready.set(true);
+                        return Ok(());
+                    }
+                    let ours = match port {
+                        Some(port) => crate::llama::stop_ours(port)?,
+                        None => false,
+                    };
+                    if !ours {
+                        bail!(
+                            "another llama.cpp server is running at {} with {model} ({context} tokens of context); \
+                             stop it, or choose another address with `upleveler init`",
+                            self.cfg.base_url
+                        );
+                    }
+                    self.wait(|up| !up, Duration::from_secs(15), None)?;
+                }
+                Err(ureq::Error::Status(503, _)) => {
+                    self.wait(|up| up, Duration::from_secs(300), child.as_mut())?;
+                }
+                Err(ureq::Error::Status(401, _)) => bail!(
+                    "the llama.cpp server at {} was started outside Upleveler with its own key; \
+                     stop it so Upleveler can start its own",
+                    self.cfg.base_url
+                ),
+                Err(ureq::Error::Transport(_)) if child.is_none() => {
+                    let file = crate::llama::model_file(&self.cfg.model)?.with_context(|| {
+                        format!(
+                            "the model {} is not downloaded yet; download it in the setup (`upleveler init`)",
+                            self.cfg.model
+                        )
+                    })?;
+                    child = Some(crate::llama::start(
+                        &self.cfg.base_url,
+                        &self.cfg.model,
+                        &file,
+                        self.cfg.context_tokens,
+                    )?);
+                    self.wait(|up| up, Duration::from_secs(300), child.as_mut())?;
+                }
+                Err(err) => return Err(self.describe(err)),
             }
-            up
-        })
+        }
+        bail!(
+            "llama.cpp did not start with {} at {}",
+            self.cfg.model,
+            self.cfg.base_url
+        )
     }
 
-    /// Loads the model and asks it a tiny structured question, to see that it
-    /// answers and how fast: (time to load, time to answer).
+    /// Waits until the server's health is `want(answering)`; a server this
+    /// process started that ends first explains why from its log.
+    fn wait(
+        &self,
+        want: impl Fn(bool) -> bool,
+        limit: Duration,
+        mut child: Option<&mut std::process::Child>,
+    ) -> Result<()> {
+        let started = std::time::Instant::now();
+        loop {
+            let up = self.get("health").call().is_ok();
+            if want(up) {
+                return Ok(());
+            }
+            if let Some(child) = child.as_deref_mut() {
+                if let Ok(Some(status)) = child.try_wait() {
+                    // Another Upleveler may have started one at the same
+                    // moment: then this one could not take the port.
+                    if self.get("health").call().is_ok() {
+                        return Ok(());
+                    }
+                    bail!(
+                        "llama.cpp stopped ({status}):\n{}",
+                        crate::llama::log_tail()
+                    );
+                }
+            }
+            if started.elapsed() > limit {
+                bail!(
+                    "llama.cpp at {} did not answer within {} s",
+                    self.cfg.base_url,
+                    limit.as_secs()
+                );
+            }
+            std::thread::sleep(Duration::from_millis(250));
+        }
+    }
+
+    /// Starts the model and asks it a tiny structured question, to see that
+    /// it answers and how fast: (time to start, time to answer).
     pub fn check(&self) -> Result<(Duration, Duration)> {
         #[derive(serde::Deserialize)]
         struct Ready {
@@ -406,75 +411,20 @@ impl HttpLlm {
         Ok((loaded, started.elapsed() - loaded))
     }
 
-    /// Downloads the configured model (Ollama, LM Studio), reporting each step
-    /// as (status, bytes done, bytes in total).
+    /// Downloads the configured model for llama.cpp, reporting each step as
+    /// (status, bytes done, bytes in total).
     pub fn pull(&self, progress: &mut dyn FnMut(&str, u64, u64) -> Result<()>) -> Result<()> {
-        match self.cfg.provider {
-            Provider::Ollama => {}
-            Provider::Lmstudio => return self.download_lmstudio(progress),
-            Provider::Openai => bail!("models can only be downloaded through Ollama or LM Studio"),
+        if self.cfg.provider != Provider::Llamacpp {
+            bail!(
+                "models are downloaded for llama.cpp only; for another server, use its own tools"
+            );
         }
-        let resp = self
-            .post_to("api/pull")
-            .send_json(json!({ "model": self.cfg.model, "stream": true }))
-            .map_err(|err| self.describe(err))?;
-        for line in BufReader::new(resp.into_reader()).lines() {
-            let line = line?;
-            if line.trim().is_empty() {
-                continue;
-            }
-            let value: Value = serde_json::from_str(&line)
-                .with_context(|| format!("unexpected answer while downloading: {line}"))?;
-            if let Some(err) = value["error"].as_str() {
-                bail!("could not download {}: {err}", self.cfg.model);
-            }
-            let status = value["status"].as_str().unwrap_or("");
-            progress(
-                status,
-                value["completed"].as_u64().unwrap_or(0),
-                value["total"].as_u64().unwrap_or(0),
-            )?;
-            if status == "success" {
-                return Ok(());
-            }
-        }
-        bail!(
-            "the download of {} stopped before it finished",
-            self.cfg.model
-        )
-    }
-
-    /// LM Studio's download: started once, then followed until it is done.
-    fn download_lmstudio(
-        &self,
-        progress: &mut dyn FnMut(&str, u64, u64) -> Result<()>,
-    ) -> Result<()> {
-        let started: Value = self
-            .post_to("api/v1/models/download")
-            .send_json(json!({ "model": self.cfg.model }))
-            .map_err(|err| self.describe(err))?
-            .into_json()?;
-        let total = started["total_size_bytes"].as_u64().unwrap_or(0);
-        let Some(job) = started["job_id"].as_str() else {
-            // "already_downloaded"
-            return progress("success", total, total);
-        };
-        loop {
-            let status: Value = self
-                .get(&format!("api/v1/models/download/status/{job}"))
-                .call()
-                .map_err(|err| self.describe(err))?
-                .into_json()?;
-            let state = status["status"].as_str().unwrap_or("");
-            let total = status["total_size_bytes"].as_u64().unwrap_or(total);
-            let done = status["downloaded_bytes"].as_u64().unwrap_or(0);
-            progress(state, done, total)?;
-            match state {
-                "completed" => return Ok(()),
-                "failed" => bail!("LM Studio could not download {}", self.cfg.model),
-                _ => std::thread::sleep(Duration::from_secs(1)),
-            }
-        }
+        let agent = ureq::AgentBuilder::new()
+            .timeout_connect(Duration::from_secs(15))
+            .timeout_read(Duration::from_secs(120))
+            .build();
+        crate::llama::download(&agent, crate::llama::HUB, &self.cfg.model, progress)?;
+        Ok(())
     }
 
     /// A GET to `path`, with the API key when there is one.
@@ -488,19 +438,28 @@ impl HttpLlm {
     }
 
     fn auth(&self, req: ureq::Request) -> ureq::Request {
-        match &self.api_key {
+        let key = match self.cfg.provider {
+            Provider::Llamacpp => self
+                .llama_key
+                .get_or_init(|| crate::llama::key().ok())
+                .as_ref(),
+            Provider::Openai => self.api_key.as_ref(),
+        };
+        match key {
             Some(key) => req.set("Authorization", &format!("Bearer {key}")),
             None => req,
         }
     }
 
+    /// llama.cpp's address is the server itself (`/health`, `/props`,
+    /// `/v1/...`); another endpoint's already ends in its API's root (`/v1`).
     fn url(&self, path: &str) -> String {
-        let mut base = self.cfg.base_url.trim_end_matches('/');
-        if self.cfg.provider == Provider::Lmstudio {
-            // Its own API lives next to the OpenAI-compatible `/v1`.
-            base = base.trim_end_matches("/v1");
+        let base = self.cfg.base_url.trim_end_matches('/');
+        match self.cfg.provider {
+            Provider::Llamacpp if path == "health" || path == "props" => format!("{base}/{path}"),
+            Provider::Llamacpp => format!("{base}/v1/{path}"),
+            Provider::Openai => format!("{base}/{path}"),
         }
-        format!("{base}/{path}")
     }
 
     fn body(&self, messages: &[Message], format: &Format, stream: bool) -> Value {
@@ -510,65 +469,35 @@ impl HttpLlm {
             Format::Text => (0.4, TEXT_MAX_TOKENS),
             Format::Json { max_tokens, .. } => (0.0, *max_tokens),
         };
-        match self.cfg.provider {
-            Provider::Ollama => {
-                // Models that think first (Gemma 4, Qwen 3) spend most of a reply
-                // on hidden reasoning: a 7-entry mapping took over five minutes
-                // with gemma4:12b. The prompts ask for short, structured answers,
-                // so thinking is off; models without it ignore the field.
-                let mut body = json!({
-                    "model": self.cfg.model,
-                    "messages": messages,
-                    "stream": stream,
-                    "think": false,
-                    "options": {
-                        "num_ctx": self.cfg.context_tokens,
-                        "temperature": temperature,
-                        "num_predict": max_tokens,
-                    },
-                });
-                if let Format::Json { schema, .. } = format {
-                    body["format"] = schema.clone();
+        let mut body = json!({
+            "model": self.cfg.model,
+            "messages": messages,
+            "stream": stream,
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+        });
+        if self.no_reasoning.get() {
+            // Gemma 4 thinks first by default: in llama.cpp it spent a
+            // whole 200-token answer on hidden reasoning and wrote nothing.
+            body["reasoning_effort"] = json!("none");
+        }
+        if let Format::Json { schema, .. } = format {
+            match self.json_mode.get() {
+                2 => {
+                    body["response_format"] = json!({
+                        "type": "json_schema",
+                        "json_schema": { "name": "reply", "schema": schema },
+                    })
                 }
-                body
-            }
-            Provider::Openai | Provider::Lmstudio => {
-                let mut body = json!({
-                    "model": self.cfg.model,
-                    "messages": messages,
-                    "stream": stream,
-                    "temperature": temperature,
-                    "max_tokens": max_tokens,
-                });
-                if self.no_reasoning.get() {
-                    // LM Studio runs Gemma 4 and Qwen 3.5 with thinking on:
-                    // 130 hidden tokens before a three-word answer.
-                    body["reasoning_effort"] = json!("none");
-                }
-                if let Format::Json { schema, .. } = format {
-                    match self.json_mode.get() {
-                        2 => {
-                            body["response_format"] = json!({
-                                "type": "json_schema",
-                                "json_schema": { "name": "reply", "schema": schema },
-                            })
-                        }
-                        1 => body["response_format"] = json!({ "type": "json_object" }),
-                        _ => {}
-                    }
-                }
-                body
+                1 => body["response_format"] = json!({ "type": "json_object" }),
+                _ => {}
             }
         }
+        body
     }
 
     fn post(&self, body: &Value) -> Result<ureq::Response> {
-        let path = match self.cfg.provider {
-            Provider::Ollama => "api/chat",
-            Provider::Openai => "chat/completions",
-            Provider::Lmstudio => "v1/chat/completions",
-        };
-        self.post_to(path)
+        self.post_to("chat/completions")
             .send_json(body)
             .map_err(|err| self.describe(err))
     }
@@ -577,24 +506,11 @@ impl HttpLlm {
         match err {
             ureq::Error::Status(code, resp) => {
                 let body = resp.into_string().unwrap_or_default();
-                let hint = match self.cfg.provider {
-                    Provider::Ollama if code == 404 => format!(
-                        " (is the model pulled? try `ollama pull {}`)",
-                        self.cfg.model
-                    ),
-                    Provider::Lmstudio if code == 404 || code == 400 => {
-                        format!(" (is {} downloaded in LM Studio?)", self.cfg.model)
-                    }
-                    _ => String::new(),
-                };
-                anyhow!("LLM request failed with HTTP {code}{hint}: {}", body.trim())
+                anyhow!("LLM request failed with HTTP {code}: {}", body.trim())
             }
             ureq::Error::Transport(t) => {
                 let hint = match self.cfg.provider {
-                    Provider::Ollama => " Is Ollama running (`ollama serve`)?",
-                    Provider::Lmstudio => {
-                        " Is LM Studio installed (https://lmstudio.ai) with its server on? Start it with `lms server start`, or in LM Studio's Developer tab."
-                    }
+                    Provider::Llamacpp => " Upleveler starts llama.cpp when it is needed; run `upleveler init` to check the setup.",
                     Provider::Openai => "",
                 };
                 anyhow!("could not reach {}: {t}.{hint}", self.cfg.base_url)
@@ -606,7 +522,7 @@ impl HttpLlm {
 impl HttpLlm {
     /// Makes `complete` stop as soon as `cancel` is set: replies are then
     /// streamed and the connection is dropped at the next token, which also
-    /// stops the model (Ollama ends generation when the client goes away).
+    /// stops the model (llama.cpp ends generation when the client goes away).
     pub fn with_cancel(mut self, cancel: Arc<AtomicBool>) -> Self {
         self.cancel = Some(cancel);
         self
@@ -618,19 +534,15 @@ impl HttpLlm {
             .is_some_and(|c| c.load(Ordering::Relaxed))
     }
 
-    /// Posts. An OpenAI-compatible server that rejects a JSON schema is asked
-    /// for any JSON object instead, and then for plain text.
+    /// Posts. A server that rejects a JSON schema is asked for any JSON
+    /// object instead, and then for plain text.
     fn post_chat(
         &self,
         messages: &[Message],
         format: &Format,
         stream: bool,
     ) -> Result<ureq::Response> {
-        if self.cfg.provider == Provider::Lmstudio && !self.ready.get() {
-            // LM Studio would load the model on this request with its own
-            // default context, which can be too small for our prompts.
-            self.preload()?;
-        }
+        self.preload()?;
         loop {
             match self.post(&self.body(messages, format, stream)) {
                 Err(err)
@@ -642,7 +554,6 @@ impl HttpLlm {
                 }
                 Err(err)
                     if *format != Format::Text
-                        && self.cfg.provider.openai_style()
                         && self.json_mode.get() > 0
                         && rejects_format(&err) =>
                 {
@@ -653,7 +564,8 @@ impl HttpLlm {
         }
     }
 
-    /// Reads a streamed reply; `on_token` returns false to stop early.
+    /// Reads a streamed reply (server-sent events); `on_token` returns false
+    /// to stop early.
     fn read_stream(
         &self,
         resp: ureq::Response,
@@ -663,13 +575,8 @@ impl HttpLlm {
         let mut out = String::new();
         for line in reader.lines() {
             let line = line?;
-            let line = line.trim();
-            let payload = match self.cfg.provider {
-                Provider::Ollama => line,
-                Provider::Openai | Provider::Lmstudio => match line.strip_prefix("data:") {
-                    Some(p) => p.trim(),
-                    None => continue,
-                },
+            let Some(payload) = line.trim().strip_prefix("data:").map(str::trim) else {
+                continue;
             };
             if payload.is_empty() {
                 continue;
@@ -679,20 +586,11 @@ impl HttpLlm {
             }
             let value: Value = serde_json::from_str(payload)
                 .with_context(|| format!("bad stream chunk: {payload}"))?;
-            let token = match self.cfg.provider {
-                Provider::Ollama => value["message"]["content"].as_str(),
-                Provider::Openai | Provider::Lmstudio => {
-                    value["choices"][0]["delta"]["content"].as_str()
-                }
-            };
-            if let Some(token) = token {
+            if let Some(token) = value["choices"][0]["delta"]["content"].as_str() {
                 out.push_str(token);
                 if !on_token(token) {
                     break;
                 }
-            }
-            if value["done"].as_bool() == Some(true) {
-                break;
             }
         }
         Ok(out)
@@ -716,11 +614,7 @@ impl Llm for HttpLlm {
             .post_chat(messages, format, false)?
             .into_json()
             .context("LLM returned a non-JSON response")?;
-        let content = match self.cfg.provider {
-            Provider::Ollama => &value["message"]["content"],
-            Provider::Openai | Provider::Lmstudio => &value["choices"][0]["message"]["content"],
-        };
-        content
+        value["choices"][0]["message"]["content"]
             .as_str()
             .map(str::to_string)
             .with_context(|| format!("unexpected LLM response: {value}"))
@@ -830,35 +724,38 @@ mod tests {
         String::from_utf8_lossy(&data).to_string()
     }
 
-    /// A fake Ollama that streams `tokens` (then `done`), one every `gap`.
-    fn fake_ollama(tokens: Vec<&'static str>, gap: Duration) -> String {
+    /// A fake OpenAI-compatible server that streams `tokens` as server-sent
+    /// events, one every `gap`.
+    fn fake_stream(tokens: Vec<&'static str>, gap: Duration) -> String {
         use std::io::Write;
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
         std::thread::spawn(move || {
             let (mut socket, _) = listener.accept().unwrap();
             read_request(&mut socket);
-            let _ = socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: application/x-ndjson\r\nConnection: close\r\n\r\n");
+            let _ = socket.write_all(
+                b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n",
+            );
             for token in tokens {
                 let line = format!(
-                    "{}\n",
-                    json!({ "message": { "content": token }, "done": false })
+                    "data: {}\n\n",
+                    json!({ "choices": [{ "delta": { "content": token } }] })
                 );
                 if socket.write_all(line.as_bytes()).is_err() {
                     return; // the client hung up: that is the point of cancelling
                 }
                 std::thread::sleep(gap);
             }
-            let _ = socket.write_all(b"{\"message\":{\"content\":\"\"},\"done\":true}\n");
+            let _ = socket.write_all(b"data: [DONE]\n\n");
         });
-        format!("http://{addr}")
+        format!("http://{addr}/v1")
     }
 
     fn client(base_url: String) -> HttpLlm {
         HttpLlm::new(&LlmConfig {
-            provider: Provider::Ollama,
+            provider: Provider::Openai,
             base_url,
-            model: "gemma4:12b".into(),
+            model: "m".into(),
             ..LlmConfig::default()
         })
         .unwrap()
@@ -869,16 +766,34 @@ mod tests {
     }
 
     #[test]
-    fn ollama_requests_carry_the_schema_and_a_cap() {
-        let llm = client("http://localhost:11434".into());
-        let body = llm.body(&[Message::user("x")], &Format::json(ok_schema(), 20), false);
-        assert_eq!(body["think"], json!(false));
-        assert_eq!(body["format"], ok_schema());
-        assert_eq!(body["options"]["num_predict"], json!(20));
-        assert_eq!(body["options"]["temperature"], json!(0.0));
-        let text = llm.body(&[Message::user("x")], &Format::Text, true);
-        assert!(text.get("format").is_none());
-        assert_eq!(text["options"]["num_predict"], json!(TEXT_MAX_TOKENS));
+    fn requests_carry_the_schema_a_cap_and_no_thinking_for_llama_cpp() {
+        let llama = HttpLlm::new(&LlmConfig::default()).unwrap();
+        let body = llama.body(&[Message::user("x")], &Format::json(ok_schema(), 20), false);
+        assert_eq!(body["reasoning_effort"], json!("none"));
+        assert_eq!(
+            body["response_format"]["json_schema"]["schema"],
+            ok_schema()
+        );
+        assert_eq!(body["max_tokens"], json!(20));
+        assert_eq!(body["temperature"], json!(0.0));
+        let text = llama.body(&[Message::user("x")], &Format::Text, true);
+        assert!(text.get("response_format").is_none());
+        assert_eq!(text["max_tokens"], json!(TEXT_MAX_TOKENS));
+        assert_eq!(
+            llama.url("chat/completions"),
+            "http://127.0.0.1:4748/v1/chat/completions"
+        );
+        assert_eq!(llama.url("props"), "http://127.0.0.1:4748/props");
+        // Another server is not asked about thinking.
+        let other = client("http://localhost:8080/v1".into());
+        assert!(other
+            .body(&[Message::user("x")], &Format::Text, false)
+            .get("reasoning_effort")
+            .is_none());
+        assert_eq!(
+            other.url("chat/completions"),
+            "http://localhost:8080/v1/chat/completions"
+        );
     }
 
     #[test]
@@ -897,20 +812,11 @@ mod tests {
     }
 
     #[test]
-    fn openai_servers_fall_back_from_schemas_to_json_to_text() {
-        let llm = HttpLlm::new(&LlmConfig {
-            provider: Provider::Openai,
-            base_url: "http://localhost:1234/v1".into(),
-            ..LlmConfig::default()
-        })
-        .unwrap();
+    fn servers_fall_back_from_schemas_to_json_to_text() {
+        let llm = client("http://localhost:8080/v1".into());
         let format = Format::json(ok_schema(), 20);
         let body = |llm: &HttpLlm| llm.body(&[Message::user("x")], &format, false);
         assert_eq!(body(&llm)["response_format"]["type"], json!("json_schema"));
-        assert_eq!(
-            body(&llm)["response_format"]["json_schema"]["schema"],
-            ok_schema()
-        );
         assert_eq!(body(&llm)["max_tokens"], json!(20));
         llm.json_mode.set(1);
         assert_eq!(body(&llm)["response_format"]["type"], json!("json_object"));
@@ -920,7 +826,7 @@ mod tests {
 
     #[test]
     fn cancellable_complete_reads_the_whole_stream() {
-        let url = fake_ollama(vec!["{\"ok\"", ": ", "true}"], Duration::from_millis(1));
+        let url = fake_stream(vec!["{\"ok\"", ": ", "true}"], Duration::from_millis(1));
         let llm = client(url).with_cancel(Arc::new(AtomicBool::new(false)));
         let out: Out = complete_json(&llm, vec![Message::user("x")], ok_schema(), 20).unwrap();
         assert!(out.ok);
@@ -929,7 +835,7 @@ mod tests {
     #[test]
     fn cancel_stops_a_reply_mid_way() {
         let endless = vec!["word "; 10_000];
-        let url = fake_ollama(endless, Duration::from_millis(30));
+        let url = fake_stream(endless, Duration::from_millis(30));
         let cancel = Arc::new(AtomicBool::new(false));
         let llm = client(url).with_cancel(cancel.clone());
         let flag = cancel.clone();
@@ -958,26 +864,10 @@ mod tests {
         );
     }
 
-    /// A fake server that answers every request with `lines`, one connection each.
-    fn fake_server(answers: Vec<Vec<String>>) -> String {
-        use std::io::Write;
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let addr = listener.local_addr().unwrap();
-        std::thread::spawn(move || {
-            for lines in answers {
-                let (mut socket, _) = listener.accept().unwrap();
-                read_request(&mut socket);
-                let _ = socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: application/x-ndjson\r\nConnection: close\r\n\r\n");
-                for line in lines {
-                    let _ = socket.write_all(format!("{line}\n").as_bytes());
-                }
-            }
-        });
-        format!("http://{addr}")
-    }
-
     /// A fake server answering one request per answer, in order; returns its
-    /// URL and the request lines (method, path, body) it saw.
+    /// address and the request lines (method, path, key, body) it saw. An
+    /// answer is a JSON body, a string sent as it is (a stream), or a number:
+    /// an HTTP status with no body.
     fn recording_server(
         answers: Vec<Value>,
     ) -> (String, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
@@ -992,32 +882,42 @@ mod tests {
                 let request = read_request(&mut socket);
                 let first = request.lines().next().unwrap_or("").to_string();
                 let body = request.split("\r\n\r\n").nth(1).unwrap_or("").to_string();
-                let key = if request.to_lowercase().contains("authorization: bearer") {
-                    " [key]"
-                } else {
-                    ""
-                };
+                let key = request
+                    .lines()
+                    .find_map(|l| l.strip_prefix("Authorization: Bearer "))
+                    .map_or(String::new(), |k| {
+                        format!(" [key {}]", &k[..4.min(k.len())])
+                    });
                 log.lock().unwrap().push(format!("{first}{key} {body}"));
-                // A string is sent as it is (a stream); anything else as JSON.
-                let body = match answer {
-                    Value::String(raw) => raw,
-                    other => other.to_string(),
+                let (status, body) = match answer {
+                    Value::Number(code) => (code.to_string(), String::new()),
+                    Value::String(raw) => ("200".into(), raw),
+                    other => ("200".into(), other.to_string()),
                 };
                 let _ = socket.write_all(
                     format!(
-                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        "HTTP/1.1 {status} X\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
                         body.len()
                     )
                     .as_bytes(),
                 );
             }
         });
-        (format!("http://{addr}/v1"), seen)
+        (format!("http://{addr}"), seen)
     }
 
-    fn lmstudio(url: String, model: &str) -> HttpLlm {
+    /// Tests that talk to a fake llama.cpp share one llama folder (for its key).
+    fn llama_dir() -> &'static std::path::Path {
+        static DIR: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceLock::new();
+        let dir = DIR.get_or_init(|| tempfile::tempdir().unwrap());
+        std::env::set_var("UPLEVELER_LLAMA_DIR", dir.path());
+        dir.path()
+    }
+
+    fn llama(url: String, model: &str) -> HttpLlm {
+        llama_dir();
         HttpLlm::new(&LlmConfig {
-            provider: Provider::Lmstudio,
+            provider: Provider::Llamacpp,
             base_url: url,
             model: model.into(),
             ..LlmConfig::default()
@@ -1025,73 +925,24 @@ mod tests {
         .unwrap()
     }
 
-    #[test]
-    fn lmstudio_lists_loads_and_downloads_through_its_own_api() {
-        let models = json!({ "models": [
-            { "type": "llm", "key": "google/gemma-4-12b", "loaded_instances": [
-                { "id": "google/gemma-4-12b", "config": { "context_length": 4096 } }
-            ] },
-            { "type": "embedding", "key": "nomic-embed", "loaded_instances": [] },
-        ] });
-        let (url, _) = recording_server(vec![models.clone()]);
-        assert_eq!(
-            lmstudio(url, "x").list_models().unwrap(),
-            vec!["google/gemma-4-12b"],
-            "embedding models are left out"
-        );
-
-        // Loaded with a smaller context than ours: unloaded, then loaded again.
-        let (url, seen) = recording_server(vec![models, json!({}), json!({ "status": "loaded" })]);
-        lmstudio(url, "google/gemma-4-12b").preload().unwrap();
-        let seen = seen.lock().unwrap().clone();
-        assert!(seen[0].starts_with("GET /api/v1/models "), "{seen:?}");
-        assert!(
-            seen[1].starts_with("POST /api/v1/models/unload "),
-            "{seen:?}"
-        );
-        assert!(
-            seen[2].starts_with("POST /api/v1/models/load ")
-                && seen[2].contains("\"context_length\":8192"),
-            "{seen:?}"
-        );
-
-        // A missing model says how to get it.
-        let (url, _) = recording_server(vec![json!({ "models": [] })]);
-        let err = lmstudio(url, "qwen/qwen3.5-9b").preload().unwrap_err();
-        assert!(err.to_string().contains("lms get qwen/qwen3.5-9b"), "{err}");
-
-        // A download is followed until it completes.
-        let (url, seen) = recording_server(vec![
-            json!({ "job_id": "job_1", "status": "downloading", "total_size_bytes": 100 }),
-            json!({ "status": "downloading", "downloaded_bytes": 40, "total_size_bytes": 100 }),
-            json!({ "status": "completed", "downloaded_bytes": 100, "total_size_bytes": 100 }),
-        ]);
-        let mut steps = Vec::new();
-        lmstudio(url, "google/gemma-4-12b")
-            .pull(&mut |state, done, total| {
-                steps.push((state.to_string(), done, total));
-                Ok(())
-            })
-            .unwrap();
-        assert_eq!(steps.last(), Some(&("completed".to_string(), 100, 100)));
-        assert!(seen.lock().unwrap()[1].starts_with("GET /api/v1/models/download/status/job_1 "));
+    fn props(model: &str, context: u64) -> Value {
+        json!({ "model_alias": model, "default_generation_settings": { "n_ctx": context } })
     }
 
     #[test]
-    fn lmstudio_answers_come_from_its_openai_endpoint() {
-        let loaded = json!({ "models": [{ "type": "llm", "key": "m", "loaded_instances": [
-            { "id": "m", "config": { "context_length": 8192 } }
-        ] }] });
+    fn llama_cpp_answers_once_its_server_runs_our_model() {
         let answer = json!({ "choices": [{ "message": { "content": "{\"ok\": true}" } }] });
-        let (url, seen) = recording_server(vec![loaded, answer.clone(), answer]);
-        let llm = lmstudio(url, "m");
+        let (url, seen) = recording_server(vec![props("acme/tiny", 8192), answer.clone(), answer]);
+        let llm = llama(url, "acme/tiny");
         for _ in 0..2 {
             let out: Out = complete_json(&llm, vec![Message::user("x")], ok_schema(), 20).unwrap();
             assert!(out.ok);
         }
         let seen = seen.lock().unwrap();
-        // The model is checked once, before the first answer.
-        assert!(seen[0].starts_with("GET /api/v1/models "), "{seen:?}");
+        let key = crate::llama::key().unwrap();
+        let mark = format!("[key {}]", &key[..4]);
+        // The server is checked once, before the first answer.
+        assert!(seen[0].starts_with("GET /props "), "{seen:?}");
         assert!(
             seen[1].starts_with("POST /v1/chat/completions "),
             "{seen:?}"
@@ -1100,86 +951,86 @@ mod tests {
             seen[2].starts_with("POST /v1/chat/completions "),
             "{seen:?}"
         );
-        assert!(seen[1].contains("json_schema"), "{seen:?}");
         assert!(
-            seen[1].contains("\"reasoning_effort\":\"none\""),
-            "{seen:?}"
+            seen.iter().all(|l| l.contains(&mark)),
+            "every request carries the key: {seen:?}"
+        );
+        assert!(
+            seen[1].contains("json_schema") && seen[1].contains("\"reasoning_effort\":\"none\"")
         );
     }
 
     #[test]
-    fn lmstudio_streams_after_the_same_preparation_and_sends_the_key() {
-        let loaded = json!({ "models": [{ "type": "llm", "key": "m", "loaded_instances": [
-            { "id": "m", "config": { "context_length": 4096 } }
-        ] }] });
+    fn llama_cpp_never_takes_over_a_server_it_did_not_start() {
+        // Another model, or a smaller context, in a server someone else runs.
+        let (url, _) = recording_server(vec![props("other/model", 8192)]);
+        let err = llama(url, "acme/tiny").preload().unwrap_err().to_string();
+        assert!(
+            err.contains("another llama.cpp server") && err.contains("other/model"),
+            "{err}"
+        );
+        let (url, _) = recording_server(vec![json!(401)]);
+        let err = llama(url, "acme/tiny").preload().unwrap_err().to_string();
+        assert!(err.contains("started outside Upleveler"), "{err}");
+    }
+
+    #[test]
+    fn llama_cpp_says_when_the_model_is_not_downloaded() {
+        // Nothing listens on port 9, and the model was never downloaded.
+        let err = llama("http://127.0.0.1:9".into(), "acme/never-downloaded")
+            .preload()
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("not downloaded yet") && err.contains("upleveler init"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn other_servers_stream_with_their_own_key() {
         let stream = Value::String(
             "data: {\"choices\":[{\"delta\":{\"content\":\"Merhaba\"}}]}\n\ndata: [DONE]\n\n"
                 .into(),
         );
-        let (url, seen) = recording_server(vec![loaded, json!({}), json!({}), stream]);
-        std::env::set_var("UPLEVELER_TEST_LMSTUDIO_KEY", "test-key"); // gitleaks:allow
+        let (url, seen) = recording_server(vec![stream]);
+        std::env::set_var("UPLEVELER_TEST_SERVER_KEY", "test-key"); // gitleaks:allow
         let llm = HttpLlm::new(&LlmConfig {
-            provider: Provider::Lmstudio,
-            base_url: url,
+            provider: Provider::Openai,
+            base_url: format!("{url}/v1"),
             model: "m".into(),
-            api_key_env: Some("UPLEVELER_TEST_LMSTUDIO_KEY".into()),
+            api_key_env: Some("UPLEVELER_TEST_SERVER_KEY".into()),
             ..LlmConfig::default()
         })
         .unwrap();
         let out = llm.stream(&[Message::user("x")], &mut |_| true).unwrap();
         assert_eq!(out, "Merhaba");
         let seen = seen.lock().unwrap();
-        let paths: Vec<&str> = seen
-            .iter()
-            .map(|l| l.split(' ').nth(1).unwrap_or(""))
-            .collect();
-        assert_eq!(
-            paths,
-            vec![
-                "/api/v1/models",
-                "/api/v1/models/unload",
-                "/api/v1/models/load",
-                "/v1/chat/completions"
-            ]
+        assert!(
+            seen[0].starts_with("POST /v1/chat/completions ") && seen[0].contains("[key test]"),
+            "{seen:?}"
         );
-        assert!(seen.iter().all(|l| l.contains("[key]")), "{seen:?}");
     }
 
     #[test]
-    fn pull_reports_progress_and_errors() {
-        let url = fake_server(vec![vec![
-            json!({ "status": "pulling manifest" }).to_string(),
-            json!({ "status": "pulling abc", "completed": 50, "total": 100 }).to_string(),
-            json!({ "status": "success" }).to_string(),
-        ]]);
-        let mut seen = Vec::new();
-        client(url)
-            .pull(&mut |status, done, total| {
-                seen.push((status.to_string(), done, total));
-                Ok(())
-            })
-            .unwrap();
-        assert_eq!(seen[1], ("pulling abc".to_string(), 50, 100));
-
-        let url = fake_server(vec![vec![
-            json!({ "error": "file does not exist" }).to_string()
-        ]]);
-        let err = client(url).pull(&mut |_, _, _| Ok(())).unwrap_err();
-        assert!(err.to_string().contains("file does not exist"), "{err}");
+    fn other_servers_list_their_models_and_cannot_download() {
+        let (url, _) = recording_server(vec![json!({ "data": [{ "id": "b" }, { "id": "a" }] })]);
+        let llm = client(format!("{url}/v1"));
+        assert_eq!(llm.list_models().unwrap(), vec!["a", "b"]);
+        assert!(llm.pull(&mut |_, _, _| Ok(())).is_err());
     }
 
     #[test]
-    fn check_loads_then_asks() {
-        let url = fake_server(vec![
-            vec![json!({ "done_reason": "load", "done": true }).to_string()],
-            vec![json!({ "message": { "content": "{\"ok\": true}" }, "done": true }).to_string()],
-        ]);
-        assert!(client(url).check().is_ok());
+    fn check_asks_a_tiny_question() {
+        let answer = json!({ "choices": [{ "message": { "content": "{\"ok\": true}" } }] });
+        let (url, _) = recording_server(vec![answer]);
+        assert!(client(format!("{url}/v1")).check().is_ok());
     }
 
     #[test]
     fn refuses_remote_without_opt_in() {
         let cfg = LlmConfig {
+            provider: Provider::Openai,
             base_url: "https://llm.example.com/v1".into(),
             ..LlmConfig::default()
         };

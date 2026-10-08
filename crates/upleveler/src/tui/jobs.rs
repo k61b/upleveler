@@ -30,7 +30,7 @@ pub enum Job {
     /// A ladder document, and what each sheet of a workbook is for.
     LadderImport(PathBuf, Vec<(String, crate::ladder::SheetRole)>),
     Models(LlmConfig),
-    /// Downloads the model named in the config (Ollama).
+    /// Downloads the model named in the config (llama.cpp).
     Pull(LlmConfig),
 }
 

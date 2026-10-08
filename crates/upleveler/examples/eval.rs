@@ -1,11 +1,12 @@
 //! Runs the first setup on the sample files with a real model and scores what
 //! it did, to compare models and providers on the same work:
 //!
-//!     cargo run --release --example eval                          # LM Studio, google/gemma-4-e4b
-//!     cargo run --release --example eval -- --model qwen/qwen3.5-9b
-//!     cargo run --release --example eval -- --provider ollama --model gemma4:12b
+//!     cargo run --release --example eval                          # llama.cpp, Gemma 4 E4B
+//!     cargo run --release --example eval -- --model unsloth/gemma-4-E4B-it-GGUF
 //!     cargo run --release --example eval -- --provider openai \
 //!         --base-url http://localhost:8000/v1 --model <name>
+//!
+//! With llama.cpp the model is downloaded first if it is not yet.
 //!
 //! Everything runs against a temporary data folder; nothing leaves this computer
 //! unless `--base-url` points elsewhere.
@@ -56,8 +57,7 @@ fn arg(name: &str) -> Option<String> {
 fn main() -> anyhow::Result<()> {
     let provider = match arg("--provider").as_deref() {
         Some("openai") => Provider::Openai,
-        Some("ollama") => Provider::Ollama,
-        _ => Provider::Lmstudio,
+        _ => Provider::Llamacpp,
     };
     let home = tempfile::tempdir()?;
     let files = write_all(&home.path().join("files"));
@@ -90,6 +90,19 @@ fn main() -> anyhow::Result<()> {
         "Evaluating {model} ({:?} at {})",
         provider, session.cfg.llm.base_url
     );
+    if provider == Provider::Llamacpp {
+        llm.inner.pull(&mut |state, done, total| {
+            if state == "downloading" && total > 0 {
+                eprint!(
+                    "\r  downloading {} of {} MB",
+                    done / 1_000_000,
+                    total / 1_000_000
+                );
+            }
+            Ok(())
+        })?;
+        eprintln!();
+    }
 
     // Loading and a first answer.
     let started = Instant::now();

@@ -136,7 +136,7 @@ fn hero() -> Markup {
                     (ui::button(Button::Primary, "Install Upleveler", Some("#install")))
                     (ui::button(Button::Ghost, "View on GitHub", Some(REPO)))
                 }
-                p.hint { "Needs LM Studio and about 16 GB of RAM. macOS, Linux and Windows." }
+                p.hint { "Needs llama.cpp and about 16 GB of RAM. macOS, Linux and Windows." }
             }
             div.hero-panel.rise.rise-2 {
                 (ui::terminal("upleveler", &session, None))
@@ -247,9 +247,9 @@ fn privacy() -> Markup {
         ),
         (
             "AI model",
-            "localhost:1234",
+            "127.0.0.1:4748",
             true,
-            "LM Studio on your machine, by default. Ollama works too.",
+            "llama.cpp on your machine, started by Upleveler and reachable only from it.",
         ),
         (
             "Network",
@@ -293,7 +293,7 @@ fn install() -> Markup {
             div.stack {
                 (ui::label("Install"))
                 (ui::heading(2, "Install it with", "one command", ""))
-                p.lead { "On macOS and Linux the script installs the latest release and checks its checksum. It needs LM Studio and about 16 GB of RAM. The first run downloads the model and asks for your report language, ladder and levels." }
+                p.lead { "On macOS and Linux the script installs the latest release and checks its checksum. It needs llama.cpp (`brew install llama.cpp`) and about 16 GB of RAM. The first run downloads the model from Hugging Face and asks for your report language, ladder and levels." }
                 p.hint { "Windows and from-source steps are in the README." }
                 div.actions {
                     (ui::button(Button::Outline, "Read the README", Some(&format!("{REPO}#readme"))))

@@ -70,4 +70,4 @@ case ":$PATH:" in
     *":$DIR:"*) ;;
     *) echo "Add $DIR to your PATH, for example: echo 'export PATH=\"$DIR:\$PATH\"' >> ~/.profile" ;;
 esac
-echo "Next: install LM Studio (https://lmstudio.ai) and open it once, then run 'upleveler'."
+echo "Next: install llama.cpp ('brew install llama.cpp', or https://github.com/ggml-org/llama.cpp/releases), then run 'upleveler'."
