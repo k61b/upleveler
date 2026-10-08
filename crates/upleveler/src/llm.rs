@@ -302,9 +302,10 @@ impl HttpLlm {
                 // one waits here and then finds it loaded.
                 static LOADING: std::sync::Mutex<()> = std::sync::Mutex::new(());
                 let _one_at_a_time = LOADING.lock().unwrap_or_else(|e| e.into_inner());
-                let list = || self.get("api/v1/models").call();
-                let models: Value = match list() {
-                    Err(ureq::Error::Transport(_)) if self.start_lmstudio() => list(),
+                let models: Value = match self.get("api/v1/models").call() {
+                    Err(ureq::Error::Transport(_)) if self.start_lmstudio() => {
+                        self.get("api/v1/models").call()
+                    }
                     other => other,
                 }
                 .map_err(|err| self.describe(err))?
