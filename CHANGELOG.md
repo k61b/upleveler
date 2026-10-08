@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 2.4.0
 
 Bringing your existing files in works with small local models: your company's ladder workbook and the 1:1 workbook you keep with your lead.
 
