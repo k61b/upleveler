@@ -25,7 +25,7 @@ fn samples(data: &DashboardData) -> Markup {
                 span.label { (ui::marker(Marker::Filled)) "Strong" }
                 span.label { (ui::marker(Marker::Half)) "Partial" }
                 span.label { (ui::marker(Marker::Outline)) "None" }
-                (ui::levels(Some("SD2"), Some("SD3")))
+                (ui::levels(Some("L2"), Some("L3")))
             }
             div.gallery-row {
                 (ui::button(Button::Primary, "Install Upleveler", Some("#")))
@@ -36,16 +36,16 @@ fn samples(data: &DashboardData) -> Markup {
             }
             div.gallery-row {
                 (ui::chip(Chip::Plain, "Ownership"))
-                (ui::chip(Chip::Accent, "Target: SD3"))
+                (ui::chip(Chip::Accent, "Target: L3"))
                 (ui::chip(Chip::Soft, "Gap analysis"))
                 (ui::chip(Chip::Mono, "2026-10-04"))
                 (ui::chip(Chip::Mono, "#incident"))
             }
             (ui::segmented("Levels", &[
-                ("SD1".into(), "#".into(), false),
-                ("SD2".into(), "#".into(), false),
-                ("SD3".into(), "#".into(), true),
-                ("SD4".into(), "#".into(), false),
+                ("L1".into(), "#".into(), false),
+                ("L2".into(), "#".into(), false),
+                ("L3".into(), "#".into(), true),
+                ("L4".into(), "#".into(), false),
             ]))
             (ui::code_block("cargo install --path crates/upleveler --locked"))
             div.stats {
@@ -59,7 +59,7 @@ fn samples(data: &DashboardData) -> Markup {
             }))
             div.grid-2 {
                 (ui::card(Card::Raised, html! {
-                    h3.card-title { "Readiness for SD3" }
+                    h3.card-title { "Readiness for L3" }
                     @if let Some(gap) = &data.gap { (ui::readiness(gap)) }
                 }))
                 (ui::card(Card::Raised, html! {
@@ -89,7 +89,7 @@ fn samples(data: &DashboardData) -> Markup {
                 TermLine::Text("Share the retry design doc"),
                 TermLine::Blank,
                 TermLine::Prompt("/gap"),
-                TermLine::Heading("Gap analysis SD2 → SD3"),
+                TermLine::Heading("Gap analysis L2 → L3"),
                 TermLine::Rating(Marker::Filled, "Ownership", "Leads incidents", 7),
                 TermLine::Rating(Marker::Half, "Technical", "Designs across services", 3),
                 TermLine::Rating(Marker::Outline, "Mentoring", "Mentors juniors", 0),

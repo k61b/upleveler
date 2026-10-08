@@ -193,6 +193,15 @@ impl Store {
             Some(all.remove(pos))
         })
     }
+
+    /// Removes every entry `remove` picks; returns them.
+    pub fn remove_where(&self, remove: impl Fn(&Entry) -> bool) -> Result<Vec<Entry>> {
+        self.update(|all| {
+            let gone: Vec<Entry> = all.iter().filter(|e| remove(e)).cloned().collect();
+            all.retain(|e| !remove(e));
+            gone
+        })
+    }
 }
 
 /// Drops entries already in `existing` and duplicates within `entries`.
@@ -287,9 +296,9 @@ mod tests {
         assert_eq!(loaded[0].links, vec!["https://x.io/pr/1"]);
 
         let mut changed = loaded.clone();
-        changed[1].expectations = vec!["SD3.x.1".into()];
+        changed[1].expectations = vec!["L3.x.1".into()];
         store.rewrite(&changed).unwrap();
-        assert_eq!(store.load().unwrap()[1].expectations, vec!["SD3.x.1"]);
+        assert_eq!(store.load().unwrap()[1].expectations, vec!["L3.x.1"]);
         assert!(!dir.path().join("logs.jsonl.tmp").exists());
     }
 

@@ -25,7 +25,6 @@ const INSTALL_SCRIPT: &str = include_str!("../install.sh");
 
 const INSTALL: &[&str] = &[
     "curl -fsSL https://upleveler.dev/install.sh | sh",
-    "ollama pull gemma4:12b",
     "upleveler",
 ];
 
@@ -109,7 +108,7 @@ fn hero() -> Markup {
         TermLine::Done("Logged for today"),
         TermLine::Blank,
         TermLine::Prompt("/gap"),
-        TermLine::Heading("Gap analysis SD2 → SD3"),
+        TermLine::Heading("Gap analysis L2 → L3"),
         TermLine::Rating(
             Marker::Filled,
             "Ownership",
@@ -137,7 +136,7 @@ fn hero() -> Markup {
                     (ui::button(Button::Primary, "Install Upleveler", Some("#install")))
                     (ui::button(Button::Ghost, "View on GitHub", Some(REPO)))
                 }
-                p.hint { "Needs Ollama and about 16 GB of RAM. macOS, Linux and Windows." }
+                p.hint { "Needs LM Studio and about 16 GB of RAM. macOS, Linux and Windows." }
             }
             div.hero-panel.rise.rise-2 {
                 (ui::terminal("upleveler", &session, None))
@@ -248,9 +247,9 @@ fn privacy() -> Markup {
         ),
         (
             "AI model",
-            "localhost:11434",
+            "localhost:1234",
             true,
-            "Ollama on your machine, by default.",
+            "LM Studio on your machine, by default. Ollama works too.",
         ),
         (
             "Network",
@@ -294,7 +293,7 @@ fn install() -> Markup {
             div.stack {
                 (ui::label("Install"))
                 (ui::heading(2, "Install it with", "one command", ""))
-                p.lead { "On macOS and Linux the script installs the latest release and checks its checksum. It needs Ollama and about 16 GB of RAM. The first run asks for your model, report language, ladder and levels." }
+                p.lead { "On macOS and Linux the script installs the latest release and checks its checksum. It needs LM Studio and about 16 GB of RAM. The first run downloads the model and asks for your report language, ladder and levels." }
                 p.hint { "Windows and from-source steps are in the README." }
                 div.actions {
                     (ui::button(Button::Outline, "Read the README", Some(&format!("{REPO}#readme"))))

@@ -17,57 +17,57 @@ const WORK: &[(&str, &[&str], &[&str])] = &[
     (
         "PAY-412: shipped the circuit breaker for the payments gateway to production",
         &["payments"],
-        &["SD3.ownership.1"],
+        &["L3.ownership.1"],
     ),
     (
         "Led the incident on checkout latency, wrote the timeline and three follow-ups",
         &["incident", "oncall"],
-        &["SD3.ownership.2"],
+        &["L3.ownership.2"],
     ),
     (
         "Closed the last follow-up from the checkout incident: alert on p99 latency",
         &["incident"],
-        &["SD3.ownership.2"],
+        &["L3.ownership.2"],
     ),
     (
         "Design doc: moving invoice generation to a queue, trade-offs for two options",
         &["design"],
-        &["SD3.technical.1"],
+        &["L3.technical.1"],
     ),
     (
         "Paired with @ada on the retry logic in the ledger service",
         &["mentoring"],
-        &["SD3.mentoring.1"],
+        &["L3.mentoring.1"],
     ),
     (
         "Reviewed four pull requests for the notifications team",
         &["review"],
-        &["SD2.collaboration.1"],
+        &["L2.collaboration.1"],
     ),
     (
         "Explained the migration risks to the support leads in plain words",
         &["communication"],
-        &["SD3.communication.1"],
+        &["L3.communication.1"],
     ),
     (
         "On-call week: two pages, both fixed, runbook updated",
         &["oncall"],
-        &["SD3.ownership.1"],
+        &["L3.ownership.1"],
     ),
     (
         "Broke the refunds epic into eight tickets and estimated them with @kai",
         &["planning"],
-        &["SD2.delivery.2"],
+        &["L2.delivery.2"],
     ),
     (
         "Debugged a memory leak in the webhook consumer",
         &["debugging"],
-        &["SD2.technical.1"],
+        &["L2.technical.1"],
     ),
     (
         "Weekly 1:1 with @ada: walked through her first design doc",
         &["mentoring"],
-        &["SD3.mentoring.1"],
+        &["L3.mentoring.1"],
     ),
     (
         "Added contract tests between the cart and pricing services",
@@ -77,12 +77,12 @@ const WORK: &[(&str, &[&str], &[&str])] = &[
     (
         "Wrote the rollout plan for the new tax rules across three services",
         &["design"],
-        &["SD3.technical.1"],
+        &["L3.technical.1"],
     ),
     (
         "Demoed the reconciliation dashboard to finance",
         &["communication"],
-        &["SD3.communication.1"],
+        &["L3.communication.1"],
     ),
     ("Cleaned up feature flags left from Q2", &[], &[]),
     (
@@ -132,7 +132,7 @@ pub fn ladder() -> Ladder {
 }
 
 fn gap(today: NaiveDate, entries: &[Entry], ladder: &Ladder) -> Option<GapSummary> {
-    let level = ladder.level("SD3")?;
+    let level = ladder.level("L3")?;
     let rows = level
         .expectations
         .iter()
@@ -153,20 +153,21 @@ fn gap(today: NaiveDate, entries: &[Entry], ladder: &Ladder) -> Option<GapSummar
                 text: x.text.clone(),
                 rating: rating.into(),
                 count: hits.len(),
+                below: 0,
                 last: hits.iter().map(|e| e.date).max(),
             }
         })
         .collect();
     Some(GapSummary {
         date: today - Duration::days(3),
-        current: Some("SD2".into()),
-        target: "SD3".into(),
+        current: Some("L2".into()),
+        target: "L3".into(),
         rows,
         overview: "Strong on ownership and incidents; mentoring and communication need more written evidence.".into(),
         priorities: vec![
             "Write down the mentoring you already do: pairing sessions, design doc reviews".into(),
             "Present the invoice queue design to the product team and log the outcome".into(),
-            "Ask your manager which cross-team project would show SD3 scope".into(),
+            "Ask your manager which cross-team project would show L3 scope".into(),
         ],
     })
 }
@@ -176,7 +177,7 @@ fn reports(today: NaiveDate) -> Vec<Report> {
         Report::new(
             &format!("gap-{}", today - Duration::days(3)),
             today - Duration::days(3),
-            "# Gap analysis SD2 → SD3\n\nStrong on **ownership** and incidents; mentoring and communication need more written evidence.\n\n## Ownership\n\n- Owns the payments gateway, including on-call health (8 entries)\n- Leads incidents and closes follow-ups (6 entries)\n\n## Next\n\n1. Write down the mentoring you already do\n2. Present the invoice queue design to the product team\n".into(),
+            "# Gap analysis L2 → L3\n\nStrong on **ownership** and incidents; mentoring and communication need more written evidence.\n\n## Ownership\n\n- Owns the payments gateway, including on-call health (8 entries)\n- Leads incidents and closes follow-ups (6 entries)\n\n## Next\n\n1. Write down the mentoring you already do\n2. Present the invoice queue design to the product team\n".into(),
         ),
         Report::new(
             "brag-h2",
@@ -201,8 +202,8 @@ pub fn data(today: NaiveDate) -> DashboardData {
         today,
         entries,
         ladder: Some(ladder),
-        current: Some("SD2".into()),
-        target: Some("SD3".into()),
+        current: Some("L2".into()),
+        target: Some("L3".into()),
         gap,
         reports: reports(today),
         model: "gemma4:12b".into(),
@@ -268,7 +269,7 @@ fn notes(today: NaiveDate) -> Vec<Note> {
             "deniz",
             ago(6),
             NoteKind::OneOnOne,
-            "Asked for a cross-team project that shows SD3 scope",
+            "Asked for a cross-team project that shows L3 scope",
         ),
         Note::new(
             "ada",
@@ -284,7 +285,7 @@ fn goals(today: NaiveDate) -> Goals {
     let year_end = NaiveDate::from_ymd_opt(today.year(), 12, 31).unwrap_or(today);
     let _ = goals.add(
         "Mentor a junior developer through their first on-call",
-        Some("SD3.mentoring.1".into()),
+        Some("L3.mentoring.1".into()),
         Some(year_end),
         today - Duration::days(60),
     );

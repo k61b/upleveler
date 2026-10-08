@@ -154,12 +154,12 @@ fn people_notes_and_goals_from_the_command_line() {
             "junior",
             "developer",
             "-e",
-            "SD3.mentoring.1",
+            "L3.mentoring.1",
             "--due",
             "2099-12-31",
         ],
     );
-    assert!(!run(home, &["goal", "add", "Nope", "-e", "SD9.nope.1"])
+    assert!(!run(home, &["goal", "add", "Nope", "-e", "L9.nope.1"])
         .status
         .success());
     ok(home, &["goal", "add", "Speak at a meetup"]);
@@ -168,7 +168,7 @@ fn people_notes_and_goals_from_the_command_line() {
         edited.contains("Updated goal #1 Mentor a junior developer") && !edited.contains("due"),
         "{edited}"
     );
-    assert!(!run(home, &["goal", "edit", "1", "-e", "SD9.nope.1"])
+    assert!(!run(home, &["goal", "edit", "1", "-e", "L9.nope.1"])
         .status
         .success());
     ok(
@@ -178,7 +178,7 @@ fn people_notes_and_goals_from_the_command_line() {
             "edit",
             "1",
             "-e",
-            "SD3.mentoring.1",
+            "L3.mentoring.1",
             "--due",
             "2099-12-31",
         ],
@@ -202,7 +202,7 @@ fn people_notes_and_goals_from_the_command_line() {
     ok(home, &["log", "-t", "goal-2", "Drafted the talk outline"]);
     let list = ok(home, &["goal", "list"]);
     assert!(
-        list.contains("#1 Mentor a junior developer [SD3.mentoring.1] (due 2099-12-31)"),
+        list.contains("#1 Mentor a junior developer [L3.mentoring.1] (due 2099-12-31)"),
         "{list}"
     );
     assert!(

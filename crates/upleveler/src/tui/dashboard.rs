@@ -746,7 +746,7 @@ mod tests {
     fn tabs_render() {
         let dir = tempfile::tempdir().unwrap();
         let mut session = Session::at(Paths::at(dir.path().to_path_buf())).unwrap();
-        session.cfg.target_level = Some("SD3".into());
+        session.cfg.target_level = Some("L3".into());
         session.save_config().unwrap();
         crate::ladder::Ladder::from_yaml(super::super::app::EXAMPLE_LADDER)
             .unwrap()
@@ -771,7 +771,7 @@ mod tests {
         term.draw(|f| dash.draw(f)).unwrap();
         let s = screen(&term);
         assert!(
-            s.contains("Readiness for SD3") && s.contains("No gap analysis yet"),
+            s.contains("Readiness for L3") && s.contains("No gap analysis yet"),
             "{s}"
         );
         assert!(s.contains("Last 26 weeks") && s.contains("streak"), "{s}");
@@ -796,7 +796,7 @@ mod tests {
         term.draw(|f| dash.draw(f)).unwrap();
         let s = screen(&term);
         assert!(
-            s.contains("SD3 — Software Developer 3") && s.contains("◎ target"),
+            s.contains("L3 — Senior Engineer") && s.contains("◎ target"),
             "{s}"
         );
 

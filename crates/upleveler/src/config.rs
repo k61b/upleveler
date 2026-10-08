@@ -51,8 +51,36 @@ impl Paths {
 pub enum Provider {
     /// Ollama's native API (`/api/chat`), which lets us set the context window.
     Ollama,
-    /// Any OpenAI-compatible `/chat/completions` endpoint (LM Studio, vLLM, company gateways).
+    /// Any OpenAI-compatible `/chat/completions` endpoint (vLLM, company gateways).
     Openai,
+    /// LM Studio: its OpenAI-compatible endpoint for answers, its own API to
+    /// list, load (with our context size) and download models. On a Mac it
+    /// runs MLX models, which are faster there than llama.cpp.
+    Lmstudio,
+}
+
+impl Provider {
+    /// The model the setup suggests (and can download) for this provider.
+    pub fn recommended_model(self) -> &'static str {
+        match self {
+            Provider::Lmstudio => "google/gemma-4-e4b",
+            _ => "gemma4:12b",
+        }
+    }
+
+    /// Where it listens by default.
+    pub fn default_url(self) -> &'static str {
+        match self {
+            Provider::Ollama => "http://localhost:11434",
+            Provider::Openai => "http://localhost:1234/v1",
+            Provider::Lmstudio => "http://localhost:1234",
+        }
+    }
+
+    /// Whether answers go through an OpenAI-compatible endpoint.
+    pub fn openai_style(self) -> bool {
+        self != Provider::Ollama
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -83,9 +111,9 @@ fn default_timeout_secs() -> u64 {
 impl Default for LlmConfig {
     fn default() -> Self {
         Self {
-            provider: Provider::Ollama,
-            base_url: "http://localhost:11434".into(),
-            model: "gemma4:12b".into(),
+            provider: Provider::Lmstudio,
+            base_url: Provider::Lmstudio.default_url().into(),
+            model: Provider::Lmstudio.recommended_model().into(),
             api_key_env: None,
             allow_remote: false,
             context_tokens: default_context_tokens(),
@@ -189,10 +217,13 @@ mod tests {
     fn config_roundtrip_and_defaults() {
         let dir = tempfile::tempdir().unwrap();
         let paths = Paths::at(dir.path().to_path_buf());
-        assert_eq!(Config::load(&paths).unwrap().llm.provider, Provider::Ollama);
+        assert_eq!(
+            Config::load(&paths).unwrap().llm.provider,
+            Provider::Lmstudio
+        );
 
         let cfg = Config {
-            target_level: Some("SD3".into()),
+            target_level: Some("L3".into()),
             llm: LlmConfig {
                 provider: Provider::Openai,
                 ..LlmConfig::default()
@@ -201,7 +232,7 @@ mod tests {
         };
         cfg.save(&paths).unwrap();
         let loaded = Config::load(&paths).unwrap();
-        assert_eq!(loaded.target_level.as_deref(), Some("SD3"));
+        assert_eq!(loaded.target_level.as_deref(), Some("L3"));
         assert_eq!(loaded.llm.provider, Provider::Openai);
     }
 }

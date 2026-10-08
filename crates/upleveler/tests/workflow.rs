@@ -57,10 +57,10 @@ fn scripted(messages: &[Message], _json: bool) -> String {
                 let (n, text) = l.split_once(". ")?;
                 let mut ids = Vec::new();
                 if text.contains("incident") {
-                    ids.push("SD3.ownership.2");
+                    ids.push("L3.ownership.2");
                 }
                 if text.contains("junior") || text.contains("mentor") {
-                    ids.push("SD3.mentoring.1");
+                    ids.push("L3.mentoring.1");
                 }
                 Some(serde_json::json!({ "entry": n.parse::<usize>().ok()?, "expectations": ids }))
             })
@@ -80,8 +80,8 @@ fn import_map_gap_export() {
     let dir = tempfile::tempdir().unwrap();
     let paths = Paths::at(dir.path().join("home"));
     let cfg = Config {
-        current_level: Some("SD2".into()),
-        target_level: Some("SD3".into()),
+        current_level: Some("L2".into()),
+        target_level: Some("L3".into()),
         language: "tr".into(),
         ..Config::default()
     };
@@ -90,8 +90,15 @@ fn import_map_gap_export() {
 
     // Free-text notes.
     let txt = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/old_logs.txt");
-    let collected =
-        import::collect(&txt, Some(&llm), &cfg, today(), &mut upleveler::no_progress).unwrap();
+    let collected = import::collect(
+        &txt,
+        Some(&llm),
+        &cfg,
+        today(),
+        &Default::default(),
+        &mut upleveler::no_progress,
+    )
+    .unwrap();
     let plan = import::plan(&collected.drafts, &HashSet::new(), None);
     assert_eq!(plan.undated.len(), 0);
     let dates: Vec<String> = plan.new.iter().map(|e| e.date.to_string()).collect();
@@ -110,8 +117,15 @@ fn import_map_gap_export() {
     store.append(&plan.new).unwrap();
 
     // Re-importing the reviewed staging file adds nothing new.
-    let again =
-        import::collect(&staging, None, &cfg, today(), &mut upleveler::no_progress).unwrap();
+    let again = import::collect(
+        &staging,
+        None,
+        &cfg,
+        today(),
+        &Default::default(),
+        &mut upleveler::no_progress,
+    )
+    .unwrap();
     let existing: HashSet<String> = store.load().unwrap().into_iter().map(|e| e.id).collect();
     assert_eq!(import::plan(&again.drafts, &existing, None).new.len(), 0);
 
@@ -146,6 +160,7 @@ fn import_map_gap_export() {
         Some(&llm),
         &cfg,
         today(),
+        &Default::default(),
         &mut upleveler::no_progress,
     )
     .unwrap();
@@ -208,7 +223,15 @@ fn import_map_gap_export() {
     let out = dir.path().join("export.xlsx");
     let refs: Vec<_> = reloaded.iter().collect();
     export::write_xlsx(&refs, &out).unwrap();
-    let back = import::collect(&out, None, &cfg, today(), &mut upleveler::no_progress).unwrap();
+    let back = import::collect(
+        &out,
+        None,
+        &cfg,
+        today(),
+        &Default::default(),
+        &mut upleveler::no_progress,
+    )
+    .unwrap();
     assert_eq!(back.drafts.len(), 6);
     let md_export = export::render(&refs, Format::Md).unwrap();
     assert!(md_export.contains("## 2025-10"));

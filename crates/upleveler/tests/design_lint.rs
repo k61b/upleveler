@@ -36,8 +36,8 @@ fn colour_source(file: &Path) -> bool {
 const CAPS_OK: &[&str] = &[
     "AI", "API", "CLI", "CSV", "CSS", "HTML", "JSON", "JSONL", "LLM", "LLMS", "MD", "PDF", "PNG",
     "SVG", "URL", "XLSX", "YAML", "TOML", "HTTP", "HTTPS", "OG", "UTF", "OFL", "SIL", "OK",
-    "README", "ID", "UI", "OS", "RAM", "GPU", "CPU", "WCAG", "AA", "PR", "CI", "SD", "SD1", "SD2",
-    "SD3", "DNS", "TLS", "SSR", "MIT", "AGPL", "GNU", "XSS", "CSP", "GET", "POST",
+    "README", "ID", "UI", "OS", "RAM", "GPU", "CPU", "WCAG", "AA", "PR", "CI", "SD", "L1", "L2",
+    "L3", "DNS", "TLS", "SSR", "MIT", "AGPL", "GNU", "XSS", "CSP", "GET", "POST",
 ];
 
 fn shouting(line: &str) -> bool {
@@ -53,7 +53,7 @@ fn shouting(line: &str) -> bool {
         }
         let found = words
             .find_iter(&text)
-            // Identifiers are not copy: level ids (SD4), ticket ids (PAY-412), path data.
+            // Identifiers are not copy: level ids (L4), ticket ids (PAY-412), path data.
             .filter(|m| {
                 let next = &text[m.end()..];
                 let ticket =

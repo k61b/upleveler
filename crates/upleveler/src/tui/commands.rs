@@ -48,8 +48,8 @@ pub const COMMANDS: &[Command] = &[
     },
     Command {
         name: "import",
-        args: "@file",
-        help: "import old notes (txt, md, csv, xlsx)",
+        args: "@file | remove [file]",
+        help: "import old notes, a 1:1 workbook or goals; or remove an import",
         runs_bare: false,
     },
     Command {

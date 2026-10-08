@@ -147,6 +147,11 @@ pub struct Evidence {
 }
 
 impl DashboardData {
+    /// The files entries were imported from, most recently imported first.
+    pub fn imported(&self) -> Vec<crate::import::ImportedFile> {
+        crate::import::imported_files(&self.entries, &self.notes, &self.goals.goals)
+    }
+
     pub fn load(session: &Session) -> Result<Self> {
         let mut entries = session.entries()?;
         entries.reverse();
@@ -283,10 +288,10 @@ mod tests {
         let r = Report::new(
             "gap-2026-10-04",
             date,
-            "intro\n# Gap analysis SD2 → SD3\nbody".into(),
+            "intro\n# Gap analysis L2 → L3\nbody".into(),
         );
         assert_eq!(r.kind, ReportKind::Gap);
-        assert_eq!(r.title, "Gap analysis SD2 → SD3");
+        assert_eq!(r.title, "Gap analysis L2 → L3");
         let r = Report::new("brag-h2", date, "no heading".into());
         assert_eq!((r.kind, r.title.as_str()), (ReportKind::Brag, "brag h2"));
     }

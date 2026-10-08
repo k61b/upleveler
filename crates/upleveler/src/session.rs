@@ -6,8 +6,9 @@ use crate::config::{is_local_url, Config, Paths};
 use crate::dates::Range;
 use crate::export::{self, Format};
 use crate::goals::{Goal, GoalStatus, Goals};
-use crate::import::{self, Collected, Plan};
-use crate::ladder::Ladder;
+use crate::import::workbook::{Choices, GoalDraft};
+use crate::import::{self, Collected, ImportedFile, Plan};
+use crate::ladder::{Ladder, SheetPlan, SheetRole};
 use crate::llm::{HttpLlm, Llm};
 use crate::people::{normalize_handle, Note, NoteKind, NoteStore, People, Person};
 use crate::store::{Entry, Filter, Store};
@@ -20,6 +21,25 @@ use std::path::{Path, PathBuf};
 
 pub fn today() -> NaiveDate {
     chrono::Local::now().date_naive()
+}
+
+const WHOSE_NOTES: &str =
+    "say whose notes these are: the person's @handle (--person in the command line)";
+
+/// The same words, ignoring case and spacing.
+fn same_words(a: &str, b: &str) -> bool {
+    a.to_lowercase()
+        .split_whitespace()
+        .eq(b.to_lowercase().split_whitespace())
+}
+
+/// `text` cut to at most `max` characters.
+fn clip(text: &str, max: usize) -> String {
+    if text.chars().count() <= max {
+        return text.to_string();
+    }
+    let cut: String = text.chars().take(max - 1).collect();
+    format!("{}…", cut.trim_end())
 }
 
 #[derive(Clone)]
@@ -52,6 +72,44 @@ pub struct ImportPreview {
     pub plan: Plan,
     pub staging: PathBuf,
     pub target: PathBuf,
+    /// Whose notes the notes sheets hold; added to your people as your
+    /// manager if they are not there yet.
+    pub person: Option<String>,
+    /// Notes that are not stored yet.
+    pub notes: Vec<Note>,
+    /// Notes already stored (or repeated in the file).
+    pub note_duplicates: usize,
+    /// Goals that are not stored yet, tied to your target level where possible.
+    pub goals: Vec<GoalDraft>,
+    pub goal_duplicates: usize,
+}
+
+impl ImportPreview {
+    /// True when nothing would be added.
+    pub fn is_empty(&self) -> bool {
+        self.plan.new.is_empty() && self.notes.is_empty() && self.goals.is_empty()
+    }
+}
+
+/// What `Session::apply_import` added, so it can be taken back.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Applied {
+    pub entries: HashSet<String>,
+    pub notes: Vec<String>,
+    pub goals: Vec<u32>,
+    /// The person the import added to your people, if it added one.
+    pub person: Option<String>,
+}
+
+/// What `Session::remove_import` took out.
+pub struct RemovedImport {
+    /// The imported file's name.
+    pub name: String,
+    pub entries: Vec<Entry>,
+    pub notes: Vec<Note>,
+    pub goals: Vec<Goal>,
+    /// The copy of `entries` in the staging folder; importing it puts them back.
+    pub backup: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -402,20 +460,33 @@ impl Session {
     }
 
     /// Reads `file` into drafts and works out what would be added, writing a staging
-    /// file for review. Nothing is added to the log yet.
+    /// file for review. Nothing is added yet. In a workbook, `choices` says
+    /// where each sheet goes and whose notes they are.
     pub fn import_preview(
         &self,
         file: &Path,
         llm: Option<&dyn Llm>,
         into: Option<PathBuf>,
         default_date: Option<NaiveDate>,
+        choices: &Choices,
         progress: Progress,
     ) -> Result<ImportPreview> {
         if !file.exists() {
             bail!("{} does not exist", file.display());
         }
         let staged = import::is_staging(file);
-        let collected = import::collect(file, llm, &self.cfg, today(), progress)?;
+        // Say so before reading anything with the model, which can take minutes.
+        let given = choices.person.as_deref().and_then(normalize_handle);
+        if given.is_none() && !staged && import::sheet::is_sheet(file) {
+            let tables = import::sheet::read_tables(file)?;
+            let alone = tables.len() == 1;
+            if tables.iter().any(|t| {
+                import::workbook::needs_person(t, choices.kind(t, today(), alone), today())
+            }) {
+                return Err(crate::limits::invalid(WHOSE_NOTES));
+            }
+        }
+        let mut collected = import::collect(file, llm, &self.cfg, today(), choices, progress)?;
         let target = into.unwrap_or_else(|| self.paths.logs.clone());
         let existing: HashSet<String> = Store::new(&target)
             .load()?
@@ -428,40 +499,293 @@ impl Session {
         } else {
             import::write_staging(&self.paths.staging, &collected.drafts)?
         };
+
+        let mut person = None;
+        let (mut notes, mut note_duplicates) = (Vec::new(), 0);
+        if !collected.notes.is_empty() {
+            let handle = given
+                .clone()
+                .ok_or_else(|| crate::limits::invalid(WHOSE_NOTES))?;
+            let mut known: Vec<Note> = self.notes()?;
+            for d in &collected.notes {
+                let text = clip(&d.text, crate::limits::TEXT);
+                let mut note = Note::new(&handle, d.date, d.kind, &text);
+                note.done = d.done;
+                note.source = d.source.clone();
+                let same = |n: &Note| {
+                    n.person == note.person
+                        && (n.date == note.date || !d.dated)
+                        && n.kind == note.kind
+                        && same_words(&n.text, &note.text)
+                };
+                if known.iter().any(same) {
+                    note_duplicates += 1;
+                    continue;
+                }
+                known.push(note.clone());
+                notes.push(note);
+            }
+            person = Some(handle);
+        }
+
+        let (mut goals, mut goal_duplicates) = (Vec::new(), 0);
+        if !collected.goals.is_empty() {
+            let mut known: Vec<String> = self.goals()?.goals.into_iter().map(|g| g.text).collect();
+            for g in std::mem::take(&mut collected.goals) {
+                if known.iter().any(|k| same_words(k, &g.text)) {
+                    goal_duplicates += 1;
+                    continue;
+                }
+                known.push(g.text.clone());
+                goals.push(g);
+            }
+            let ladder = self.ladder().unwrap_or(None);
+            let level = self
+                .cfg
+                .target_level
+                .as_deref()
+                .and_then(|t| ladder.as_ref()?.level(t));
+            match level {
+                Some(level) if !goals.is_empty() => {
+                    let warnings = import::workbook::match_goals(
+                        &mut goals,
+                        level,
+                        llm,
+                        self.cfg.llm.input_budget_chars(),
+                        progress,
+                    )?;
+                    collected.warnings.extend(warnings);
+                }
+                Some(_) => {}
+                None => collected.warnings.push(
+                    "goals are not tied to your ladder: import a ladder and set your target level first (/levels)"
+                        .into(),
+                ),
+            }
+        }
         Ok(ImportPreview {
             file: file.to_path_buf(),
             collected,
             plan,
             staging,
             target,
+            person,
+            notes,
+            note_duplicates,
+            goals,
+            goal_duplicates,
         })
     }
 
-    pub fn apply_import(&self, preview: &ImportPreview) -> Result<usize> {
+    /// Adds what the preview found: log entries, notes (adding the person if
+    /// needed) and goals.
+    pub fn apply_import(&self, preview: &ImportPreview) -> Result<Applied> {
+        let mut applied = Applied::default();
         Store::new(&preview.target).append(&preview.plan.new)?;
-        Ok(preview.plan.new.len())
+        applied
+            .entries
+            .extend(preview.plan.new.iter().map(|e| e.id.clone()));
+        if let (Some(handle), false) = (&preview.person, preview.notes.is_empty()) {
+            if self.people()?.get(handle).is_none() {
+                applied.person = Some(handle.clone());
+                self.add_person(Person {
+                    handle: handle.clone(),
+                    name: String::new(),
+                    role: None,
+                    team: None,
+                    relation: crate::people::Relation::Manager,
+                    about: None,
+                    since: None,
+                })?;
+            }
+            let store = self.notes_store();
+            for note in &preview.notes {
+                if let Some(added) = store.add(note.clone())? {
+                    applied.notes.push(added.id);
+                }
+            }
+        }
+        if !preview.goals.is_empty() {
+            applied.goals = self.update_goals(|goals| {
+                let mut ids = Vec::new();
+                for d in &preview.goals {
+                    let id = goals
+                        .add(&d.text, d.expectation.clone(), d.due, today())?
+                        .id;
+                    if let Some((date, text)) = &d.checkin {
+                        goals.checkin(id, *date, &clip(text, crate::limits::TEXT))?;
+                    }
+                    let goal = goals.get_mut(id)?;
+                    goal.status = d.status;
+                    goal.source = d.source.clone();
+                    ids.push(id);
+                }
+                Ok(ids)
+            })?;
+        }
+        Ok(applied)
     }
 
-    /// Reads a ladder document; YAML is taken as-is, anything else goes through the model.
+    /// Takes back what `apply_import` added; returns how many things went.
+    pub fn undo_import(&self, applied: &Applied) -> Result<usize> {
+        let mut n = self.remove_entries(&applied.entries)?;
+        n += self.notes_store().update(|notes| {
+            let before = notes.len();
+            notes.retain(|x| !applied.notes.contains(&x.id));
+            before - notes.len()
+        })?;
+        n += self.update_goals(|goals| {
+            let before = goals.goals.len();
+            goals.goals.retain(|g| !applied.goals.contains(&g.id));
+            Ok(before - goals.goals.len())
+        })?;
+        // The person the import added goes too, unless notes were written
+        // about them since.
+        if let Some(handle) = &applied.person {
+            if self.notes()?.iter().all(|x| &x.person != handle) {
+                self.remove_person(handle)?;
+            }
+        }
+        Ok(n)
+    }
+
+    /// The files entries, notes and goals were imported from, most recently
+    /// imported first.
+    pub fn imported_files(&self) -> Result<Vec<ImportedFile>> {
+        Ok(import::imported_files(
+            &self.store.load()?,
+            &self.notes()?,
+            &self.goals()?.goals,
+        ))
+    }
+
+    /// Removes every entry, note and goal imported from `file` (its name, or a
+    /// path to it). The entries are kept in a copy in the staging folder;
+    /// importing that copy puts them back. `None` when nothing came from that file.
+    pub fn remove_import(&self, file: &str) -> Result<Option<RemovedImport>> {
+        let file = file.trim().trim_start_matches('@').trim_matches('"');
+        let name = Path::new(file)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or(file)
+            .to_string();
+        let from = |source: &str| import::source_file(source) == Some(name.as_str());
+        let staging = &self.paths.staging;
+        let (entries, backup) =
+            self.store
+                .update(|all| -> Result<(Vec<Entry>, Option<PathBuf>)> {
+                    let entries: Vec<Entry> =
+                        all.iter().filter(|e| from(&e.source)).cloned().collect();
+                    if entries.is_empty() {
+                        return Ok((entries, None));
+                    }
+                    // The copy is written first, so nothing is lost if writing it fails.
+                    let backup = import::write_removed(staging, &name, &entries)?;
+                    all.retain(|e| !from(&e.source));
+                    Ok((entries, Some(backup)))
+                })??;
+        let notes = self.notes_store().update(|all| {
+            let gone: Vec<Note> = all.iter().filter(|n| from(&n.source)).cloned().collect();
+            all.retain(|n| !from(&n.source));
+            gone
+        })?;
+        let goals = self.update_goals(|all| {
+            let gone: Vec<Goal> = all
+                .goals
+                .iter()
+                .filter(|g| from(&g.source))
+                .cloned()
+                .collect();
+            all.goals.retain(|g| !from(&g.source));
+            Ok(gone)
+        })?;
+        if entries.is_empty() && notes.is_empty() && goals.is_empty() {
+            return Ok(None);
+        }
+        Ok(Some(RemovedImport {
+            name,
+            entries,
+            notes,
+            goals,
+            backup,
+        }))
+    }
+
+    /// Puts back what `remove_import` took out (for undo); returns how many
+    /// things came back. A goal whose number was taken in between gets a new one.
+    pub fn restore_import(&self, removed: RemovedImport) -> Result<usize> {
+        let mut n = self.restore_entries(removed.entries)?;
+        for note in removed.notes {
+            self.restore_note(note)?;
+            n += 1;
+        }
+        n += self.update_goals(|goals| {
+            let count = removed.goals.len();
+            for mut goal in removed.goals {
+                if goals.get(goal.id).is_some() {
+                    goal.id = goals.goals.iter().map(|g| g.id).max().unwrap_or(0) + 1;
+                }
+                goals.goals.push(goal);
+            }
+            goals.goals.sort_by_key(|g| g.id);
+            Ok(count)
+        })?;
+        Ok(n)
+    }
+
+    /// Removes the entries with these ids; returns how many there were.
+    pub fn remove_entries(&self, ids: &HashSet<String>) -> Result<usize> {
+        Ok(self.store.remove_where(|e| ids.contains(&e.id))?.len())
+    }
+
+    /// Puts removed entries back (for undo); returns how many were not there yet.
+    pub fn restore_entries(&self, entries: Vec<Entry>) -> Result<usize> {
+        Ok(self.store.add_new(entries)?.len())
+    }
+
+    /// Reads a ladder document; YAML is taken as-is. In a workbook, `roles`
+    /// says what each sheet is for (see `ladder_sheets`; sheets not named
+    /// get the suggested role). Returns the ladder and warnings.
     pub fn ladder_from_file(
         &self,
         file: &Path,
+        roles: &[(String, SheetRole)],
         llm: Option<&dyn Llm>,
         progress: Progress,
-    ) -> Result<Ladder> {
+    ) -> Result<(Ladder, Vec<String>)> {
+        if !file.exists() {
+            bail!("{} does not exist", file.display());
+        }
         let ext = file
             .extension()
             .and_then(|e| e.to_str())
             .unwrap_or("")
             .to_lowercase();
         if ext == "yaml" || ext == "yml" {
-            return Ladder::from_yaml(
-                &fs::read_to_string(file).with_context(|| format!("reading {}", file.display()))?,
-            );
+            let raw =
+                fs::read_to_string(file).with_context(|| format!("reading {}", file.display()))?;
+            return Ok((Ladder::from_yaml(&raw)?, Vec::new()));
         }
-        let llm = llm.context("an LLM is needed to read this ladder document")?;
-        let doc = crate::ladder::read_document(file)?;
-        crate::ladder::from_document(llm, &doc, self.cfg.llm.input_budget_chars(), progress)
+        crate::ladder::read(
+            file,
+            roles,
+            llm,
+            self.cfg.llm.input_budget_chars(),
+            progress,
+        )
+    }
+
+    /// The sheets of a ladder workbook with the role each most likely has;
+    /// empty for a document that is not a workbook or has one sheet.
+    pub fn ladder_sheets(&self, file: &Path) -> Result<Vec<SheetPlan>> {
+        if !import::sheet::is_sheet(file) {
+            return Ok(Vec::new());
+        }
+        let tables = import::sheet::read_tables(file)?;
+        if tables.len() < 2 {
+            return Ok(Vec::new());
+        }
+        Ok(crate::ladder::plan_sheets(&tables))
     }
 
     /// Saves the ladder; returns false when the configured levels no longer exist in it.
@@ -841,7 +1165,7 @@ pub fn streak(days: &BTreeMap<NaiveDate, usize>, today: NaiveDate) -> usize {
     count
 }
 
-/// "Speak at a meetup (toward SD3.mentoring.1, due 2026-12-31)".
+/// "Speak at a meetup (toward L3.mentoring.1, due 2026-12-31)".
 fn goal_line(g: &Goal) -> String {
     let mut extra = Vec::new();
     if let Some(exp) = &g.expectation {
@@ -904,8 +1228,8 @@ mod tests {
         fs::create_dir_all(&s.paths.reports).unwrap();
         let summary = GapSummary {
             date: d(10, 5),
-            current: Some("SD2".into()),
-            target: "SD3".into(),
+            current: Some("L2".into()),
+            target: "L3".into(),
             rows: vec![],
             overview: String::new(),
             priorities: vec!["x".into()],
@@ -935,7 +1259,7 @@ mod tests {
         let mut s = Session::at(Paths::at(dir.path().to_path_buf())).unwrap();
         let ladder = Ladder::from_yaml(include_str!("../ladder.example.yaml")).unwrap();
         s.save_ladder(&ladder).unwrap();
-        s.set_levels(Some("SD2"), Some("SD3")).unwrap();
+        s.set_levels(Some("L2"), Some("L3")).unwrap();
         s.add_person(Person {
             handle: "ada".into(),
             name: "Ada".into(),
@@ -979,7 +1303,7 @@ mod tests {
                     let mappings: Vec<_> = user
                         .lines()
                         .filter_map(|l| l.split_once(". ")?.0.parse::<usize>().ok())
-                        .map(|n| serde_json::json!({ "entry": n, "expectations": ["SD3.mentoring.1"] }))
+                        .map(|n| serde_json::json!({ "entry": n, "expectations": ["L3.mentoring.1"] }))
                         .collect();
                     serde_json::json!({ "mappings": mappings }).to_string()
                 } else if system.contains("per-expectation assessment") {
@@ -1196,7 +1520,7 @@ mod tests {
         assert_eq!(s.entries().unwrap().len(), 1, "logs that mention them stay");
 
         assert!(
-            s.add_goal("Mentor", Some("SD3.mentoring.1"), None).is_err(),
+            s.add_goal("Mentor", Some("L3.mentoring.1"), None).is_err(),
             "no ladder yet"
         );
         let goal = s

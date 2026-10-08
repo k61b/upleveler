@@ -8,8 +8,11 @@ use upleveler::analyze;
 use upleveler::dates::{parse_date, parse_period, Range};
 use upleveler::export::Format;
 use upleveler::goals::{self, GoalStatus};
-use upleveler::import;
-use upleveler::ladder::Ladder;
+use upleveler::import::{
+    self,
+    workbook::{Choices, SheetKind},
+};
+use upleveler::ladder::{Ladder, SheetRole};
 use upleveler::llm::{Llm, Message};
 use upleveler::people::{NoteKind, Person, Relation};
 use upleveler::plural;
@@ -107,9 +110,12 @@ enum Command {
         #[arg(long, short = 'n')]
         limit: Option<usize>,
     },
-    /// Import old logs from txt/md/csv/xlsx (AI-normalized) or a reviewed staging .jsonl
+    /// Import old logs from txt/md/csv/xlsx (AI-normalized) or a reviewed staging .jsonl.
+    /// In a workbook, each sheet goes to the log, notes about a person or goals (--sheet);
+    /// --list shows what you imported and --remove takes it out again
     Import {
-        file: PathBuf,
+        #[arg(required_unless_present_any = ["list", "remove"])]
+        file: Option<PathBuf>,
         /// Write to this JSONL file instead of your main log
         #[arg(long)]
         into: Option<PathBuf>,
@@ -122,6 +128,19 @@ enum Command {
         /// Date for items whose date could not be determined
         #[arg(long)]
         default_date: Option<String>,
+        /// Where a sheet of a workbook goes, repeatable: --sheet "Agenda=notes"
+        /// (log, notes, goals or skip). Sheets not named get the suggested place.
+        #[arg(long = "sheet", value_name = "NAME=KIND")]
+        sheets: Vec<String>,
+        /// Whose notes the notes sheets hold (a handle; someone new is added as your manager)
+        #[arg(long)]
+        person: Option<String>,
+        /// List the files you imported and what each added
+        #[arg(long, conflicts_with_all = ["file", "remove", "into", "no_ai", "default_date", "sheets", "person"])]
+        list: bool,
+        /// Remove everything imported from this file (log entries are kept in a copy in ~/.upleveler/staging)
+        #[arg(long, value_name = "FILE", conflicts_with_all = ["file", "into", "no_ai", "default_date", "sheets", "person"])]
+        remove: Option<String>,
     },
     /// Export entries as Markdown, CSV, Excel or JSONL
     Export {
@@ -180,9 +199,14 @@ enum Command {
 
 #[derive(Subcommand)]
 enum LadderCmd {
-    /// Import a ladder document (txt/md/xlsx/csv via AI, or a ladder.yaml as-is)
+    /// Import a ladder document (txt/md/xlsx/csv, or a ladder.yaml as-is). Level headings
+    /// ("L2") with items under them are read as written; anything else via AI
     Import {
         file: PathBuf,
+        /// In a workbook, what a sheet is for, repeatable: --sheet "Competencies=expectations"
+        /// (expectations, levels, verbs, focus or skip). Sheets not named get the suggested role
+        #[arg(long = "sheet", value_name = "NAME=ROLE")]
+        sheets: Vec<String>,
         #[arg(long, short)]
         yes: bool,
     },
@@ -442,13 +466,32 @@ fn run(cli: Cli) -> Result<()> {
             eprintln!("{} entries", matched.len());
             Ok(())
         }
+        Some(Command::Import { list: true, .. }) => imported_cmd(&session),
+        Some(Command::Import {
+            remove: Some(file),
+            yes,
+            ..
+        }) => remove_import_cmd(&session, &file, yes),
         Some(Command::Import {
             file,
             into,
             yes,
             no_ai,
             default_date,
-        }) => import_cmd(&session, &file, into, yes, no_ai, default_date),
+            sheets,
+            person,
+            ..
+        }) => {
+            let file = file.context("which file? (upleveler import <file>)")?;
+            let choices = Choices {
+                kinds: sheets
+                    .iter()
+                    .map(|s| Choices::parse_sheet(s))
+                    .collect::<Result<_>>()?,
+                person,
+            };
+            import_cmd(&session, &file, into, yes, no_ai, default_date, choices)
+        }
         Some(Command::Export {
             format,
             range,
@@ -687,23 +730,32 @@ fn choose_levels(session: &mut Session, ladder: &Ladder) -> Result<()> {
 
 fn ladder_cmd(session: &mut Session, action: LadderCmd) -> Result<()> {
     match action {
-        LadderCmd::Import { file, yes } => {
+        LadderCmd::Import { file, sheets, yes } => {
             let llm = session.llm().ok();
+            let roles: Vec<(String, SheetRole)> = sheets
+                .iter()
+                .map(|s| SheetRole::parse_sheet(s))
+                .collect::<Result<_>>()?;
+            show_sheet_roles(session, &file, &roles)?;
             eprintln!("Reading {}…", file.display());
-            let ladder = session.ladder_from_file(
+            let (ladder, warnings) = session.ladder_from_file(
                 &file,
+                &roles,
                 llm.as_ref().map(|l| l as &dyn Llm),
                 &mut progress,
             )?;
+            for w in &warnings {
+                eprintln!("warning: {w}");
+            }
             for level in &ladder.levels {
-                println!(
-                    "\n{} — {} ({} expectations)",
-                    level.id,
-                    level.title,
-                    level.expectations.len()
-                );
+                let name = if level.title == level.id {
+                    level.id.clone()
+                } else {
+                    format!("{} — {}", level.id, level.title)
+                };
+                println!("\n{name} ({} expectations)", level.expectations.len());
                 for e in level.expectations.iter().take(3) {
-                    println!("    [{}] {}", e.area, e.text);
+                    println!("    [{}] {}", e.area, e.described());
                 }
                 if level.expectations.len() > 3 {
                     println!("    …");
@@ -1097,7 +1149,31 @@ fn import_cmd(
     yes: bool,
     no_ai: bool,
     default_date: Option<String>,
+    mut choices: Choices,
 ) -> Result<()> {
+    if import::sheet::is_sheet(file) && !import::is_staging(file) {
+        let tables = import::sheet::read_tables(file)?;
+        let mut notes = false;
+        if tables.len() > 1 {
+            println!("Sheets of {}:", file.display());
+        }
+        for t in &tables {
+            let kind = choices.kind(t, today(), tables.len() == 1);
+            notes |= kind == SheetKind::Notes;
+            if tables.len() > 1 {
+                println!("  {:<24} → {}", t.name, kind.label());
+            }
+        }
+        if tables.len() > 1 {
+            println!("Change one with --sheet \"<name>=log|notes|goals|skip\".\n");
+        }
+        if notes && choices.person.is_none() && interactive() && !yes {
+            let handle: String = dialoguer::Input::new()
+                .with_prompt("Whose notes are these? (their handle, e.g. lead)")
+                .interact_text()?;
+            choices.person = Some(handle);
+        }
+    }
     let default_date = default_date
         .map(|d| parse_date(&d, today()).with_context(|| format!("unrecognized date {d:?}")))
         .transpose()?;
@@ -1117,6 +1193,7 @@ fn import_cmd(
         llm.as_ref().map(|l| l as &dyn Llm),
         into,
         default_date,
+        &choices,
         &mut |label, d, t| progress(&format!("Normalizing {label}"), d, t),
     )?;
     let (collected, plan) = (&preview.collected, &preview.plan);
@@ -1127,51 +1204,219 @@ fn import_cmd(
     if collected.warnings.len() > 10 {
         eprintln!("… and {} more warnings", collected.warnings.len() - 10);
     }
-    println!(
-        "\nRead {} items from {}",
-        collected.drafts.len(),
-        file.display()
-    );
-    let span = match (plan.new.first(), plan.new.last()) {
-        (Some(a), Some(b)) => format!("  ({} → {})", a.date, b.date),
-        _ => String::new(),
-    };
-    println!("  new:        {}{span}", plan.new.len());
-    println!(
-        "  duplicates: {}  (already logged or repeated in the file)",
-        plan.duplicates
-    );
-    if !plan.undated.is_empty() {
+    if !collected.drafts.is_empty() {
         println!(
-            "  undated:    {}  (skipped; set \"date\" in the staging file or pass --default-date)",
-            plan.undated.len()
+            "\nRead {} log items from {}",
+            collected.drafts.len(),
+            file.display()
         );
+        let span = match (plan.new.first(), plan.new.last()) {
+            (Some(a), Some(b)) => format!("  ({} → {})", a.date, b.date),
+            _ => String::new(),
+        };
+        println!("  new:        {}{span}", plan.new.len());
+        println!(
+            "  duplicates: {}  (already logged or repeated in the file)",
+            plan.duplicates
+        );
+        if !plan.undated.is_empty() {
+            println!(
+                "  undated:    {}  (skipped; set \"date\" in the staging file or pass --default-date)",
+                plan.undated.len()
+            );
+        }
+        println!("  staging:    {}", preview.staging.display());
+        let step = (plan.new.len() / 5).max(1);
+        for e in plan.new.iter().step_by(step).take(5) {
+            println!("    {}", e.line());
+        }
     }
-    println!("  staging:    {}", preview.staging.display());
-    if plan.new.is_empty() {
+    if !preview.notes.is_empty() || preview.note_duplicates > 0 {
+        println!(
+            "\nNotes about @{}: {} new, {} already there",
+            preview.person.as_deref().unwrap_or("?"),
+            preview.notes.len(),
+            preview.note_duplicates
+        );
+        for n in preview.notes.iter().take(5) {
+            println!("    {}", n.line());
+        }
+    }
+    if !preview.goals.is_empty() || preview.goal_duplicates > 0 {
+        println!(
+            "\nGoals: {} new, {} already there",
+            preview.goals.len(),
+            preview.goal_duplicates
+        );
+        for g in preview.goals.iter().take(5) {
+            println!(
+                "    [{}] {}",
+                g.expectation.as_deref().unwrap_or("free goal"),
+                g.text
+            );
+        }
+    }
+    if preview.is_empty() {
         println!("\nNothing new to add.");
         return Ok(());
     }
-    println!("\nSample:");
-    let step = (plan.new.len() / 5).max(1);
-    for e in plan.new.iter().step_by(step).take(5) {
-        println!("  {}", e.line());
-    }
     println!();
-    let question = format!(
-        "Add {} entries to {}?",
-        plan.new.len(),
-        preview.target.display()
-    );
-    if !confirm(&question, yes)? {
-        println!(
-            "Nothing written. Review or edit the staging file, then run:\n  upleveler import {}",
-            preview.staging.display()
-        );
+    let what = import::counts(plan.new.len(), preview.notes.len(), preview.goals.len());
+    if !confirm(&format!("Add {what}?"), yes)? {
+        if preview.plan.new.is_empty() {
+            println!("Nothing written.");
+        } else {
+            println!(
+                "Nothing written. Review or edit the log entries in the staging file, then run:\n  upleveler import {}",
+                preview.staging.display()
+            );
+        }
+        if !preview.notes.is_empty() || !preview.goals.is_empty() {
+            // The staging file holds the log entries only.
+            let logs: Vec<String> = preview
+                .collected
+                .sheets
+                .iter()
+                .filter(|s| s.kind == SheetKind::Log)
+                .map(|s| format!(" --sheet \"{}=skip\"", s.name))
+                .collect();
+            println!(
+                "The notes and goals are not in that file; for them, import the workbook again:\n  upleveler import {}{}{}",
+                file.display(),
+                preview
+                    .person
+                    .as_deref()
+                    .map(|p| format!(" --person {p}"))
+                    .unwrap_or_default(),
+                logs.concat()
+            );
+        }
         return Ok(());
     }
-    let n = session.apply_import(&preview)?;
-    println!("Added {n} entries to {}", preview.target.display());
+    let applied = session.apply_import(&preview)?;
+    let what = import::counts(
+        applied.entries.len(),
+        applied.notes.len(),
+        applied.goals.len(),
+    );
+    println!("Added {what}.");
+    // Entries keep the file they first came from, also when they are read
+    // from a staging file, so that is the name to remove them by.
+    let mut sources: Vec<&str> = preview
+        .plan
+        .new
+        .iter()
+        .map(|e| e.source.as_str())
+        .chain(preview.notes.iter().map(|n| n.source.as_str()))
+        .chain(preview.goals.iter().map(|g| g.source.as_str()))
+        .filter_map(import::source_file)
+        .collect();
+    sources.sort();
+    sources.dedup();
+    for name in sources {
+        println!("Changed your mind? upleveler import --remove {name}");
+    }
+    Ok(())
+}
+
+/// In a workbook with several sheets, prints what each sheet is read as.
+fn show_sheet_roles(
+    session: &Session,
+    file: &std::path::Path,
+    roles: &[(String, SheetRole)],
+) -> Result<()> {
+    let sheets = session.ladder_sheets(file)?;
+    if sheets.is_empty() {
+        return Ok(());
+    }
+    println!("Sheets of {}:", file.display());
+    for s in &sheets {
+        let role = roles
+            .iter()
+            .find(|(name, _)| name.trim().eq_ignore_ascii_case(s.name.trim()))
+            .map_or(s.role, |(_, r)| *r);
+        let found = match role {
+            SheetRole::Expectations if s.role == role && !s.levels.is_empty() => {
+                format!("  ({}, {} expectations)", s.levels.join(", "), s.items)
+            }
+            SheetRole::Skip => String::new(),
+            _ if s.role == role && !s.levels.is_empty() => format!("  ({})", s.levels.join(", ")),
+            _ => String::new(),
+        };
+        println!("  {:<24} → {}{found}", s.name, role.label());
+    }
+    println!("Change one with --sheet \"<name>=expectations|levels|verbs|focus|skip\".\n");
+    Ok(())
+}
+
+fn imported_cmd(session: &Session) -> Result<()> {
+    let files = session.imported_files()?;
+    if files.is_empty() {
+        println!("Nothing imported yet.");
+        return Ok(());
+    }
+    for f in &files {
+        println!(
+            "{}  {}  ({} → {}, imported {})",
+            f.name,
+            f.counts(),
+            f.first,
+            f.last,
+            f.imported.with_timezone(&chrono::Local).date_naive()
+        );
+    }
+    println!("\nRemove one with: upleveler import --remove <file>");
+    Ok(())
+}
+
+fn remove_import_cmd(session: &Session, file: &str, yes: bool) -> Result<()> {
+    let name = std::path::Path::new(file.trim())
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or(file);
+    let files = session.imported_files()?;
+    let Some(found) = files.iter().find(|f| f.name == name) else {
+        if files.is_empty() {
+            bail!("nothing was imported from {name}; nothing is imported yet");
+        }
+        let names: Vec<&str> = files.iter().map(|f| f.name.as_str()).collect();
+        bail!(
+            "nothing was imported from {name}; imported files: {}",
+            names.join(", ")
+        );
+    };
+    let question = format!(
+        "Remove {} imported from {} ({} → {})?",
+        found.counts(),
+        found.name,
+        found.first,
+        found.last
+    );
+    if !confirm(&question, yes)? {
+        println!("Nothing removed.");
+        return Ok(());
+    }
+    match session.remove_import(name)? {
+        Some(removed) => {
+            println!(
+                "Removed {} imported from {}.",
+                import::counts(
+                    removed.entries.len(),
+                    removed.notes.len(),
+                    removed.goals.len()
+                ),
+                removed.name
+            );
+            if let Some(backup) = &removed.backup {
+                println!(
+                    "A copy of the log entries is kept at {}; to put them back, run:\n  upleveler import {}",
+                    backup.display(),
+                    backup.display()
+                );
+            }
+        }
+        None => println!("Nothing to remove; they were already gone."),
+    }
     Ok(())
 }
 

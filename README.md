@@ -8,20 +8,19 @@
 
 Upleveler is a work log for software developers. You write down what you do. Upleveler compares it with what your company expects at the next level, shows what is missing, and writes your promotion document.
 
-Everything stays on your computer. The AI runs locally with [Ollama](https://ollama.com).
+Everything stays on your computer. The AI runs locally with [LM Studio](https://lmstudio.ai) (or [Ollama](https://ollama.com)).
 
 ## Install
 
-You need [Ollama](https://ollama.com) and about 16 GB of RAM.
+You need [LM Studio](https://lmstudio.ai) and about 16 GB of RAM. Install it and open it once (on a Mac also `brew install --cask lm-studio`).
 
 On macOS and Linux:
 
 ```sh
 curl -fsSL https://upleveler.dev/install.sh | sh
-ollama pull gemma4:12b
 ```
 
-The script downloads the [latest release](https://github.com/k61b/upleveler/releases/latest) for your system, checks it against the release's checksums and installs `upleveler` to `~/.local/bin`. Run it again to update.
+The script downloads the [latest release](https://github.com/k61b/upleveler/releases/latest) for your system, checks it against the release's checksums and installs `upleveler` to `~/.local/bin`. Run it again to update. The first run downloads the model (`google/gemma-4-e4b`, about 7 GB) through LM Studio, and starts LM Studio's server whenever it is not running. [Ollama](https://ollama.com) works as well; choose it in the setup.
 
 On Windows, download `upleveler-x86_64-pc-windows-msvc.zip` from the [latest release](https://github.com/k61b/upleveler/releases/latest) and put `upleveler.exe` on your PATH.
 
@@ -37,14 +36,14 @@ To update a source install: `git pull && cargo install --path crates/upleveler -
 
 ## Use
 
-Run `upleveler`. The first time, a short setup asks for the model, the report language, your company's career ladder and your current and target level.
+Run `upleveler`. The first time, a short setup asks for the model (and downloads it if needed), the report language, your company's career ladder, your current and target level, and, if you like, a file with the notes you already have (a 1:1 workbook or old work notes). The setup tries the model once and tells you how fast it answered.
 
 ```text
 › dün PAY-412 circuit breaker'ı prod'a aldım
 ✓ Logged for 2026-10-04: PAY-412 circuit breaker'ı prod'a aldım
 
 › /gap
-● Gap analysis SD2 → SD3
+● Gap analysis L2 → L3
   ● Ownership  Leads incidents, follows up actions until closed   4
   ◐ Technical  Designs solutions across services                  1
   ○ Mentoring  Mentors junior developers                          0
@@ -58,16 +57,16 @@ Run `upleveler`. The first time, a short setup asks for the model, the report la
 | `/brag` | Promotion / self-review document |
 | `/summary week` | Summary for a 1:1 |
 | `/prep @ada` | Prepare a 1:1 with someone from your notes and shared work |
-| `/import @file` | Import old notes from txt, md, csv or xlsx |
+| `/import @file` | Import old notes from txt, md, csv or xlsx, or a 1:1 workbook into notes and goals ([details](#bringing-your-existing-files)); `/import remove` takes an import out again (to try another model, for example) |
 | `/note @ada 1:1 …` | Note about someone: `1:1`, `given`, `received` or `followup` |
 | `/notes done <id>` | Close a follow-up (also `reopen`, `delete` and `edit <id> [kind] <text>`; `/undo` takes it back) |
 | `/people [@ada]` | The people you work with, or one of them with your notes and shared work |
 | `/people add @ada Ada, Junior developer, mentee` | Add someone without leaving the app |
 | `/people edit @ada role: Developer, team: Payments` | Change a profile (`name`, `role`, `team`, `relation`, `about`; an empty value clears); `/people remove @ada` removes them and their notes, and `/undo` brings them back |
-| `/goals`, `/goal …`, `/checkin` | Your goals: list, add (`/goal Speak at a meetup`, or end with an expectation id like `SD3.mentoring.1` to tie it to your ladder), change (`/goal edit 2 due: 2026-12-31`), finish (`/goal done 2`), record progress; `/goal show 2` and `/checkin delete 2 1` to see and delete check-ins |
+| `/goals`, `/goal …`, `/checkin` | Your goals: list, add (`/goal Speak at a meetup`, or end with an expectation id like `L3.mentoring.1` to tie it to your ladder), change (`/goal edit 2 due: 2026-12-31`), finish (`/goal done 2`), record progress; `/goal show 2` and `/checkin delete 2 1` to see and delete check-ins |
 | `/dashboard` | Progress, activity heatmap, logs and reports |
 | `/web` | The same dashboard in your browser |
-| `/undo` | Undo the last entry, note or check-in |
+| `/undo` | Undo the last entry, note, check-in, import or removed import |
 
 Type `/` to see all commands and `?` for keyboard shortcuts. Reports are saved in `~/.upleveler/reports/`.
 
@@ -82,13 +81,56 @@ Opens the dashboard in your browser (or type `/web` in the app). It runs on your
 | Tab | What it shows |
 |---|---|
 | Overview | Entries, streak, a 26-week activity heatmap, readiness from your latest gap analysis, latest reports, active goals and open follow-ups |
-| Logs | Every entry by day, filtered as you type (text, tag or date); add new entries with a date and tags |
+| Logs | Every entry by day, filtered as you type (text, tag or date); add new entries with a date and tags; under "Imported files", remove what an imported file added |
 | People | The people you work with; add someone, then open their page to write notes (1:1, feedback, follow-ups), close, edit or delete notes, see the entries that mention them, edit their profile or remove them |
 | Goals | Active and finished goals with progress from your log, the latest gap analysis and check-ins; add or edit a goal, check in or delete a check-in, mark it done or drop it |
 | Ladder | Each level's expectations with the entries that back them; your target level is marked |
 | Reports | Run a gap analysis, promotion document or summary with live progress; read or copy any report as Markdown |
 
 The dashboard reads and writes the same files as the terminal app and shows fresh data on every page load. The terminal app and the dashboard can be open at the same time: every change is written in one step while the data folder is locked, so neither overwrites the other. Analyses use the model you chose in the setup, one at a time, and keep running if you close the page while `upleveler web` is open.
+
+## Bringing your existing files
+
+Upleveler reads what you already keep. Every import shows what it found before anything is saved, and `/import remove` (or `upleveler import --remove <file>`) takes it out again.
+
+**Your company's career ladder**: `/ladder import @file`, or `upleveler ladder import <file>`
+
+- In a workbook with many sheets, each sheet gets a role, suggested from its name and contents; change it with ← → before reading:
+
+  | Role | A sheet like | What is read |
+  |---|---|---|
+  | Expectations | Competencies, Expectations, Beklentiler | what each level is expected to do, word for word |
+  | Levels | Levels, Titles, Ünvanlar | each level's title, summary and typical experience |
+  | Verbs | Behaviour verbs, Fiiller | the verbs that describe each level ("leads", "grows") |
+  | Focus | Growth priorities, Key areas to focus, Odak alanları | what each level should focus on |
+  | Skip | How to use, Roadmap, Compensation | nothing |
+
+- Expectations are read in any of the usual layouts, without the model: a level heading on its own row with the expectations under it (as bullets, or as rows of title and description); a matrix with the levels as columns; a long table with a level column; or one sheet per level. Levels can be codes (`L3`, `IC4`, `SWE 2`), numbered names (`Level 3`, `Engineer II`, `Seviye 2`) or titles (`Senior Engineer`, `Kıdemli Yazılım Mühendisi`). Lines like "Everything in L2, and:" or "Same as L3" are skipped.
+- A short row without a bullet (`Ownership`), or a first column that repeats, names the area; the model only names areas a sheet leaves out.
+- The verbs and focus of your target level go into the gap analysis, so its priorities follow what your company asks of that level. The Ladder tab in the browser shows them.
+- When both levels name an expectation alike ("Incidents" at L3 and at L4), work logged for it at your current level counts as groundwork for the target: "partial", with next steps on how to take it further. The report shows it as "0 (+2 L3)".
+- Prose and anything else is read by the model part by part.
+- From the command line: `upleveler ladder import framework.xlsx --sheet "Roadmap=skip" --sheet "Matrix=expectations"`. Without `--sheet`, the suggested roles are used.
+- A `ladder.yaml` ([example](crates/upleveler/ladder.example.yaml)) is taken as it is.
+
+**A 1:1 workbook**: `/import @file`, or `upleveler import <file>`
+
+Each sheet goes where you choose; the suggestion comes from its name and columns.
+
+| Sheet | Becomes | Columns it understands |
+|---|---|---|
+| Agenda, 1:1, notes | Notes about the person (you give their handle once, e.g. `@lead`; someone new is added as your manager) | a date (once per meeting is enough); text columns (one note per row: a 1:1 note in an agenda or 1:1 sheet, a plain note elsewhere); an action or follow-up column (a follow-up per line); a feedback column; a status column (`done`, `tamam`); an owner column (`Sorumlu`, `Owner`: a follow-up someone else owns says who); a comment column (`Lider yorumu`, `Comment`: feedback received); a kind column (`Feedback`, `Not`, `Takip`, `1:1`); a from column (`Kimden`: `Ben` makes feedback given, anyone else received) |
+| Career, promotion, goals, a next-level sheet (`L3 → L4`, `Transition`) | Goals | what to do (the goal; the expectation itself when nothing is planned); an expectation or competency column, which ties the goal to your target level (by its text or its title); a status column; a due date (`Hedef tarih`, `Deadline`); a self-assessment (`Öz değerlendirme`, `Rating`) and evidence (`Kanıt`, `Evidence`) become a check-in; your lead's comment (`Lider yorumu`, `Comment`) becomes feedback received |
+| A dated work log | Log entries | the same as any work-log import |
+| Anything else | Skipped | |
+
+Import the same workbook again after your next 1:1: only new rows are added.
+
+Tips for small local models:
+
+- Keep one kind of thing per sheet and the column names in the first row. The model then only reads the layout, and your text is kept as you wrote it.
+- Import your ladder and set your target level (`/levels`) before importing goals, so they are tied to its expectations.
+- From the command line: `upleveler import lead-1on1.xlsx --person lead --sheet "Links=skip"`.
 
 ## People and goals
 
@@ -101,7 +143,7 @@ upleveler note ada --kind follow-up "Share the retry design doc"
 upleveler log "Paired with @ada on the ledger retries"
 upleveler prep ada
 
-upleveler goal add "Mentor a junior developer" --expectation SD3.mentoring.1 --due 2026-12-31
+upleveler goal add "Mentor a junior developer" --expectation L3.mentoring.1 --due 2026-12-31
 upleveler goal add "Speak at a meetup"
 upleveler goal checkin 2 "Sent the talk proposal"
 upleveler goal list
@@ -116,20 +158,45 @@ upleveler goal list
 - The gap analysis and the promotion document only see the name and role of people your entries mention, never your notes about them. The gap analysis also knows your active goals when it picks priorities.
 - `upleveler person remove ada` deletes their profile and every note about them; your log entries stay.
 
+## Choosing a model
+
+Upleveler is built for small models that run on a laptop: about 16 GB of memory is enough.
+
+**LM Studio with `google/gemma-4-e4b` is recommended.** On a 16 GB Mac, with the invented sample files in this repository (a seven-sheet career framework, a 1:1 workbook with a next-level sheet, notes with a colleague and an old diary), it read every note correctly, tied all 8 goals to the right expectation, kept every fact of the diary word for word and wrote clean Turkish. The ladder itself is read without the model. The whole first setup, analyses included, waited about three minutes for the model. LM Studio is [free for use at work](https://lmstudio.ai/blog/free-for-work); check its current terms if your company has rules about local AI tools.
+
+| Model (LM Studio, MLX, about 7 GB each) | Waiting for the model | Log entries mapped as expected | What it got wrong |
+|---|---|---|---|
+| `google/gemma-4-e4b` | 175 s | 5 of 7 | took a training session for mentoring; left a bare "4 PR review" unmapped |
+| `google/gemma-4-12b` | 327 s | 6 of 7 | left "4 PR review" unmapped |
+| `qwen/qwen3.5-9b` | 247 s | 4 of 7 | merged 11 pieces of work in the diary into 6 and lost two facts |
+
+The "E4B" in Gemma 4 E4B means about 4 billion parameters do the work for each word, so it is quick, while its files take as much memory as the 12B.
+
+Run the same comparison for any model: `cargo run --release --example eval -- --model <name>`.
+
+- **Ollama** works as well: choose it in the setup (`gemma4:12b`). On the same Mac it answered structured questions somewhat faster than LM Studio's MLX engine, with the same results; some companies do not allow it.
+- Every structured answer is held to a JSON schema while the model writes it. A list has exactly as many items as asked for, an id can only be one from your ladder, and answers have a length limit, so a model that starts repeating itself stops. With plain JSON mode, `gemma4:12b` repeated words forever on long lists.
+- Text is kept as you wrote it where possible: ladder expectations, 1:1 notes and goals are read from your files as written, and the model only names areas, picks columns and ties goals to expectations.
+- The model does not "think" before answering: LM Studio runs Gemma 4 and Qwen 3.5 with thinking on, which made a three-word answer take 7 seconds instead of half a second.
+- LM Studio would load a model with its own default context, which can be too small; Upleveler loads it with the context it needs, and loads it when the app starts so the first answer does not wait for it.
+- To use another model, pick it with `/model`. Through an OpenAI-compatible endpoint (your company's approved LLM, vLLM), Upleveler asks for a JSON schema and falls back to plain JSON when the server does not support it.
+
 ## Privacy
 
 - Your data is plain files in `~/.upleveler/`, including what you note about other people (`people.yaml`, `notes.jsonl`) and your goals (`goals.yaml`). Edit or delete them any time.
 - Notes about a person go to your model only for a 1:1 prep or a question about that person. They never go into the gap analysis, the promotion document or a summary.
-- Nothing is sent anywhere. To use your company's own LLM instead of Ollama, choose "OpenAI-compatible endpoint" in the setup (`/init`) and confirm that the endpoint is approved.
+- Nothing is sent anywhere. To use your company's own LLM instead of a model on your computer, choose "OpenAI-compatible endpoint" in the setup (`/init`) and confirm that the endpoint is approved.
 - No account, no cloud, no telemetry. The browser dashboard (`upleveler web`) loads nothing from the internet.
 
 ## Scripts
 
 Every feature is also a plain command, for example `upleveler log "..."`, `upleveler gap` or `upleveler export -f xlsx -o worklog.xlsx`. Run `upleveler --help` to see them all.
 
+`upleveler import --list` shows the files you imported and how many entries each added. `upleveler import --remove notes.xlsx` removes the entries that came from that file and keeps a copy in `~/.upleveler/staging/`; `upleveler import` on that copy puts them back. Entries you logged yourself are never touched.
+
 ## Türkçe
 
-Upleveler, yaptığınız işi şirketinizin seviye beklentileriyle karşılaştırır. Terminalde `upleveler` yazın. Ne yaptığınızı yazarsanız log'a eklenir, soru sorarsanız cevaplanır. Komutları görmek için `/` yazın. Panoyu tarayıcıda açmak için `upleveler web` yazın; yalnızca kendi bilgisayarınızda çalışır. Raporların Türkçe olması için kurulumda Türkçe'yi seçin. Takım arkadaşlarınız hakkında not tutmak için `upleveler person` ve `upleveler note`, hedefleriniz için `upleveler goal` komutlarını kullanın. Bir 1:1'e hazırlanmak için `upleveler prep ada` ya da uygulamada `/prep @ada` yazın; notlarınız terfi dokümanına hiçbir zaman girmez. Verileriniz bilgisayarınızdan çıkmaz.
+Upleveler, yaptığınız işi şirketinizin seviye beklentileriyle karşılaştırır. Terminalde `upleveler` yazın. Ne yaptığınızı yazarsanız log'a eklenir, soru sorarsanız cevaplanır. Komutları görmek için `/` yazın. Panoyu tarayıcıda açmak için `upleveler web` yazın; yalnızca kendi bilgisayarınızda çalışır. Raporların Türkçe olması için kurulumda Türkçe'yi seçin. Takım arkadaşlarınız hakkında not tutmak için `upleveler person` ve `upleveler note`, hedefleriniz için `upleveler goal` komutlarını kullanın. Şirketinizin kariyer dokümanı çok sayfalıysa seviyelerin yazdığı sayfayı seçersiniz. Liderinizle tuttuğunuz 1:1 Excel'indeki her sayfa log'a, o kişi hakkındaki notlara ya da hedeflerinize gidebilir. Dosyayı her 1:1'den sonra tekrar import edin, yalnızca yeni satırlar eklenir. Upleveler 16 GB belleği olan bir dizüstünde [LM Studio](https://lmstudio.ai) ve `google/gemma-4-e4b` ile çalışacak şekilde tasarlandı (Ollama da çalışır); kurulum modeli indirir ve LM Studio'nun sunucusu kapalıysa onu açar. Bir 1:1'e hazırlanmak için `upleveler prep ada` ya da uygulamada `/prep @ada` yazın; notlarınız terfi dokümanına hiçbir zaman girmez. Verileriniz bilgisayarınızdan çıkmaz.
 
 ## Development
 
@@ -149,6 +216,14 @@ cargo fmt --all
 ```
 
 `cargo test` also runs the web design checks: colour contrast (WCAG AA) and a lint for the patterns the design system bans.
+
+Invented sample files of the kinds people bring to their first setup (a career framework workbook, a 1:1 workbook with a lead, notes with a colleague and an old diary) are written by `cargo run --example sample_files -- <folder>`; the tests check that they read exactly as expected. To compare models on them, run the first setup with a real model and print a scorecard:
+
+```sh
+cargo run --release --example eval                                        # LM Studio, google/gemma-4-e4b
+cargo run --release --example eval -- --model qwen/qwen3.5-9b
+cargo run --release --example eval -- --provider ollama --model gemma4:12b
+```
 
 ## License
 

@@ -3,7 +3,7 @@
 
 use super::text::Block;
 use crate::dates::parse_date;
-use crate::llm::{complete_json, Llm, Message};
+use crate::llm::{complete_json, schema, Llm, Message};
 use crate::prompts;
 use anyhow::{Context, Result};
 use calamine::{open_workbook_auto, Data, DataType, Reader};
@@ -127,6 +127,22 @@ fn yes() -> bool {
     true
 }
 
+/// Column numbers within the sheet's width, a header row among the sample.
+fn mapping_schema(width: usize) -> serde_json::Value {
+    let last = width.max(1) as i64 - 1;
+    let column = || schema::integer(0, last);
+    schema::object(&[
+        (
+            "header_row",
+            schema::nullable(schema::integer(0, SAMPLE_ROWS as i64 - 1)),
+        ),
+        ("date_column", schema::nullable(column())),
+        ("text_columns", schema::list(column(), 1, width.max(1))),
+        ("tag_columns", schema::list(column(), 0, width.max(1))),
+        ("day_first", serde_json::json!({ "type": "boolean" })),
+    ])
+}
+
 const SAMPLE_ROWS: usize = 10;
 
 /// Asks the model for the column mapping, falling back to heuristics.
@@ -159,23 +175,24 @@ pub fn mapping(
         Message::user(format!("Sheet \"{}\":\n{sample}", table.name)),
     ];
     let width = table.rows.iter().map(|(_, c)| c.len()).max().unwrap_or(0);
-    let result = complete_json::<Mapping>(llm, messages).map(|mut m| {
-        // Models tend to put category and duration/id columns into the description.
-        let (tags, text): (Vec<usize>, Vec<usize>) = m
-            .text_columns
-            .iter()
-            .partition(|&&c| header_matches(table, m.header_row, c, &TAG_HEADER));
-        m.text_columns = text
-            .into_iter()
-            .filter(|&c| !non_description(table, m.header_row, c))
-            .collect();
-        for c in tags {
-            if !m.tag_columns.contains(&c) {
-                m.tag_columns.push(c);
+    let result =
+        complete_json::<Mapping>(llm, messages, mapping_schema(width), 200).map(|mut m| {
+            // Models tend to put category and duration/id columns into the description.
+            let (tags, text): (Vec<usize>, Vec<usize>) = m
+                .text_columns
+                .iter()
+                .partition(|&&c| header_matches(table, m.header_row, c, &TAG_HEADER));
+            m.text_columns = text
+                .into_iter()
+                .filter(|&c| !non_description(table, m.header_row, c))
+                .collect();
+            for c in tags {
+                if !m.tag_columns.contains(&c) {
+                    m.tag_columns.push(c);
+                }
             }
-        }
-        m
-    });
+            m
+        });
     match result {
         Ok(m) if valid_mapping(&m, width) => (m, None),
         Ok(_) => (
@@ -200,7 +217,12 @@ static TAG_HEADER: LazyLock<Regex> = LazyLock::new(|| {
         .unwrap()
 });
 
-fn header_matches(table: &Table, header_row: Option<usize>, c: usize, re: &Regex) -> bool {
+pub(crate) fn header_matches(
+    table: &Table,
+    header_row: Option<usize>,
+    c: usize,
+    re: &Regex,
+) -> bool {
     header_row
         .and_then(|h| table.rows.get(h))
         .and_then(|(_, r)| r.get(c))
@@ -214,7 +236,7 @@ static IGNORED_HEADER: LazyLock<Regex> = LazyLock::new(|| {
 });
 
 /// True for id/duration/status columns, by header name or because the values are numbers.
-fn non_description(table: &Table, header_row: Option<usize>, c: usize) -> bool {
+pub(crate) fn non_description(table: &Table, header_row: Option<usize>, c: usize) -> bool {
     let start = header_row.map_or(0, |h| h + 1);
     if let Some(h) = header_row
         .and_then(|h| table.rows.get(h))
@@ -335,7 +357,7 @@ pub fn guess_mapping(table: &Table, today: NaiveDate) -> Mapping {
 static NUMERIC_DATE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^(\d{1,2})([-/.])(\d{1,2})([-/.]\d{2,4})").unwrap());
 
-fn parse_cell_date(s: &str, day_first: bool, today: NaiveDate) -> Option<NaiveDate> {
+pub(crate) fn parse_cell_date(s: &str, day_first: bool, today: NaiveDate) -> Option<NaiveDate> {
     if !day_first {
         let swapped = NUMERIC_DATE.replace(s, "$3$2$1$4");
         return parse_date(&swapped, today);

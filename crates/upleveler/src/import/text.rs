@@ -3,7 +3,7 @@
 
 use super::Draft;
 use crate::dates::{date_prefix, is_weekday, parse_date};
-use crate::llm::{complete_json, Llm, Message};
+use crate::llm::{complete_json, schema, Llm, Message};
 use crate::prompts;
 use chrono::{Datelike, Duration, NaiveDate};
 use serde::Deserialize;
@@ -154,6 +154,43 @@ pub struct Extraction {
 
 const MAX_BLOCKS_PER_CALL: usize = 20;
 
+/// The tags the model may give an entry (as listed in the prompts).
+pub(crate) const TAGS: &[&str] = &[
+    "feature",
+    "bugfix",
+    "incident",
+    "oncall",
+    "code-review",
+    "design",
+    "refactor",
+    "testing",
+    "performance",
+    "security",
+    "devops",
+    "documentation",
+    "mentoring",
+    "meeting",
+    "planning",
+    "learning",
+    "interview",
+    "release",
+    "research",
+];
+
+/// Entries for blocks 1..=`blocks`, with a real date or none and known tags.
+fn extracted_schema(blocks: usize) -> serde_json::Value {
+    schema::object(&[(
+        "entries",
+        schema::any_list(schema::object(&[
+            ("block", schema::integer(1, blocks as i64)),
+            ("date", schema::nullable(schema::date())),
+            ("text", schema::short(2000)),
+            ("tags", schema::list(schema::one_of(TAGS), 0, 3)),
+            ("links", schema::any_list(schema::short(400))),
+        ])),
+    )])
+}
+
 /// Turns blocks into drafts. With `llm`, blocks are sent in batches that fit `budget`
 /// characters; without it, or when the model drops a block, each bullet/paragraph
 /// becomes an entry as written.
@@ -178,7 +215,9 @@ pub fn extract(
         return Ok(Extraction { drafts, warnings });
     };
 
-    let batches = batch(&blocks, budget);
+    // The model writes the notes back out, so the answer is about as long as
+    // the question: a third of the budget leaves room for both in the context.
+    let batches = batch(&blocks, budget / 3);
     let mut done = 0;
     for range in batches {
         let batch = &blocks[range.clone()];
@@ -195,7 +234,9 @@ pub fn extract(
             Message::user(rendered.join("\n\n")),
         ];
         let mut per_block: Vec<Vec<Draft>> = vec![Vec::new(); batch.len()];
-        match complete_json::<Extracted>(llm, messages) {
+        let chars: usize = batch.iter().map(|b| b.text.len()).sum();
+        let max_tokens = (chars / 2 + batch.len() * 64 + 128).clamp(256, 4096);
+        match complete_json::<Extracted>(llm, messages, extracted_schema(batch.len()), max_tokens) {
             Ok(out) => {
                 for e in out.entries {
                     let Some((i, block)) = e
@@ -265,7 +306,7 @@ pub fn extract(
                     "{}: not understood by the model; imported as written",
                     b.location
                 ));
-            } else {
+            } else if !is_heading(&b.text) {
                 warnings.push(format!(
                     "{}: skipped by the model as empty: {:?}",
                     b.location,
@@ -277,6 +318,13 @@ pub fn extract(
         progress("Normalizing notes", done, blocks.len())?;
     }
     Ok(Extraction { drafts, warnings })
+}
+
+/// A block that is only a heading ("# Work diary"): nothing to warn about
+/// when the model leaves it out.
+fn is_heading(text: &str) -> bool {
+    let mut lines = text.lines().filter(|l| !l.trim().is_empty());
+    matches!((lines.next(), lines.next()), (Some(l), None) if l.trim_start().starts_with('#'))
 }
 
 /// Digit runs in `s`, used to check that the model did not invent figures.
@@ -360,6 +408,14 @@ fn batch(blocks: &[Block], budget: usize) -> Vec<std::ops::Range<usize>> {
 mod tests {
     use super::*;
     use crate::llm::FakeLlm;
+
+    #[test]
+    fn a_lone_heading_is_not_worth_a_warning() {
+        assert!(is_heading("# Çalışma günlüğü"));
+        assert!(is_heading("\n## Notes\n"));
+        assert!(!is_heading("# 2026-08-03\n- Shipped the export"));
+        assert!(!is_heading("izin"));
+    }
 
     fn d(y: i32, m: u32, day: u32) -> NaiveDate {
         NaiveDate::from_ymd_opt(y, m, day).unwrap()

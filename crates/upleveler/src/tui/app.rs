@@ -8,11 +8,12 @@ use super::theme;
 use crate::config::{is_local_url, Provider};
 use crate::dates::parse_period;
 use crate::export::Format;
+use crate::import::workbook::{Choices, SheetInfo, SheetKind};
 use crate::intent::{self, Intent};
 use crate::ladder::Ladder;
 use crate::llm::Message;
 use crate::people::NoteKind;
-use crate::session::{today, ImportPreview, Session, Status};
+use crate::session::{today, Applied, ImportPreview, RemovedImport, Session, Status};
 use crate::store::Filter;
 use chrono::NaiveDate;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -72,6 +73,15 @@ pub enum Purpose {
     CurrentLevel,
     TargetLevel(String),
     Model,
+    /// `/import remove`: the imported file whose entries to remove.
+    RemoveImport,
+
+    /// Whose notes the notes sheets of this workbook hold.
+    ImportPerson(PathBuf, Vec<(String, SheetKind)>),
+    /// Setup: import existing notes now, or not.
+    NotesSource,
+    /// Setup: the file with existing notes.
+    NotesPath,
 }
 
 pub enum Panel {
@@ -91,6 +101,18 @@ pub enum Panel {
         input: Box<TextArea<'static>>,
         purpose: Purpose,
     },
+    /// What each sheet of a ladder workbook is for, before it is read.
+    LadderSheets {
+        file: PathBuf,
+        sheets: Vec<crate::ladder::SheetPlan>,
+        selected: usize,
+    },
+    /// Where each sheet of a workbook goes, before it is read.
+    Sheets {
+        file: PathBuf,
+        sheets: Vec<SheetInfo>,
+        selected: usize,
+    },
     Import {
         preview: Box<ImportPreview>,
         scroll: usize,
@@ -100,6 +122,17 @@ pub enum Panel {
         file: PathBuf,
         scroll: usize,
     },
+}
+
+/// What an import found besides log entries, kept while its staging file
+/// (log entries only) is edited.
+struct Carried {
+    staging: PathBuf,
+    person: Option<String>,
+    notes: Vec<crate::people::Note>,
+    note_duplicates: usize,
+    goals: Vec<crate::import::workbook::GoalDraft>,
+    goal_duplicates: usize,
 }
 
 /// Something saved in this session that `/undo` can take back.
@@ -135,6 +168,10 @@ enum Undo {
         date: NaiveDate,
         text: String,
     },
+    /// What an import added.
+    Imported(Applied),
+    /// What `/import remove` took out, to put back.
+    ImportRemoved(RemovedImport),
 }
 
 pub struct RunningJob {
@@ -185,6 +222,9 @@ pub struct App {
     chat: Vec<Message>,
     /// What this session saved, newest last, for `/undo`.
     logged: Vec<Undo>,
+    /// The notes and goals of an import whose log entries are open in
+    /// $EDITOR; see `Output::Import`.
+    carried: Option<Carried>,
     wizard: bool,
     /// The link of the dashboard `/web` started, so a second `/web` reuses it.
     #[cfg(feature = "server")]
@@ -249,6 +289,7 @@ impl App {
             last_ctrl_c: None,
             chat: Vec::new(),
             logged: Vec::new(),
+            carried: None,
             wizard: false,
             #[cfg(feature = "server")]
             web_url: None,
@@ -535,7 +576,7 @@ impl App {
     /// Reads a staging file again after the user edited it.
     pub fn reimport(&mut self, path: PathBuf) {
         self.info("Reading the edited staging file again…");
-        self.start(Job::Import(path));
+        self.start(Job::Import(path, Choices::default()));
     }
 
     fn ask(&mut self, question: String) {
@@ -638,17 +679,19 @@ impl App {
                     )),
                 }
             }
-            "import" if args.is_empty() => {
-                self.info("Usage: /import @file — type @ to pick a txt, md, csv or xlsx file.")
-            }
-            "import" => self.start(Job::Import(path_arg(args))),
+            "import" if args.is_empty() => self.info(
+                "Usage: /import @file — type @ to pick a txt, md, csv or xlsx file. In a workbook, each sheet can go to your log, to notes about a person (a 1:1 agenda) or to your goals. /import remove takes an import out again.",
+            ),
+            "import" if args == "remove" => self.import_picker(),
+            "import" if args.starts_with("remove ") => self.remove_import(&args["remove ".len()..]),
+            "import" => self.import_file(path_arg(args)),
             "export" => self.export(args),
             "ladder" => {
                 if let Some(file) = args.strip_prefix("import") {
                     if file.trim().is_empty() {
                         self.info("Usage: /ladder import @file");
                     } else {
-                        self.start(Job::LadderImport(path_arg(file)));
+                        self.ladder_import(path_arg(file));
                     }
                 } else {
                     match self.session.ladder() {
@@ -869,6 +912,27 @@ impl App {
                 .session
                 .add_checkin(goal, date, &text)
                 .map(|_| Some(format!("Restored the check-in on goal #{goal}: {text}"))),
+            Undo::Imported(applied) => self.session.undo_import(&applied).map(|n| {
+                (n > 0).then(|| {
+                    let what = crate::import::counts(
+                        applied.entries.len(),
+                        applied.notes.len(),
+                        applied.goals.len(),
+                    );
+                    format!("Took back the import: {what}.")
+                })
+            }),
+            Undo::ImportRemoved(removed) => {
+                let name = removed.name.clone();
+                let what = crate::import::counts(
+                    removed.entries.len(),
+                    removed.notes.len(),
+                    removed.goals.len(),
+                );
+                self.session
+                    .restore_import(removed)
+                    .map(|_| Some(format!("Put back {what} imported from {name}.")))
+            }
             Undo::Deleted(note) => {
                 let message = format!("Restored the note about @{}: {}", note.person, note.text);
                 self.session.restore_note(note).map(|()| Some(message))
@@ -880,6 +944,86 @@ impl App {
                 self.refresh_status();
             }
             Ok(None) => self.info("That was already gone."),
+            Err(e) => self.error(&format!("{e:#}")),
+        }
+    }
+
+    /// `/import @file`: a workbook first asks where each sheet goes (log, notes
+    /// about a person, goals, or skip), with a suggestion for each.
+    fn import_file(&mut self, file: PathBuf) {
+        if crate::import::sheet::is_sheet(&file) && !crate::import::is_staging(&file) {
+            let tables = match crate::import::sheet::read_tables(&file) {
+                Ok(tables) => tables,
+                Err(e) => return self.error(&format!("{e:#}")),
+            };
+            let sheets = crate::import::workbook::sheets(&tables, today());
+            if sheets.len() > 1 || sheets.iter().any(|s| s.kind != SheetKind::Log) {
+                self.panel = Some(Panel::Sheets {
+                    file,
+                    sheets,
+                    selected: 0,
+                });
+                return;
+            }
+        }
+        self.start(Job::Import(file, Choices::default()));
+    }
+
+    /// `/import remove`: pick an imported file to take its entries out again.
+    fn import_picker(&mut self) {
+        let files = match self.session.imported_files() {
+            Ok(files) => files,
+            Err(e) => return self.error(&format!("{e:#}")),
+        };
+        if files.is_empty() {
+            return self.info("Nothing imported yet.");
+        }
+        let items = files
+            .iter()
+            .map(|f| {
+                let detail = format!(
+                    "{} · {} → {} · imported {}",
+                    f.counts(),
+                    f.first,
+                    f.last,
+                    f.imported.with_timezone(&chrono::Local).date_naive()
+                );
+                Item::new(&f.name, detail, &f.name)
+            })
+            .collect();
+        self.panel = Some(select(
+            "Remove an import",
+            "enter removes everything that came from that file · /undo puts it back · esc keeps it",
+            items,
+            Purpose::RemoveImport,
+        ));
+    }
+
+    fn remove_import(&mut self, file: &str) {
+        match self.session.remove_import(file) {
+            Ok(Some(removed)) => {
+                let what = crate::import::counts(
+                    removed.entries.len(),
+                    removed.notes.len(),
+                    removed.goals.len(),
+                );
+                self.success(&format!(
+                    "Removed {what} imported from {}.  (/undo to put them back)",
+                    removed.name
+                ));
+                if let Some(backup) = &removed.backup {
+                    self.info(&format!(
+                        "A copy of the log entries is kept at {}",
+                        backup.display()
+                    ));
+                }
+                self.logged.push(Undo::ImportRemoved(removed));
+                self.refresh_status();
+            }
+            Ok(None) => self.info(&format!(
+                "Nothing was imported from {}. /import remove lists what was.",
+                file.trim()
+            )),
             Err(e) => self.error(&format!("{e:#}")),
         }
     }
@@ -1056,7 +1200,7 @@ impl App {
         }
     }
 
-    /// `/goal edit 2 text: …, due: 2026-12-31, expectation: SD3.mentoring.1`.
+    /// `/goal edit 2 text: …, due: 2026-12-31, expectation: L3.mentoring.1`.
     fn goal_edit(&mut self, args: &str) {
         let usage = "Usage: /goal edit <id> text: …, due: 2026-12-31, expectation: <id>  (an empty value clears)";
         let (id, rest) = args
@@ -1251,7 +1395,7 @@ impl App {
             };
         }
         if args.trim().is_empty() {
-            return self.info("Usage: /goal <text> [expectation id, e.g. SD3.mentoring.1]");
+            return self.info("Usage: /goal <text> [expectation id, e.g. L3.mentoring.1]");
         }
         // A last word that is an expectation of the ladder ties the goal to it.
         let (text, expectation) = match args.trim().rsplit_once(char::is_whitespace) {
@@ -1419,13 +1563,14 @@ impl App {
             "↑↓ choose · enter select · esc skip setup",
             vec![
                 Item::new(
-                    "Ollama on this computer",
-                    "recommended · private, free",
-                    "ollama",
+                    "LM Studio on this computer",
+                    "recommended · private",
+                    "lmstudio",
                 ),
+                Item::new("Ollama on this computer", "private", "ollama"),
                 Item::new(
                     "OpenAI-compatible endpoint",
-                    "your company's approved LLM, LM Studio, vLLM",
+                    "your company's approved LLM, vLLM",
                     "openai",
                 ),
             ],
@@ -1467,7 +1612,7 @@ impl App {
         ));
         items.push(Item::new(
             "Use the example ladder",
-            "SD1–SD5, edit later",
+            "L1–L5, edit later",
             "example",
         ));
         if existing.is_none() {
@@ -1478,6 +1623,19 @@ impl App {
             "↑↓ choose · enter select",
             items,
             Purpose::LadderSource,
+        ));
+    }
+
+    /// The last, optional step: bring in a 1:1 workbook or old notes now.
+    fn wizard_notes(&mut self) {
+        self.panel = Some(select(
+            "Your existing notes",
+            "a 1:1 workbook (agenda, follow-ups, what the next level needs) or old work notes · /import @file does this any time",
+            vec![
+                Item::new("Import a file now", "xlsx, csv, txt or md", "import"),
+                Item::new("Skip for now", "", "skip"),
+            ],
+            Purpose::NotesSource,
         ));
     }
 
@@ -1591,19 +1749,174 @@ impl App {
                     });
                 }
             },
+            Panel::LadderSheets {
+                file,
+                mut sheets,
+                mut selected,
+            } => match key.code {
+                KeyCode::Up | KeyCode::Down | KeyCode::Tab => {
+                    let n = sheets.len().max(1);
+                    selected = if key.code == KeyCode::Up {
+                        (selected + n - 1) % n
+                    } else {
+                        (selected + 1) % n
+                    };
+                    self.panel = Some(Panel::LadderSheets {
+                        file,
+                        sheets,
+                        selected,
+                    });
+                }
+                KeyCode::Left | KeyCode::Right => {
+                    if let Some(s) = sheets.get_mut(selected) {
+                        s.role = if key.code == KeyCode::Left {
+                            s.role.prev()
+                        } else {
+                            s.role.next()
+                        };
+                    }
+                    self.panel = Some(Panel::LadderSheets {
+                        file,
+                        sheets,
+                        selected,
+                    });
+                }
+                KeyCode::Enter => {
+                    use crate::ladder::SheetRole;
+                    if sheets.iter().all(|s| s.role != SheetRole::Expectations) {
+                        self.info("Mark at least one sheet as expectations (← →).");
+                        self.panel = Some(Panel::LadderSheets {
+                            file,
+                            sheets,
+                            selected,
+                        });
+                        return;
+                    }
+                    let roles = sheets.iter().map(|s| (s.name.clone(), s.role)).collect();
+                    self.start(Job::LadderImport(file, roles));
+                }
+                KeyCode::Esc => {
+                    self.info("Nothing read.");
+                    if self.wizard {
+                        self.wizard_ladder();
+                    }
+                }
+                _ => {
+                    self.panel = Some(Panel::LadderSheets {
+                        file,
+                        sheets,
+                        selected,
+                    })
+                }
+            },
+            Panel::Sheets {
+                file,
+                mut sheets,
+                mut selected,
+            } => match key.code {
+                KeyCode::Up | KeyCode::Down | KeyCode::Tab => {
+                    let n = sheets.len().max(1);
+                    selected = if key.code == KeyCode::Up {
+                        (selected + n - 1) % n
+                    } else {
+                        (selected + 1) % n
+                    };
+                    self.panel = Some(Panel::Sheets {
+                        file,
+                        sheets,
+                        selected,
+                    });
+                }
+                KeyCode::Left | KeyCode::Right => {
+                    if let Some(s) = sheets.get_mut(selected) {
+                        s.kind = if key.code == KeyCode::Left {
+                            s.kind.prev()
+                        } else {
+                            s.kind.next()
+                        };
+                    }
+                    self.panel = Some(Panel::Sheets {
+                        file,
+                        sheets,
+                        selected,
+                    });
+                }
+                KeyCode::Enter => {
+                    let kinds: Vec<(String, SheetKind)> =
+                        sheets.iter().map(|s| (s.name.clone(), s.kind)).collect();
+                    if kinds.iter().all(|(_, k)| *k == SheetKind::Skip) {
+                        return self.info("Every sheet is skipped; nothing to import.");
+                    }
+                    if kinds.iter().any(|(_, k)| *k == SheetKind::Notes) {
+                        let manager = self.session.people().ok().and_then(|p| {
+                            p.people
+                                .iter()
+                                .find(|x| x.relation == crate::people::Relation::Manager)
+                                .map(|x| x.handle.clone())
+                        });
+                        self.panel = Some(input(
+                            "Whose notes are these?",
+                            "their @handle, e.g. your lead · someone new is added to your people as your manager · enter to read the file",
+                            &manager.map(|h| format!("@{h}")).unwrap_or_default(),
+                            Purpose::ImportPerson(file, kinds),
+                        ));
+                    } else {
+                        self.start(Job::Import(
+                            file,
+                            Choices {
+                                kinds,
+                                person: None,
+                            },
+                        ));
+                    }
+                }
+                KeyCode::Esc => self.info("Nothing imported."),
+                _ => {
+                    self.panel = Some(Panel::Sheets {
+                        file,
+                        sheets,
+                        selected,
+                    })
+                }
+            },
             Panel::Import {
                 preview,
                 mut scroll,
             } => match key.code {
                 KeyCode::Enter => match self.session.apply_import(&preview) {
-                    Ok(n) => {
-                        self.success(&format!("Added {n} entries to your log."));
+                    Ok(applied) => {
+                        let what = crate::import::counts(
+                            applied.entries.len(),
+                            applied.notes.len(),
+                            applied.goals.len(),
+                        );
+                        self.success(&format!("Added {what}.  (/undo to take them back)"));
+                        if let Some(person) = applied.notes.first().and(preview.person.as_ref()) {
+                            self.info(&format!(
+                                "The notes are on @{person}'s page: /people @{person}"
+                            ));
+                        }
+                        if !applied.goals.is_empty() {
+                            self.info("See your goals with /goals.");
+                        }
+                        self.logged.push(Undo::Imported(applied));
                         self.refresh_status();
                     }
                     Err(e) => self.error(&format!("{e:#}")),
                 },
                 KeyCode::Char('e') => {
                     self.request = Some(Request::EditStaging(preview.staging.clone()));
+                    let preview = *preview;
+                    if !preview.notes.is_empty() || !preview.goals.is_empty() {
+                        self.carried = Some(Carried {
+                            staging: preview.staging,
+                            person: preview.person,
+                            notes: preview.notes,
+                            note_duplicates: preview.note_duplicates,
+                            goals: preview.goals,
+                            goal_duplicates: preview.goal_duplicates,
+                        });
+                    }
                 }
                 KeyCode::Esc => self.info(&format!(
                     "Nothing added. The staging file is kept at {}",
@@ -1658,7 +1971,10 @@ impl App {
         }
     }
 
-    fn on_panel_cancel(&mut self, _purpose: &Purpose) {
+    fn on_panel_cancel(&mut self, purpose: &Purpose) {
+        if self.wizard && matches!(purpose, Purpose::NotesSource | Purpose::NotesPath) {
+            return self.finish_wizard();
+        }
         if self.wizard {
             self.wizard = false;
             self.refresh_status();
@@ -1667,15 +1983,36 @@ impl App {
     }
 
     fn on_select(&mut self, purpose: Purpose, value: String) {
+        if purpose == Purpose::RemoveImport {
+            return self.remove_import(&value);
+        }
+
+        if purpose == Purpose::NotesSource {
+            if value != "import" {
+                return self.finish_wizard();
+            }
+            self.panel = Some(input(
+                "Path to your file",
+                "xlsx, csv, txt or md · tab completes paths · enter to read it",
+                "",
+                Purpose::NotesPath,
+            ));
+            return;
+        }
         let cfg = &mut self.session.cfg;
         match purpose {
             Purpose::Provider => {
-                if value == "ollama" {
-                    if cfg.llm.provider != Provider::Ollama {
-                        cfg.llm.base_url = "http://localhost:11434".into();
+                let local = match value.as_str() {
+                    "ollama" => Some(Provider::Ollama),
+                    "lmstudio" => Some(Provider::Lmstudio),
+                    _ => None,
+                };
+                if let Some(provider) = local {
+                    if cfg.llm.provider != provider {
+                        cfg.llm.base_url = provider.default_url().into();
                         cfg.llm.api_key_env = None;
                     }
-                    cfg.llm.provider = Provider::Ollama;
+                    cfg.llm.provider = provider;
                     cfg.llm.allow_remote = false;
                     let llm = cfg.llm.clone();
                     self.start(Job::Models(llm));
@@ -1705,18 +2042,30 @@ impl App {
                     ));
                     return;
                 }
-                cfg.llm.model = value.clone();
-                if purpose == Purpose::Model {
-                    if let Err(e) = self.session.save_config() {
-                        return self.error(&format!("{e:#}"));
-                    }
-                    self.refresh_status();
-                    self.success(&format!("Model set to {value}."));
-                } else {
-                    self.wizard_language();
+                if value == "__pull" {
+                    // The model is used only once it is downloaded
+                    // (`Output::Pulled`), so a stopped download changes nothing.
+                    let mut llm = cfg.llm.clone();
+                    llm.model = llm.provider.recommended_model().into();
+                    self.info(&format!(
+                        "Downloading {} (about 8 GB, once). Esc stops it.",
+                        llm.model
+                    ));
+                    self.start(Job::Pull(llm));
+                    return;
                 }
+                self.use_model(value);
             }
             Purpose::ModelsFailed => match value.as_str() {
+                "__pull" => {
+                    let mut llm = cfg.llm.clone();
+                    llm.model = llm.provider.recommended_model().into();
+                    self.info(&format!(
+                        "Downloading {} (about 8 GB, once). Esc stops it.",
+                        llm.model
+                    ));
+                    self.start(Job::Pull(llm));
+                }
                 "retry" => {
                     let llm = cfg.llm.clone();
                     self.start(Job::Models(llm));
@@ -1751,7 +2100,7 @@ impl App {
                 "keep" => {
                     let levels_set = cfg.current_level.is_some() && cfg.target_level.is_some();
                     if levels_set {
-                        self.finish_wizard();
+                        self.wizard_notes();
                     } else {
                         self.level_picker();
                     }
@@ -1759,7 +2108,7 @@ impl App {
                 "import" => {
                     self.panel = Some(input(
                         "Path to your ladder document",
-                        "txt, md, xlsx or yaml · tab completes paths · enter to read it",
+                        "txt, md, xlsx or yaml · in a workbook you pick the sheet with the levels (\"L2\" headings with items under them) · tab completes paths",
                         "",
                         Purpose::LadderPath,
                     ));
@@ -1774,7 +2123,7 @@ impl App {
                     }
                     Err(e) => self.error(&format!("{e:#}")),
                 },
-                _ => self.finish_wizard(),
+                _ => self.wizard_notes(),
             },
             Purpose::CurrentLevel => {
                 let Ok(Some(l)) = self.session.ladder() else {
@@ -1812,7 +2161,7 @@ impl App {
                         self.refresh_status();
                         self.success(&format!("Levels set: {current} → {value}. Try /gap."));
                         if self.wizard {
-                            self.finish_wizard();
+                            self.wizard_notes();
                         }
                     }
                     Err(e) => self.error(&format!("{e:#}")),
@@ -1823,6 +2172,25 @@ impl App {
     }
 
     fn on_input(&mut self, purpose: Purpose, value: String) {
+        if let Purpose::ImportPerson(file, kinds) = purpose {
+            let Some(handle) = crate::people::normalize_handle(&value) else {
+                self.info("Type their @handle, e.g. @lead.");
+                self.panel = Some(input(
+                    "Whose notes are these?",
+                    "their @handle, e.g. your lead · enter to read the file",
+                    &value,
+                    Purpose::ImportPerson(file, kinds),
+                ));
+                return;
+            };
+            return self.start(Job::Import(
+                file,
+                Choices {
+                    kinds,
+                    person: Some(handle),
+                },
+            ));
+        }
         let cfg = &mut self.session.cfg;
         match purpose {
             Purpose::ModelName => {
@@ -1875,14 +2243,38 @@ impl App {
                     ));
                 }
             }
+            Purpose::NotesPath => {
+                if value.is_empty() {
+                    return self.wizard_notes();
+                }
+                self.finish_wizard();
+                self.import_file(path_arg(&value));
+            }
             Purpose::LadderPath => {
                 if value.is_empty() {
                     return self.wizard_ladder();
                 }
-                self.start(Job::LadderImport(path_arg(&value)));
+                self.ladder_import(path_arg(&value));
             }
             _ => {}
         }
+    }
+
+    /// Reads a ladder document; in a workbook with several sheets, asks which
+    /// sheet holds the levels first, suggesting the one with level headings.
+    fn ladder_import(&mut self, file: PathBuf) {
+        let sheets = match self.session.ladder_sheets(&file) {
+            Ok(sheets) => sheets,
+            Err(e) => return self.error(&format!("{e:#}")),
+        };
+        if sheets.is_empty() {
+            return self.start(Job::LadderImport(file, Vec::new()));
+        }
+        self.panel = Some(Panel::LadderSheets {
+            file,
+            sheets,
+            selected: 0,
+        });
     }
 
     fn save_ladder(&mut self, ladder: Ladder, file: &std::path::Path) {
@@ -1897,7 +2289,7 @@ impl App {
                 if !levels_ok {
                     self.level_picker();
                 } else if self.wizard {
-                    self.finish_wizard();
+                    self.wizard_notes();
                 }
             }
             Err(e) => self.error(&format!("{e:#}")),
@@ -1931,6 +2323,7 @@ impl App {
                         self.wizard_ladder();
                     }
                 }
+                Event::ModelReady { model, result } => self.on_model_ready(&model, result),
                 Event::Cancelled => {
                     let partial = self.job.take().map(|j| j.streamed).unwrap_or_default();
                     if !partial.trim().is_empty() {
@@ -1991,22 +2384,53 @@ impl App {
                 self.print(lines);
                 self.info(&format!("Saved {}", a.path.display()));
             }
-            Output::Import(preview) => {
+            Output::Import(mut preview) => {
+                // Read again after editing its log entries: the notes and
+                // goals were not in the staging file, so they come back here.
+                if let Some(c) = self.carried.take() {
+                    if c.staging == preview.file {
+                        preview.person = c.person;
+                        preview.notes = c.notes;
+                        preview.note_duplicates = c.note_duplicates;
+                        preview.goals = c.goals;
+                        preview.goal_duplicates = c.goal_duplicates;
+                    }
+                }
                 for w in preview.collected.warnings.iter().take(5) {
                     self.info(&format!("warning: {w}"));
                 }
-                if preview.plan.new.is_empty() {
+                if preview.is_empty() {
+                    let mut already = vec![format!("{} log duplicates", preview.plan.duplicates)];
+                    if !preview.plan.undated.is_empty() {
+                        already.push(format!("{} without a date", preview.plan.undated.len()));
+                    }
+                    if preview.note_duplicates + preview.goal_duplicates > 0 {
+                        already.push(format!(
+                            "{} already there",
+                            crate::import::counts(
+                                0,
+                                preview.note_duplicates,
+                                preview.goal_duplicates
+                            )
+                        ));
+                    }
                     self.info(&format!(
-                        "Nothing new in {} ({} duplicates, {} without a date).",
+                        "Nothing new in {} ({}).",
                         preview.file.display(),
-                        preview.plan.duplicates,
-                        preview.plan.undated.len()
+                        already.join(", ")
                     ));
                 } else {
                     self.panel = Some(Panel::Import { preview, scroll: 0 });
                 }
             }
-            Output::Ladder(ladder, file) => {
+            Output::Ladder {
+                ladder,
+                file,
+                warnings,
+            } => {
+                for w in warnings.iter().take(5) {
+                    self.info(&format!("warning: {w}"));
+                }
                 self.panel = Some(Panel::Ladder {
                     ladder,
                     file,
@@ -2014,6 +2438,10 @@ impl App {
                 });
             }
             Output::Models(result) => self.on_models(result),
+            Output::Pulled(model) => {
+                self.success(&format!("Downloaded {model}."));
+                self.use_model(model);
+            }
         }
     }
 
@@ -2031,13 +2459,23 @@ impl App {
                     .map(|m| {
                         let detail = match (m.as_str(), *m == current) {
                             (_, true) => "current",
-                            ("gemma4:12b", _) => "recommended",
+                            ("gemma4:12b" | "google/gemma-4-e4b", _) => "recommended",
+                            ("google/gemma-4-12b", _) => "also works · slower",
                             ("gemma3:12b", _) => "also works",
                             _ => "",
                         };
                         Item::new(m.clone(), detail, m.clone())
                     })
                     .collect();
+                let provider = self.session.cfg.llm.provider;
+                let recommended = provider.recommended_model();
+                if provider != Provider::Openai && !models.iter().any(|m| m == recommended) {
+                    items.push(Item::new(
+                        format!("Download {recommended}"),
+                        "recommended · about 7 GB, once",
+                        "__pull",
+                    ));
+                }
                 items.push(Item::new("Type a model name…", "", "__manual"));
                 let selected = models
                     .iter()
@@ -2053,11 +2491,64 @@ impl App {
                     purpose,
                 });
             }
-            Ok(_) => self.models_failed(
-                "Ollama is running but has no models. In another terminal run: ollama pull gemma4:12b",
-            ),
-            Err(e) => self.models_failed(&format!(
-                "Could not list models ({e}). Is Ollama running? Start it with `ollama serve`."
+            Ok(_) => {
+                let provider = self.session.cfg.llm.provider;
+                let mut items = Vec::new();
+                // Only Ollama and LM Studio can download a model for us.
+                if provider != Provider::Openai {
+                    items.push(Item::new(
+                        format!("Download {}", provider.recommended_model()),
+                        "about 7 GB, once · needs 16 GB of memory",
+                        "__pull",
+                    ));
+                }
+                items.push(Item::new("Retry", "", "retry"));
+                items.push(Item::new("Type a model name", "", "manual"));
+                self.panel = Some(select(
+                    "No models yet",
+                    if provider == Provider::Openai {
+                        "The endpoint lists no models. Type the model's name, or retry."
+                    } else {
+                        "No models are installed yet. Download the recommended one here."
+                    },
+                    items,
+                    Purpose::ModelsFailed,
+                ))
+            }
+            Err(e) => self.models_failed(&format!("Could not list models ({e}).")),
+        }
+    }
+
+    /// Uses `model` from now on: in the setup it goes on to the next step,
+    /// otherwise it is saved. Either way it is loaded and tried in the background.
+    fn use_model(&mut self, model: String) {
+        self.session.cfg.llm.model = model.clone();
+        jobs::check_model(self.session.cfg.llm.clone(), self.tx.clone());
+        if self.wizard {
+            self.wizard_language();
+            return;
+        }
+        if let Err(e) = self.session.save_config() {
+            return self.error(&format!("{e:#}"));
+        }
+        self.refresh_status();
+        self.success(&format!("Model set to {model}."));
+    }
+
+    /// The answer to the background test question about a model.
+    fn on_model_ready(&mut self, model: &str, result: Result<(Duration, Duration), String>) {
+        match result {
+            Ok((_, answered)) if answered > Duration::from_secs(10) => self.info(&format!(
+                "{model} works, but answering a one-word question took {:.0} s. This computer may be short of memory for it; imports and analyses will be slow. A smaller model is faster.",
+                answered.as_secs_f32()
+            )),
+            Ok((loaded, answered)) => self.success(&format!(
+                "{model} is ready: loaded in {:.1} s, answered in {:.1} s.",
+                loaded.as_secs_f32(),
+                answered.as_secs_f32()
+            )),
+            Err(e) => self.error(&format!(
+                "{model} did not answer a test question: {e}"
             )),
         }
     }
@@ -2194,5 +2685,212 @@ mod parse_tests {
         );
         assert_eq!(kind_prefix("given"), (None, "given"));
         assert_eq!(kind_prefix("plain text"), (None, "plain text"));
+    }
+}
+
+#[cfg(test)]
+mod setup_tests {
+    use super::*;
+    use crate::config::Paths;
+
+    /// An app whose model endpoint is closed, so nothing here reaches a real model.
+    fn app() -> (App, tempfile::TempDir) {
+        let home = tempfile::tempdir().unwrap();
+        let mut session = Session::at(Paths::at(home.path().to_path_buf())).unwrap();
+        session.cfg.llm.base_url = "http://127.0.0.1:9".into();
+        session.save_config().unwrap();
+        (App::new(session, 100, false), home)
+    }
+
+    fn key(app: &mut App, code: KeyCode) {
+        app.on_key(KeyEvent::new(code, KeyModifiers::NONE));
+    }
+
+    fn printed(app: &App) -> String {
+        app.out
+            .iter()
+            .map(super::super::markdown::plain)
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn setup_ends_with_an_optional_notes_import() {
+        let (mut app, home) = app();
+        app.wizard = true;
+        app.wizard_notes();
+        key(&mut app, KeyCode::Down);
+        key(&mut app, KeyCode::Enter);
+        assert!(!app.wizard, "skipping ends the setup");
+        assert!(printed(&app).contains("You're all set"));
+
+        // Importing goes to the same sheet chooser as /import.
+        let file = home.path().join("lead.xlsx");
+        let mut book = rust_xlsxwriter::Workbook::new();
+        let sheet = book.add_worksheet();
+        sheet.set_name("Agenda").unwrap();
+        for (c, v) in ["Tarih", "Gündem", "Aksiyon"].iter().enumerate() {
+            sheet.write_string(0, c as u16, *v).unwrap();
+        }
+        book.save(&file).unwrap();
+        app.wizard = true;
+        app.wizard_notes();
+        key(&mut app, KeyCode::Enter);
+        match &mut app.panel {
+            Some(Panel::Input { input, .. }) => {
+                input.insert_str(file.display().to_string());
+            }
+            _ => panic!("asks for the file"),
+        }
+        key(&mut app, KeyCode::Enter);
+        assert!(!app.wizard);
+        assert!(matches!(app.panel, Some(Panel::Sheets { .. })));
+
+        // Esc on that step also just finishes the setup.
+        app.panel = None;
+        app.wizard = true;
+        app.wizard_notes();
+        key(&mut app, KeyCode::Esc);
+        assert!(!app.wizard);
+        assert!(!printed(&app).contains("Setup stopped"));
+    }
+
+    #[test]
+    fn a_missing_model_can_be_downloaded() {
+        let (mut app, _home) = app();
+        app.on_models(Ok(vec!["llama3:latest".into()]));
+        let Some(Panel::Select { items, .. }) = &app.panel else {
+            panic!("lists the models");
+        };
+        assert!(items
+            .iter()
+            .any(|i| i.value == "__pull" && i.label.contains("google/gemma-4-e4b")));
+
+        app.on_models(Ok(Vec::new()));
+        let Some(Panel::Select { title, items, .. }) = &app.panel else {
+            panic!("offers a download");
+        };
+        assert_eq!(title, "No models yet");
+        assert_eq!(items[0].value, "__pull");
+
+        // Choosing the download does not switch to the model yet: a stopped
+        // download leaves the setup as it was.
+        let before = app.session.cfg.llm.model.clone();
+        app.on_select(Purpose::ModelsFailed, "__pull".into());
+        assert_eq!(app.session.cfg.llm.model, before);
+        app.job = None;
+
+        // An OpenAI-compatible endpoint cannot download.
+        app.session.cfg.llm.provider = Provider::Openai;
+        app.on_models(Ok(Vec::new()));
+        let Some(Panel::Select { items, .. }) = &app.panel else {
+            panic!("offers what it can");
+        };
+        assert!(items.iter().all(|i| i.value != "__pull"));
+        app.session.cfg.llm.provider = Provider::Lmstudio;
+
+        // After a download the model is used and saved.
+        app.panel = None;
+        app.on_output(Output::Pulled("google/gemma-4-e4b".into()));
+        assert_eq!(app.session.cfg.llm.model, "google/gemma-4-e4b");
+        assert!(printed(&app).contains("Model set to google/gemma-4-e4b"));
+    }
+
+    /// A 1:1 workbook with only an agenda: notes, no log entries.
+    fn agenda(dir: &std::path::Path) -> PathBuf {
+        let file = dir.join("lead.xlsx");
+        let mut book = rust_xlsxwriter::Workbook::new();
+        let sheet = book.add_worksheet();
+        sheet.set_name("Agenda").unwrap();
+        for (r, row) in [
+            ["Tarih", "Gündem", "Aksiyon"],
+            ["02.09.2026", "On-call", "Runbook yaz"],
+        ]
+        .iter()
+        .enumerate()
+        {
+            for (c, v) in row.iter().enumerate() {
+                sheet.write_string(r as u32, c as u16, *v).unwrap();
+            }
+        }
+        book.save(&file).unwrap();
+        file
+    }
+
+    fn lead_preview(app: &App, file: &std::path::Path) -> Box<ImportPreview> {
+        let choices = Choices {
+            kinds: Vec::new(),
+            person: Some("lead".into()),
+        };
+        Box::new(
+            app.session
+                .import_preview(file, None, None, None, &choices, &mut crate::no_progress)
+                .unwrap(),
+        )
+    }
+
+    #[test]
+    fn notes_only_imports_open_the_preview_and_survive_editing() {
+        let (mut app, home) = app();
+        let file = agenda(home.path());
+
+        // No log entries, only notes: still something to add.
+        app.on_output(Output::Import(lead_preview(&app, &file)));
+        assert!(
+            matches!(app.panel, Some(Panel::Import { .. })),
+            "{}",
+            printed(&app)
+        );
+
+        // [e] opens the (log-only) staging file; the notes wait meanwhile.
+        key(&mut app, KeyCode::Char('e'));
+        let Some(Request::EditStaging(staging)) = app.request.take() else {
+            panic!("asks to edit the staging file");
+        };
+        let reread = app
+            .session
+            .import_preview(
+                &staging,
+                None,
+                None,
+                None,
+                &Choices::default(),
+                &mut crate::no_progress,
+            )
+            .unwrap();
+        assert!(reread.notes.is_empty(), "the staging file has no notes");
+        app.on_output(Output::Import(Box::new(reread)));
+        let Some(Panel::Import { preview, .. }) = &app.panel else {
+            panic!("the preview opens again: {}", printed(&app));
+        };
+        assert_eq!(preview.notes.len(), 2, "1:1 note and follow-up are back");
+
+        key(&mut app, KeyCode::Enter);
+        assert_eq!(app.session.notes().unwrap().len(), 2);
+        assert!(printed(&app).contains("Added 2 notes"), "{}", printed(&app));
+    }
+
+    #[test]
+    fn the_model_check_says_how_it_went() {
+        let (mut app, _home) = app();
+        app.on_model_ready(
+            "gemma4:12b",
+            Ok((Duration::from_millis(5200), Duration::from_millis(300))),
+        );
+        app.on_model_ready(
+            "gemma4:12b",
+            Ok((Duration::from_secs(9), Duration::from_secs(25))),
+        );
+        app.on_model_ready("gemma4:12b", Err("connection refused".into()));
+        let out = printed(&app);
+        assert!(
+            out.contains("gemma4:12b is ready: loaded in 5.2 s, answered in 0.3 s."),
+            "{out}"
+        );
+        assert!(out.contains("took 25 s"), "{out}");
+        assert!(
+            out.contains("did not answer a test question: connection refused"),
+            "{out}"
+        );
     }
 }

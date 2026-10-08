@@ -260,6 +260,9 @@ pub struct Note {
     /// Follow-ups only: done.
     #[serde(default, skip_serializing_if = "is_false")]
     pub done: bool,
+    /// `import:<file>:<location>` for a note imported from a file; empty otherwise.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub source: String,
     pub created_at: DateTime<Utc>,
 }
 
@@ -273,6 +276,7 @@ impl Note {
             kind,
             text,
             done: false,
+            source: String::new(),
             created_at: Utc::now(),
         }
     }

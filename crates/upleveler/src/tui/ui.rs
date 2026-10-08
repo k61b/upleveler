@@ -133,6 +133,83 @@ fn panel_lines(app: &App, width: u16) -> Vec<Line<'static>> {
                 ));
                 // The input box itself is drawn separately below these lines.
             }
+            Panel::LadderSheets {
+                sheets, selected, ..
+            } => {
+                use crate::ladder::SheetRole;
+                lines.push(Line::styled("What is each sheet for?", theme::bold()));
+                lines.push(Line::styled(
+                    "  ↑↓ choose a sheet · ←→ change its role · enter read the ladder · esc cancel",
+                    theme::dim(),
+                ));
+                let name_width = sheets
+                    .iter()
+                    .map(|s| s.name.chars().count())
+                    .max()
+                    .unwrap_or(0)
+                    .min(24);
+                for (i, s) in sheets.iter().enumerate() {
+                    let mark = if i == *selected { "❯ " } else { "  " };
+                    let style = if i == *selected {
+                        theme::accent_bold()
+                    } else {
+                        Style::default()
+                    };
+                    let found = match s.role {
+                        SheetRole::Expectations if !s.levels.is_empty() => {
+                            format!("{} · {} expectations", s.levels.join(", "), s.items)
+                        }
+                        SheetRole::Expectations => "the model reads it".to_string(),
+                        SheetRole::Skip => format!("{} rows", s.rows),
+                        _ => s.levels.join(", "),
+                    };
+                    lines.push(Line::from(fit(
+                        vec![
+                            Span::styled(
+                                format!("{mark}{:<name_width$}  ", truncate(&s.name, name_width)),
+                                style,
+                            ),
+                            Span::styled(format!("{:<16}", s.role.label()), theme::accent()),
+                            Span::styled(found, theme::dim()),
+                        ],
+                        w,
+                    )));
+                }
+            }
+            Panel::Sheets {
+                sheets, selected, ..
+            } => {
+                lines.push(Line::styled("Where should each sheet go?", theme::bold()));
+                lines.push(Line::styled(
+                    "  ↑↓ choose a sheet · ←→ change where it goes · enter read the file · esc cancel",
+                    theme::dim(),
+                ));
+                let name_width = sheets
+                    .iter()
+                    .map(|s| s.name.chars().count())
+                    .max()
+                    .unwrap_or(0)
+                    .min(24);
+                for (i, s) in sheets.iter().enumerate() {
+                    let mark = if i == *selected { "❯ " } else { "  " };
+                    let style = if i == *selected {
+                        theme::accent_bold()
+                    } else {
+                        Style::default()
+                    };
+                    lines.push(Line::from(fit(
+                        vec![
+                            Span::styled(
+                                format!("{mark}{:<name_width$}  ", truncate(&s.name, name_width)),
+                                style,
+                            ),
+                            Span::styled(format!("{:<22}", s.kind.label()), theme::accent()),
+                            Span::styled(format!("{} rows", s.rows), theme::dim()),
+                        ],
+                        w,
+                    )));
+                }
+            }
             Panel::Import { preview, scroll } => {
                 let plan = &preview.plan;
                 lines.push(Line::from(vec![
@@ -149,31 +226,119 @@ fn panel_lines(app: &App, width: u16) -> Vec<Line<'static>> {
                     (Some(a), Some(b)) => format!("  {} → {}", a.date, b.date),
                     _ => String::new(),
                 };
-                lines.push(Line::from(vec![
-                    Span::styled(format!("  {} new", plan.new.len()), theme::good()),
-                    Span::styled(span, theme::dim()),
-                    Span::styled(
+                let has_log = !preview.collected.drafts.is_empty();
+                if has_log {
+                    lines.push(Line::from(vec![
+                        Span::styled(
+                            format!("  {} new log entries", plan.new.len()),
+                            theme::good(),
+                        ),
+                        Span::styled(span, theme::dim()),
+                        Span::styled(
+                            format!(
+                                " · {} duplicates · {} without a date",
+                                plan.duplicates,
+                                plan.undated.len(),
+                            ),
+                            theme::dim(),
+                        ),
+                    ]));
+                    let shown = if preview.notes.is_empty() && preview.goals.is_empty() {
+                        6
+                    } else {
+                        3
+                    };
+                    for e in plan.new.iter().skip(*scroll).take(shown) {
+                        lines.push(Line::from(fit(
+                            vec![
+                                Span::styled(format!("    {} ", e.date), theme::accent()),
+                                Span::raw(e.text.replace('\n', " / ")),
+                            ],
+                            w,
+                        )));
+                    }
+                }
+                if !preview.notes.is_empty() || preview.note_duplicates > 0 {
+                    let follow_ups = preview
+                        .notes
+                        .iter()
+                        .filter(|n| n.kind == crate::people::NoteKind::FollowUp)
+                        .count();
+                    lines.push(Line::from(vec![
+                        Span::styled(
+                            format!(
+                                "  {} new notes about @{}",
+                                preview.notes.len(),
+                                preview.person.as_deref().unwrap_or("?")
+                            ),
+                            theme::good(),
+                        ),
+                        Span::styled(
+                            format!(
+                                " · {follow_ups} follow-ups · {} already there",
+                                preview.note_duplicates
+                            ),
+                            theme::dim(),
+                        ),
+                    ]));
+                    for n in preview.notes.iter().take(3) {
+                        lines.push(Line::from(fit(
+                            vec![
+                                Span::styled(format!("    {} ", n.date), theme::accent()),
+                                Span::styled(format!("{} ", n.kind.label()), theme::dim()),
+                                Span::raw(n.text.replace('\n', " / ")),
+                            ],
+                            w,
+                        )));
+                    }
+                }
+                if !preview.goals.is_empty() || preview.goal_duplicates > 0 {
+                    let tied = preview
+                        .goals
+                        .iter()
+                        .filter(|g| g.expectation.is_some())
+                        .count();
+                    lines.push(Line::from(vec![
+                        Span::styled(
+                            format!("  {} new goals", preview.goals.len()),
+                            theme::good(),
+                        ),
+                        Span::styled(
+                            format!(
+                                " · {tied} tied to your ladder · {} already there",
+                                preview.goal_duplicates
+                            ),
+                            theme::dim(),
+                        ),
+                    ]));
+                    for g in preview.goals.iter().take(3) {
+                        lines.push(Line::from(fit(
+                            vec![
+                                Span::styled(
+                                    format!(
+                                        "    {} ",
+                                        g.expectation.as_deref().unwrap_or("free goal")
+                                    ),
+                                    theme::accent(),
+                                ),
+                                Span::raw(g.text.clone()),
+                            ],
+                            w,
+                        )));
+                    }
+                }
+                if !preview.collected.warnings.is_empty() {
+                    lines.push(Line::styled(
                         format!(
-                            " · {} duplicates · {} without a date · {} warnings",
-                            plan.duplicates,
-                            plan.undated.len(),
+                            "  {} warnings, printed above",
                             preview.collected.warnings.len()
                         ),
                         theme::dim(),
-                    ),
-                ]));
-                for e in plan.new.iter().skip(*scroll).take(6) {
-                    lines.push(Line::from(fit(
-                        vec![
-                            Span::styled(format!("  {} ", e.date), theme::accent()),
-                            Span::raw(e.text.replace('\n', " / ")),
-                        ],
-                        w,
-                    )));
+                    ));
                 }
                 lines.push(Line::from(vec![
                     Span::styled("  [enter]", theme::accent_bold()),
-                    Span::raw(format!(" add {}   ", plan.new.len())),
+                    Span::raw(" add them   "),
                     Span::styled("[e]", theme::accent_bold()),
                     Span::raw(" edit in $EDITOR   "),
                     Span::styled("[↑↓]", theme::dim()),
@@ -464,7 +629,9 @@ mod tests {
 
     fn app() -> (App, tempfile::TempDir) {
         let dir = tempfile::tempdir().unwrap();
-        let session = Session::at(Paths::at(dir.path().to_path_buf())).unwrap();
+        let mut session = Session::at(Paths::at(dir.path().to_path_buf())).unwrap();
+        // A closed port: no test reaches a real model.
+        session.cfg.llm.base_url = "http://127.0.0.1:9".into();
         session.save_config().unwrap();
         (App::new(session, 79, false), dir)
     }
@@ -634,12 +801,12 @@ mod tests {
         let ladder =
             crate::ladder::Ladder::from_yaml(include_str!("../../ladder.example.yaml")).unwrap();
         app.session.save_ladder(&ladder).unwrap();
-        app.submit("/goal Mentor a junior developer SD3.mentoring.1");
+        app.submit("/goal Mentor a junior developer L3.mentoring.1");
         let goals = app.session.goals().unwrap();
         let tied = goals.goals.last().unwrap();
         assert_eq!(
             (tied.text.as_str(), tied.expectation.as_deref()),
-            ("Mentor a junior developer", Some("SD3.mentoring.1"))
+            ("Mentor a junior developer", Some("L3.mentoring.1"))
         );
 
         // Everything can be changed in the app, and /undo takes it back.
@@ -684,7 +851,7 @@ mod tests {
             )
         );
         app.submit("/undo");
-        assert_eq!(goal(&app).expectation.as_deref(), Some("SD3.mentoring.1"));
+        assert_eq!(goal(&app).expectation.as_deref(), Some("L3.mentoring.1"));
 
         let note_id = app.session.notes().unwrap()[0].short_id().to_string();
         app.submit(&format!(
@@ -745,6 +912,201 @@ mod tests {
         assert!(render(&app).contains("Commands"));
         key(&mut app, KeyCode::Char('x'));
         assert!(app.panel.is_none());
+    }
+
+    #[test]
+    fn import_remove_and_undo() {
+        use crate::store::Entry;
+        let (mut app, dir) = app();
+        let day = chrono::NaiveDate::from_ymd_opt(2025, 3, 4).unwrap();
+        app.session
+            .store
+            .append(&[
+                Entry::new(day, "Fixed the retry bug", vec![], "import:old.xlsx:Log:R2"),
+                Entry::new(
+                    day,
+                    "Wrote the queue runbook",
+                    vec![],
+                    "import:old.xlsx:Log:R3",
+                ),
+                Entry::new(day, "Paired on the cache warmup", vec![], "manual"),
+            ])
+            .unwrap();
+
+        // The picker lists what was imported; choosing one removes its entries.
+        app.submit("/import remove");
+        assert!(render(&app).contains("old.xlsx"));
+        key(&mut app, KeyCode::Enter);
+        let left = app.session.entries().unwrap();
+        assert_eq!(left.len(), 1);
+        assert_eq!(left[0].source, "manual");
+        assert!(dir.path().join("staging").read_dir().unwrap().count() == 1);
+
+        app.submit("/undo");
+        assert_eq!(app.session.entries().unwrap().len(), 3);
+
+        // By name, and an import applied here is taken back by /undo.
+        app.submit("/import remove ~/Downloads/old.xlsx");
+        assert_eq!(app.session.entries().unwrap().len(), 1);
+        let backup = dir
+            .path()
+            .join("staging")
+            .read_dir()
+            .unwrap()
+            .next()
+            .unwrap();
+        let preview = app
+            .session
+            .import_preview(
+                &backup.unwrap().path(),
+                None,
+                None,
+                None,
+                &Default::default(),
+                &mut crate::no_progress,
+            )
+            .unwrap();
+        app.panel = Some(Panel::Import {
+            preview: Box::new(preview),
+            scroll: 0,
+        });
+        key(&mut app, KeyCode::Enter);
+        assert_eq!(app.session.entries().unwrap().len(), 3);
+        app.submit("/undo");
+        assert_eq!(app.session.entries().unwrap().len(), 1);
+
+        app.submit("/import remove nothing.csv");
+        let printed: Vec<String> = app.out.iter().map(markdown::plain).collect();
+        assert!(
+            printed
+                .iter()
+                .any(|l| l.contains("Nothing was imported from nothing.csv")),
+            "{printed:?}"
+        );
+    }
+
+    fn workbook(path: &std::path::Path, sheets: &[(&str, &[&[&str]])]) {
+        let mut book = rust_xlsxwriter::Workbook::new();
+        for (name, rows) in sheets {
+            let sheet = book.add_worksheet();
+            sheet.set_name(*name).unwrap();
+            for (r, row) in rows.iter().enumerate() {
+                for (c, v) in row.iter().enumerate() {
+                    sheet.write_string(r as u32, c as u16, *v).unwrap();
+                }
+            }
+        }
+        book.save(path).unwrap();
+    }
+
+    #[test]
+    fn workbooks_ask_which_sheet_and_where_it_goes() {
+        use super::super::app::Purpose;
+        use crate::import::workbook::SheetKind;
+        let (mut app, dir) = app();
+
+        // A ladder workbook: each sheet gets a role, suggested and changed with ← →.
+        let framework = dir.path().join("framework.xlsx");
+        workbook(
+            &framework,
+            &[
+                ("Roadmap", &[&["Q3", "Yeni ödeme altyapısı"]]),
+                (
+                    "Expectations",
+                    &[
+                        &["L1"],
+                        &["- Completes small, well-defined tasks with help"],
+                        &["L2"],
+                        &["- Delivers features end to end on their own"],
+                    ],
+                ),
+                ("Verbs", &[&["L1", "learns"], &["L2", "delivers"]]),
+            ],
+        );
+        app.submit(&format!("/ladder import {}", framework.display()));
+        let screen = render(&app);
+        assert!(screen.contains("What is each sheet for?"), "{screen}");
+        assert!(screen.contains("L1, L2 · 2 expectations"), "{screen}");
+        assert!(screen.contains("verbs per level"), "{screen}");
+        // Every sheet skipped: nothing to read.
+        key(&mut app, KeyCode::Down);
+        key(&mut app, KeyCode::Right);
+        key(&mut app, KeyCode::Right);
+        key(&mut app, KeyCode::Right);
+        key(&mut app, KeyCode::Right);
+        assert!(
+            render(&app).contains("Expectations  skip"),
+            "{}",
+            render(&app)
+        );
+        key(&mut app, KeyCode::Right);
+        // Reading it (with a closed model endpoint here).
+        key(&mut app, KeyCode::Enter);
+        assert_eq!(
+            app.job.as_ref().map(|j| j.label.as_str()),
+            Some("Reading framework.xlsx")
+        );
+        while app.job.is_some() {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            app.poll_jobs();
+        }
+        assert!(
+            render(&app).contains("Ladder from"),
+            "the ladder preview opens"
+        );
+        key(&mut app, KeyCode::Esc);
+
+        // A 1:1 workbook: each sheet gets a place, changed with ← →.
+        let file = dir.path().join("lead.xlsx");
+        workbook(
+            &file,
+            &[
+                (
+                    "Agenda",
+                    &[
+                        &["Tarih", "Gündem", "Aksiyon"],
+                        &["02.09.2026", "On-call", "Runbook yaz"],
+                    ],
+                ),
+                (
+                    "Kariyer",
+                    &[&["Beklenti", "Ne yapmalıyım"], &["Mentorluk", "Buddy ol"]],
+                ),
+                (
+                    "Linkler",
+                    &[&["Ad", "Link"], &["Wiki", "https://wiki.example.com"]],
+                ),
+            ],
+        );
+        app.submit(&format!("/import {}", file.display()));
+        let screen = render(&app);
+        assert!(screen.contains("Where should each sheet go?"), "{screen}");
+        assert!(screen.contains("notes about a person"), "{screen}");
+        assert!(
+            render(&app).contains("skip"),
+            "a sheet without dates is skipped"
+        );
+        key(&mut app, KeyCode::Down);
+        key(&mut app, KeyCode::Down);
+        key(&mut app, KeyCode::Right);
+        assert!(render(&app).contains("log entries"));
+        key(&mut app, KeyCode::Left);
+        key(&mut app, KeyCode::Enter);
+        match &app.panel {
+            Some(Panel::Input {
+                purpose: Purpose::ImportPerson(_, kinds),
+                ..
+            }) => assert_eq!(
+                kinds,
+                &vec![
+                    ("Agenda".to_string(), SheetKind::Notes),
+                    ("Kariyer".to_string(), SheetKind::Goals),
+                    ("Linkler".to_string(), SheetKind::Skip),
+                ]
+            ),
+            _ => panic!("asks whose notes these are"),
+        }
+        assert!(render(&app).contains("Whose notes are these?"));
     }
 
     #[test]
