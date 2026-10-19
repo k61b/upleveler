@@ -13,6 +13,17 @@ document.addEventListener("click", (event) => {
   });
 });
 
+// Confirm before submit: a form or its submitter button can set data-confirm.
+// Without JavaScript the form still submits.
+document.addEventListener("submit", (event) => {
+  const form = event.target;
+  const submitter = event.submitter;
+  const question = form.dataset.confirm || submitter?.dataset.confirm;
+  if (question && !window.confirm(question)) {
+    event.preventDefault();
+  }
+});
+
 // Live filters: a GET form with data-live="#target" refreshes that element as
 // you type. Without JavaScript the form still works by submitting.
 document.querySelectorAll("form[data-live]").forEach((form) => {

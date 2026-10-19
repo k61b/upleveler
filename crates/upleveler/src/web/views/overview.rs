@@ -20,6 +20,10 @@ fn readiness_card(data: &DashboardData) -> Markup {
                 ol.priorities { @for p in gap.priorities.iter().take(3) { li { (p) } } }
             }
         },
+        (None, Some(_)) if !data.ai => html! {
+            h2.card-title { "Readiness" @if let Some(t) = target { " for " (t) } }
+            (ui::empty_state(None, "Rating your work against the ladder needs AI. Without it, the promotion document lists your entries by expectation.", Some(ui::button(Button::Primary, "Write a promotion document", Some("/reports")))))
+        },
         (None, Some(_)) => html! {
             h2.card-title { "Readiness" @if let Some(t) = target { " for " (t) } }
             (ui::empty_state(None, "No gap analysis yet. Run one to see which expectations your logs already cover.", Some(ui::button(Button::Primary, "Run a gap analysis", Some("/reports")))))
@@ -136,6 +140,7 @@ pub fn overview_body(data: &DashboardData) -> Markup {
                 (ui::stat(&streak.to_string(), "Day streak", Some(&plural(streak, "working day in a row", "working days in a row"))))
                 @match strong {
                     Some((strong, total)) => (ui::stat(&format!("{strong} of {total}"), "Strong evidence", Some("expectations for your target level"))),
+                    None if !data.ai => (ui::stat("–", "Strong evidence", Some("needs AI"))),
                     None => (ui::stat("–", "Strong evidence", Some("run a gap analysis to see it"))),
                 }
             }

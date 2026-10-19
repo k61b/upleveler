@@ -119,7 +119,7 @@ fn goal_card(data: &DashboardData, g: &Goal, problem: Option<&str>) -> Markup {
                         li.note {
                             p.note-meta.muted { span.mono { (c.date) } " · check-in" }
                             p.note-text { (c.text) }
-                            form.note-actions method="post" action=(format!("{}/checkins/delete", goal_path(g.id))) {
+                            form.note-actions method="post" action=(format!("{}/checkins/delete", goal_path(g.id))) data-confirm="Delete this check-in? This cannot be undone." {
                                 input type="hidden" name="date" value=(c.date);
                                 input type="hidden" name="text" value=(c.text);
                                 button.btn.btn--outline type="submit" { "Delete" }
@@ -140,7 +140,7 @@ fn goal_card(data: &DashboardData, g: &Goal, problem: Option<&str>) -> Markup {
             }
             div.note-actions {
                 @for (status, label) in status_actions(g.status) {
-                    form method="post" action=(format!("{}/status", goal_path(g.id))) {
+                    form method="post" action=(format!("{}/status", goal_path(g.id))) data-confirm=[status_confirm(status)] {
                         input type="hidden" name="status" value=(status.as_str());
                         button.btn.btn--outline type="submit" { (label) }
                     }
@@ -161,6 +161,13 @@ fn status_actions(status: GoalStatus) -> Vec<(GoalStatus, &'static str)> {
             (GoalStatus::Dropped, "Drop"),
         ],
         GoalStatus::Done | GoalStatus::Dropped => vec![(GoalStatus::Active, "Make active again")],
+    }
+}
+
+fn status_confirm(status: GoalStatus) -> Option<&'static str> {
+    match status {
+        GoalStatus::Dropped => Some("Drop this goal?"),
+        _ => None,
     }
 }
 
@@ -253,4 +260,29 @@ pub fn goals_with(data: &DashboardData, form: &GoalForm) -> Markup {
             }
         },
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::web::demo;
+
+    #[test]
+    fn check_in_delete_asks_for_confirmation() {
+        let today = chrono::NaiveDate::from_ymd_opt(2026, 10, 6).unwrap();
+        let data = demo::data(today);
+        let html = goals(&data).into_string();
+        assert!(
+            html.contains(r#"data-confirm="Delete this check-in? This cannot be undone.""#),
+            "{html}"
+        );
+    }
+
+    #[test]
+    fn dropping_a_goal_asks_for_confirmation() {
+        let today = chrono::NaiveDate::from_ymd_opt(2026, 10, 6).unwrap();
+        let data = demo::data(today);
+        let html = goals(&data).into_string();
+        assert!(html.contains(r#"data-confirm="Drop this goal?""#), "{html}");
+    }
 }

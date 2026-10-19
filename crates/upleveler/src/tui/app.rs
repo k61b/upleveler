@@ -31,6 +31,8 @@ pub enum Tab {
     Logs,
     Ladder,
     Reports,
+    People,
+    Goals,
 }
 
 /// Things the event loop has to do outside the app (they need the terminal).
@@ -575,6 +577,9 @@ impl App {
         }
         if intent::looks_like_question(text) {
             self.ask(text.to_string());
+        } else if !self.session.ai_enabled() {
+            // Without AI there is nothing to route with: typed text is a log entry.
+            self.log(text, Vec::new());
         } else if self.job.is_some() {
             self.panel = Some(Panel::Choice(text.to_string()));
         } else {
@@ -760,6 +765,10 @@ impl App {
             "dashboard" => self.request = Some(Request::Dashboard(Tab::Overview)),
             "reports" => self.request = Some(Request::Dashboard(Tab::Reports)),
             "web" => self.web(),
+            "model" if !self.session.ai_enabled() => {
+                self.info("AI is off. Choose a model to turn it on.");
+                self.start_wizard();
+            }
             "model" => self.start(Job::Models(self.session.cfg.llm.clone())),
             "init" => self.start_wizard(),
             "clear" => self.request = Some(Request::ClearScreen),
@@ -1581,6 +1590,11 @@ impl App {
                     "your company's approved LLM, or a model server you run",
                     "openai",
                 ),
+                Item::new(
+                    "No AI",
+                    "logs, notes, goals and plain reports · turn AI on later with /model",
+                    "off",
+                ),
             ],
             Purpose::Provider,
         ));
@@ -1983,8 +1997,26 @@ impl App {
         if self.wizard && matches!(purpose, Purpose::NotesSource | Purpose::NotesPath) {
             return self.finish_wizard();
         }
+        if self.wizard && !self.session.configured() {
+            // Without a config every command waits for the setup; save one
+            // with AI off so the app is usable right away.
+            self.wizard = false;
+            self.session.cfg.llm.enabled = false;
+            if let Err(e) = self.session.save_config() {
+                return self.error(&format!("{e:#}"));
+            }
+            self.refresh_status();
+            self.info("Setup skipped, so AI is off. Type what you did to log it; /init finishes the setup any time.");
+            return;
+        }
         if self.wizard {
             self.wizard = false;
+            // Choices made before stopping (a provider, AI on) were not saved;
+            // go back to what is.
+            match crate::config::Config::load(&self.session.paths) {
+                Ok(cfg) => self.session.cfg = cfg,
+                Err(e) => return self.error(&format!("{e:#}")),
+            }
             self.refresh_status();
             self.info("Setup stopped. Run /init any time to finish it.");
         }
@@ -2009,7 +2041,12 @@ impl App {
         }
         let cfg = &mut self.session.cfg;
         match purpose {
+            Purpose::Provider if value == "off" => {
+                cfg.llm.enabled = false;
+                self.wizard_language();
+            }
             Purpose::Provider => {
+                cfg.llm.enabled = true;
                 if value == "llamacpp" {
                     if cfg.llm.provider != Provider::Llamacpp {
                         cfg.llm.base_url = Provider::Llamacpp.default_url().into();
@@ -2047,6 +2084,8 @@ impl App {
                     ));
                 }
             }
+            Purpose::Model if value == "__off" => self.turn_ai_off(),
+            Purpose::ModelsFailed if value == "off" => self.turn_ai_off(),
             Purpose::SetupModel | Purpose::Model => {
                 if value == "__manual" {
                     let current = cfg.llm.model.clone();
@@ -2175,7 +2214,12 @@ impl App {
                 match self.session.set_levels(Some(&current), Some(&value)) {
                     Ok(()) => {
                         self.refresh_status();
-                        self.success(&format!("Levels set: {current} → {value}. Try /gap."));
+                        let next = if self.session.ai_enabled() {
+                            "/gap"
+                        } else {
+                            "/brag"
+                        };
+                        self.success(&format!("Levels set: {current} → {value}. Try {next}."));
                         if self.wizard {
                             self.wizard_notes();
                         }
@@ -2506,6 +2550,13 @@ impl App {
                     ));
                 }
                 items.push(Item::new("Type a model name…", "", "__manual"));
+                if !self.wizard {
+                    items.push(Item::new(
+                        "Turn AI off",
+                        "use Upleveler without a model",
+                        "__off",
+                    ));
+                }
                 let selected = models
                     .iter()
                     .position(|m| *m == current)
@@ -2582,16 +2633,29 @@ impl App {
     }
 
     fn models_failed(&mut self, why: &str) {
-        self.panel = Some(select(
-            "No models found",
-            why,
-            vec![
-                Item::new("Retry", "", "retry"),
-                Item::new("Type a model name", "", "manual"),
-                Item::new("Continue without checking", "", "skip"),
-            ],
-            Purpose::ModelsFailed,
-        ));
+        let mut items = vec![
+            Item::new("Retry", "", "retry"),
+            Item::new("Type a model name", "", "manual"),
+            Item::new("Continue without checking", "", "skip"),
+        ];
+        items.push(if self.wizard {
+            Item::new("Continue without AI", "turn it on later with /model", "off")
+        } else {
+            Item::new("Turn AI off", "use Upleveler without a model", "off")
+        });
+        self.panel = Some(select("No models found", why, items, Purpose::ModelsFailed));
+    }
+
+    fn turn_ai_off(&mut self) {
+        self.session.cfg.llm.enabled = false;
+        if self.wizard {
+            return self.wizard_language();
+        }
+        if let Err(e) = self.session.save_config() {
+            return self.error(&format!("{e:#}"));
+        }
+        self.refresh_status();
+        self.success("AI is off: nothing is sent to a model. /model turns it on again.");
     }
 }
 
@@ -2618,6 +2682,7 @@ fn empty_status(session: &Session) -> Status {
         ladder_levels: None,
         current: None,
         target: None,
+        ai: session.ai_enabled(),
         model: session.cfg.llm.model_name().to_string(),
         base_url: session.cfg.llm.base_url.clone(),
         local: is_local_url(&session.cfg.llm.base_url),
@@ -2740,6 +2805,42 @@ mod setup_tests {
             .map(super::super::markdown::plain)
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    /// Skipping the setup, or choosing "No AI", leaves a usable app with AI
+    /// off: typed text is logged at once, with its #tags.
+    #[test]
+    fn setup_without_ai() {
+        let home = tempfile::tempdir().unwrap();
+        let paths = Paths::at(home.path().to_path_buf());
+        let mut app = App::new(Session::at(paths.clone()).unwrap(), 100, true);
+        key(&mut app, KeyCode::Esc);
+        assert!(!app.wizard && app.session.configured());
+        assert!(!crate::config::Config::load(&paths).unwrap().llm.enabled);
+        app.submit("Fixed the flaky deploy check #ci");
+        assert!(app.job.is_none(), "nothing was sent to a model");
+        let entries = app.session.entries().unwrap();
+        assert_eq!(entries[0].text, "Fixed the flaky deploy check");
+        assert_eq!(entries[0].tags, vec!["ci"]);
+
+        let home = tempfile::tempdir().unwrap();
+        let paths = Paths::at(home.path().to_path_buf());
+        let mut app = App::new(Session::at(paths.clone()).unwrap(), 100, true);
+        key(&mut app, KeyCode::Down);
+        key(&mut app, KeyCode::Down);
+        key(&mut app, KeyCode::Enter);
+        key(&mut app, KeyCode::Enter); // the report language
+        assert!(!crate::config::Config::load(&paths).unwrap().llm.enabled);
+
+        // Starting to turn AI on and stopping halfway keeps it off.
+        app.panel = None;
+        app.wizard = false;
+        app.submit("/model");
+        assert!(app.wizard);
+        key(&mut app, KeyCode::Down); // the OpenAI-compatible endpoint
+        key(&mut app, KeyCode::Enter);
+        key(&mut app, KeyCode::Esc);
+        assert!(!app.wizard && !app.session.ai_enabled());
     }
 
     #[test]

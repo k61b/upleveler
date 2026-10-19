@@ -14,7 +14,7 @@ use maud::{html, Markup};
 const LIMIT: usize = 300;
 
 /// The filtered list on its own, so it can be swapped in place.
-pub fn log_results(data: &DashboardData, query: &str) -> Markup {
+pub fn log_results(data: &DashboardData, query: &str, edit: Option<&EditForm>) -> Markup {
     let matched = data.filtered(query);
     let shown = &matched[..matched.len().min(LIMIT)];
     let mut days: Vec<(chrono::NaiveDate, Vec<&Entry>)> = Vec::new();
@@ -47,7 +47,7 @@ pub fn log_results(data: &DashboardData, query: &str) -> Markup {
                         span.mono { (day) }
                         span.muted { (day.format("%A")) }
                     }
-                    ul.log-list { @for e in entries { (ui::log_entry(e)) } }
+                    ul.log-list { @for e in entries { (log_entry_with_actions(e, edit)) } }
                 }
             }
             @if matched.len() > LIMIT {
@@ -65,6 +65,8 @@ pub struct AddForm {
     pub date: String,
     pub tags: String,
     pub notice: Option<(Alert, String)>,
+    /// The "edit entry" form currently open with a problem, if any.
+    pub edit: Option<EditForm>,
 }
 
 impl AddForm {
@@ -73,6 +75,28 @@ impl AddForm {
             text: String::new(),
             date: today.to_string(),
             tags: String::new(),
+            notice: None,
+            edit: None,
+        }
+    }
+}
+
+/// The "edit entry" form for one entry, keeping what was typed after an error.
+pub struct EditForm {
+    pub id: String,
+    pub text: String,
+    pub date: String,
+    pub tags: String,
+    pub notice: Option<(Alert, String)>,
+}
+
+impl EditForm {
+    fn from_entry(entry: &Entry) -> Self {
+        Self {
+            id: entry.id.clone(),
+            text: entry.text.clone(),
+            date: entry.date.to_string(),
+            tags: entry.tags.join(", "),
             notice: None,
         }
     }
@@ -97,6 +121,69 @@ fn add_form(form: &AddForm) -> Markup {
                     input #entry-tags.input type="text" name="tags" value=(form.tags) placeholder="incident, oncall" autocomplete="off";
                 }
                 button.btn.btn--primary type="submit" { "Log it" }
+            }
+        }
+    }
+}
+
+fn edit_form(entry: &Entry, form: &EditForm) -> Markup {
+    let field = |name: &str| format!("entry-{}-{name}", entry.id);
+    html! {
+        form.add-entry method="post" action=(format!("/logs/{}/edit", entry.id)) {
+            @if let Some((kind, text)) = &form.notice { (ui::alert(*kind, text)) }
+            label.visually-hidden for=(field("text")) { "What did you do?" }
+            textarea.input.textarea id=(field("text")) name="text" rows="2" maxlength="4000" required data-submit-shortcut { (form.text) }
+            div.add-entry-row {
+                div.field {
+                    label.field-label for=(field("date")) { "Date" }
+                    input.input id=(field("date")) type="date" name="date" value=(form.date);
+                }
+                div.field.field--grow {
+                    label.field-label for=(field("tags")) { "Tags " span.muted { "(optional)" } }
+                    input.input id=(field("tags")) type="text" name="tags" value=(form.tags) placeholder="incident, oncall" autocomplete="off";
+                }
+                button.btn.btn--outline type="submit" { "Save entry" }
+            }
+        }
+    }
+}
+
+fn link_host(url: &str) -> &str {
+    let rest = url.split_once("://").map_or(url, |(_, r)| r);
+    rest.split(['/', '?', '#']).next().unwrap_or(rest)
+}
+
+fn log_entry_content(entry: &Entry) -> Markup {
+    html! {
+        p.log-text { (entry.text) }
+        @if !entry.tags.is_empty() || !entry.links.is_empty() {
+            div.log-meta {
+                @for tag in &entry.tags {
+                    a.chip.chip--mono href=(format!("/logs?q={}", ui::query_escape(tag))) { "#" (tag) }
+                }
+                @for link in &entry.links {
+                    a.log-link href=(link) target="_blank" rel="noreferrer noopener" { (link_host(link)) " ↗" }
+                }
+            }
+        }
+    }
+}
+
+fn log_entry_with_actions(entry: &Entry, edit: Option<&EditForm>) -> Markup {
+    let is_editing = edit.is_some_and(|e| e.id == entry.id);
+    let default = EditForm::from_entry(entry);
+    let form = edit.filter(|e| e.id == entry.id).unwrap_or(&default);
+    html! {
+        li.log-entry {
+            (log_entry_content(entry))
+            div.log-entry-actions {
+                details.log-entry-edit open[is_editing] {
+                    summary.btn.btn--outline { "Edit" }
+                    (edit_form(entry, form))
+                }
+                form method="post" action=(format!("/logs/{}/delete", entry.id)) data-confirm="Delete this entry? This cannot be undone." {
+                    button.btn.btn--outline type="submit" { "Delete" }
+                }
             }
         }
     }
@@ -183,7 +270,7 @@ pub fn logs_with(data: &DashboardData, query: &str, form: &AddForm) -> Markup {
                         input #q.input type="search" name="q" value=(query) placeholder="Filter by text, tag or date" autocomplete="off";
                         button.btn.btn--outline type="submit" { "Filter" }
                     }
-                    (log_results(data, query))
+                    (log_results(data, query, form.edit.as_ref()))
                 }
             }
         },

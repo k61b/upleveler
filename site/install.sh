@@ -68,6 +68,15 @@ mv "$DIR/upleveler.new" "$DIR/upleveler"
 echo "Installed $("$DIR/upleveler" --version) to $DIR/upleveler"
 case ":$PATH:" in
     *":$DIR:"*) ;;
-    *) echo "Add $DIR to your PATH, for example: echo 'export PATH=\"$DIR:\$PATH\"' >> ~/.profile" ;;
+    *)
+        shell_name=$(basename "${SHELL:-sh}")
+        case "$shell_name" in
+            zsh) rc_file="$HOME/.zshrc" ;;
+            bash) rc_file="$HOME/.bashrc" ;;
+            *) rc_file="$HOME/.profile" ;;
+        esac
+        echo "Add $DIR to your PATH, for example: echo 'export PATH=\"$DIR:\$PATH\"' >> $rc_file"
+        echo "Then open a new terminal window or run 'source $rc_file'."
+        ;;
 esac
-echo "Next: install llama.cpp ('brew install llama.cpp', or https://github.com/ggml-org/llama.cpp/releases), then run 'upleveler'."
+echo "Next: run 'upleveler'. llama.cpp is only needed if you want the AI features on this computer ('brew install llama.cpp', or https://github.com/ggml-org/llama.cpp/releases); you can also use Upleveler without AI."

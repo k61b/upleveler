@@ -31,20 +31,29 @@ fn panel_lines(app: &App, width: u16) -> Vec<Line<'static>> {
                         w,
                     )));
                 }
-                lines.push(Line::default());
                 lines.push(Line::styled("Keys", theme::accent_bold()));
-                for row in [
-                    [
+                let rows: [&[(&str, &str)]; 5] = [
+                    &[
                         ("enter", "send"),
-                        ("shift+enter", "new line"),
-                        ("↑ ↓", "history, lists"),
-                    ],
-                    [
-                        ("tab", "complete /, @person, @file"),
-                        ("esc", "close, stop, clear"),
+                        ("shift+enter, ctrl+j", "new line"),
+                        ("↑ ↓", "history"),
                         ("ctrl+c ×2", "exit"),
                     ],
-                ] {
+                    &[
+                        ("tab", "complete /, @person, @file"),
+                        ("esc", "close, stop, clear"),
+                        ("ctrl+l", "clear"),
+                    ],
+                    &[("yesterday …, dün …, 2026-10-01 …", "log it for that day")],
+                    &[("#tag", "adds a tag"), ("#goal-2", "counts toward goal 2")],
+                    &[
+                        ("in /dashboard: 1-6 ← →", "tabs"),
+                        ("j k", "move"),
+                        ("/", "filter logs"),
+                        ("q", "back"),
+                    ],
+                ];
+                for row in rows {
                     let mut spans = vec![Span::raw("  ")];
                     for (k, what) in row {
                         spans.push(Span::styled(format!("{k} "), theme::accent()));
@@ -537,18 +546,25 @@ fn footer(app: &App, width: u16) -> (Line<'static>, Line<'static>) {
         (None, Some(t)) => format!(" · →{t}"),
         _ => String::new(),
     };
-    let place = if s.local {
-        Span::styled("● local", theme::good())
+    let right = if !s.ai {
+        Line::from(vec![
+            Span::styled("○ AI off", theme::good()),
+            Span::styled(format!("{levels} · {} logs", s.entries), theme::dim()),
+        ])
     } else {
-        Span::styled("▲ remote", theme::warn())
+        let place = if s.local {
+            Span::styled("● local", theme::good())
+        } else {
+            Span::styled("▲ remote", theme::warn())
+        };
+        Line::from(vec![
+            place,
+            Span::styled(
+                format!(" · {}{levels} · {} logs", s.model, s.entries),
+                theme::dim(),
+            ),
+        ])
     };
-    let right = Line::from(vec![
-        place,
-        Span::styled(
-            format!(" · {}{levels} · {} logs", s.model, s.entries),
-            theme::dim(),
-        ),
-    ]);
     let room = (width as usize).saturating_sub(right.width() + 2);
     (Line::styled(truncate(left, room), theme::dim()), right)
 }

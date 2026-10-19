@@ -151,6 +151,8 @@ fn router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/", get(overview))
         .route("/logs", get(logs).post(add_log))
+        .route("/logs/{id}/edit", axum::routing::post(edit_log))
+        .route("/logs/{id}/delete", axum::routing::post(delete_log))
         .route(
             views::REMOVE_IMPORT,
             get(confirm_remove_import).post(remove_import),
@@ -241,6 +243,8 @@ struct LogsQuery {
     removed: Option<String>,
     what: Option<String>,
     copy: Option<String>,
+    /// Set by the redirect after editing or deleting an entry.
+    saved: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -266,13 +270,14 @@ async fn logs(State(state): State<Arc<AppState>>, Query(query): Query<LogsQuery>
     let staging = state.paths.staging.clone();
     with_data(state, move |data| {
         let mut form = AddForm::empty(data.today);
-        form.notice = match (&query.logged, &query.duplicate, &query.removed) {
-            (Some(date), _, _) => Some((Alert::Success, format!("Logged for {date}."))),
-            (None, Some(date), _) => Some((
+        let saved = Saved { saved: query.saved.clone() }.notice();
+        form.notice = match (&query.logged, &query.duplicate, &query.removed, saved) {
+            (Some(date), _, _, _) => Some((Alert::Success, format!("Logged for {date}."))),
+            (None, Some(date), _, _) => Some((
                 Alert::Info,
                 format!("That entry is already logged for {date}."),
             )),
-            (None, None, Some(file)) => {
+            (None, None, Some(file), _) => {
                 let what = query.what.as_deref().unwrap_or("everything");
                 let mut text = format!("Removed {what} imported from {file}.");
                 let copy = query.copy.as_deref().map(std::path::Path::new);
@@ -285,6 +290,7 @@ async fn logs(State(state): State<Arc<AppState>>, Query(query): Query<LogsQuery>
                 }
                 Some((Alert::Success, text))
             }
+            (None, None, None, Some(notice)) => Some(notice),
             _ => None,
         };
         page(views::logs_with(data, &query.q, &form))
@@ -335,10 +341,67 @@ async fn add_log(
                     date: input.date,
                     tags: input.tags,
                     notice: Some((Alert::Error, problem)),
+                    edit: None,
                 };
                 Ok(invalid(views::logs_with(&data, "", &form)))
             }
         }
+    })
+    .await
+}
+
+async fn edit_log(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    Form(input): Form<AddLog>,
+) -> Response {
+    write(state, &headers, move |session| {
+        let tags = input
+            .tags
+            .split([',', ' '])
+            .filter(|t| !t.trim().is_empty())
+            .map(String::from)
+            .collect();
+        let edited = form_date(&input.date, None)
+            .map_err(crate::limits::invalid)
+            .and_then(|date| session.edit_entry(&id, Some(&input.text), date, Some(tags)));
+        match edited {
+            Ok(Some(_)) => Ok(see_other("/logs?saved=entry".to_string())),
+            Ok(None) => Ok(missing()),
+            Err(err) => {
+                let problem = rule(err)?;
+                let data = DashboardData::load(session)?;
+                let form = AddForm {
+                    text: String::new(),
+                    date: data.today.to_string(),
+                    tags: String::new(),
+                    notice: None,
+                    edit: Some(views::EditForm {
+                        id,
+                        text: input.text,
+                        date: input.date,
+                        tags: input.tags,
+                        notice: Some((Alert::Error, problem)),
+                    }),
+                };
+                Ok(invalid(views::logs_with(&data, "", &form)))
+            }
+        }
+    })
+    .await
+}
+
+async fn delete_log(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    write(state, &headers, move |session| {
+        Ok(match session.remove_entry(&id)? {
+            Some(_) => see_other("/logs?saved=entrydeleted".to_string()),
+            None => missing(),
+        })
     })
     .await
 }
@@ -418,6 +481,8 @@ impl Saved {
             "status" => "Goal updated.",
             "edited" => "Goal saved.",
             "uncheckin" => "Check-in deleted.",
+            "entry" => "Entry saved.",
+            "entrydeleted" => "Entry deleted.",
             _ => return None,
         };
         Some((Alert::Success, text.to_string()))
@@ -1517,6 +1582,128 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn editing_and_deleting_entries_from_the_browser() {
+        let home = tempfile::tempdir().unwrap();
+        let paths = Paths::at(home.path().to_path_buf());
+        let session = Session::at(paths.clone()).unwrap();
+        let day = chrono::NaiveDate::from_ymd_opt(2026, 10, 2).unwrap();
+        let entry = session
+            .add_log("Shipped the ledger export", day, vec!["billing".into()])
+            .unwrap()
+            .unwrap();
+        session
+            .store
+            .update_entry(&entry.id, |e| {
+                e.expectations = vec!["L3.x".into()];
+                e.tagged_with = Some("hash".into());
+            })
+            .unwrap();
+        let state = Arc::new(AppState::new(4747, TOKEN.into(), paths.clone()));
+        let post = |path: &str| {
+            Request::post(path)
+                .header("origin", "http://127.0.0.1:4747")
+                .header("sec-fetch-site", "same-origin")
+        };
+        let location = |res: &Response| {
+            res.headers()[header::LOCATION]
+                .to_str()
+                .unwrap()
+                .to_string()
+        };
+
+        let logs = body(send(&state, Request::get("/logs"), "").await).await;
+        assert!(
+            logs.contains(&format!("/logs/{}/edit", entry.id))
+                && logs.contains(&format!("/logs/{}/delete", entry.id))
+                && logs.contains("data-confirm=\"Delete this entry? This cannot be undone.\""),
+            "{logs}"
+        );
+
+        let edited = send(
+            &state,
+            post(&format!("/logs/{}/edit", entry.id)),
+            "text=Shipped+the+cache+warmup&date=2026-10-03&tags=release",
+        )
+        .await;
+        assert_eq!(edited.status(), StatusCode::SEE_OTHER);
+        assert_eq!(location(&edited), "/logs?saved=entry");
+        let entries = session.entries().unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(
+            (
+                entries[0].text.as_str(),
+                entries[0].date.to_string(),
+                entries[0].tags.clone()
+            ),
+            (
+                "Shipped the cache warmup",
+                "2026-10-03".to_string(),
+                vec!["release".to_string()]
+            )
+        );
+        assert!(entries[0].expectations.is_empty() && entries[0].tagged_with.is_none());
+        let current_id = entries[0].id.clone();
+
+        let bad = send(
+            &state,
+            post(&format!("/logs/{}/edit", current_id)),
+            "text=Kept+text&date=nope&tags=x",
+        )
+        .await;
+        assert_eq!(bad.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let page = body(bad).await;
+        assert!(page.contains("Use a date like"), "{page}");
+        assert!(
+            page.contains(">Kept text</textarea>")
+                && page.contains("value=\"nope\"")
+                && page.contains("value=\"x\""),
+            "{page}"
+        );
+
+        let deleted = send(&state, post(&format!("/logs/{}/delete", current_id)), "").await;
+        assert_eq!(deleted.status(), StatusCode::SEE_OTHER);
+        assert_eq!(location(&deleted), "/logs?saved=entrydeleted");
+        assert!(session.entries().unwrap().is_empty());
+
+        assert_eq!(
+            send(
+                &state,
+                post("/logs/nope/edit"),
+                "text=x&date=2026-10-02&tags="
+            )
+            .await
+            .status(),
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            send(&state, post("/logs/nope/delete"), "").await.status(),
+            StatusCode::NOT_FOUND
+        );
+
+        let cross = |req: axum::http::request::Builder| {
+            req.header("origin", "http://evil.example")
+                .header("sec-fetch-site", "cross-site")
+        };
+        for path in [
+            "/logs",
+            &format!("/logs/{}/edit", current_id),
+            &format!("/logs/{}/delete", current_id),
+        ] {
+            assert_eq!(
+                send(
+                    &state,
+                    cross(Request::post(path)),
+                    "text=x&date=2026-10-02&tags="
+                )
+                .await
+                .status(),
+                StatusCode::FORBIDDEN,
+                "{path}"
+            );
+        }
+    }
+
     async fn send(
         state: &Arc<AppState>,
         req: axum::http::request::Builder,
@@ -1542,9 +1729,9 @@ mod tests {
             .unwrap();
         let mut state = AppState::new(4747, TOKEN.into(), paths);
         state.make_llm = Arc::new(|_: &Session, _| {
-            Ok(Box::new(crate::llm::FakeLlm {
+            Ok(Some(Box::new(crate::llm::FakeLlm {
                 reply: |_: &[crate::llm::Message], _| "- Shipped the ledger export".to_string(),
-            }) as Box<dyn crate::llm::Llm>)
+            }) as Box<dyn crate::llm::Llm>))
         });
         let state = Arc::new(state);
         let same = |req: axum::http::request::Builder| {
@@ -2020,11 +2207,11 @@ mod tests {
             .unwrap();
         let mut state = AppState::new(4747, TOKEN.into(), paths);
         state.make_llm = Arc::new(|_: &Session, _| {
-            Ok(Box::new(crate::llm::FakeLlm {
+            Ok(Some(Box::new(crate::llm::FakeLlm {
                 reply: |_: &[crate::llm::Message], _| {
                     "- [ ] Share the retry design doc".to_string()
                 },
-            }) as Box<dyn crate::llm::Llm>)
+            }) as Box<dyn crate::llm::Llm>))
         });
         let state = Arc::new(state);
         let same = |req: axum::http::request::Builder| {

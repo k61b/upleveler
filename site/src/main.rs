@@ -128,7 +128,7 @@ fn hero() -> Markup {
                     "the next level, shows what is missing and writes your promotion document."
                 }
                 ul.proof {
-                    li { (ui::marker(Marker::Filled)) "Runs on your computer with a local AI model" }
+                    li { (ui::marker(Marker::Filled)) "Runs on your computer, with a local AI model or none" }
                     li { (ui::marker(Marker::Filled)) "Measures against your company's own ladder" }
                     li { (ui::marker(Marker::Filled)) "Writes gap analyses and promotion documents" }
                 }
@@ -136,7 +136,7 @@ fn hero() -> Markup {
                     (ui::button(Button::Primary, "Install Upleveler", Some("#install")))
                     (ui::button(Button::Ghost, "View on GitHub", Some(REPO)))
                 }
-                p.hint { "Needs llama.cpp and about 16 GB of RAM. macOS, Linux and Windows." }
+                p.hint { "The AI needs llama.cpp and about 16 GB of RAM, or turn it off. macOS, Linux and Windows." }
             }
             div.hero-panel.rise.rise-2 {
                 (ui::terminal("upleveler", &session, None))
@@ -249,7 +249,7 @@ fn privacy() -> Markup {
             "AI model",
             "127.0.0.1:4748",
             true,
-            "llama.cpp on your machine, started by Upleveler and reachable only from it.",
+            "llama.cpp on your machine, started by Upleveler and reachable only from it. Or no model at all.",
         ),
         (
             "Network",
@@ -293,7 +293,7 @@ fn install() -> Markup {
             div.stack {
                 (ui::label("Install"))
                 (ui::heading(2, "Install it with", "one command", ""))
-                p.lead { "On macOS and Linux the script installs the latest release and checks its checksum. It needs llama.cpp (`brew install llama.cpp`) and about 16 GB of RAM. The first run downloads the model from Hugging Face and asks for your report language, ladder and levels." }
+                p.lead { "On macOS and Linux the script installs the latest release and checks its checksum. The AI needs llama.cpp (`brew install llama.cpp`) and about 16 GB of RAM; you can also use Upleveler without AI. The first run asks for a model (or no AI), your report language, ladder and levels." }
                 p.hint { "Windows and from-source steps are in the README." }
                 div.actions {
                     (ui::button(Button::Outline, "Read the README", Some(&format!("{REPO}#readme"))))

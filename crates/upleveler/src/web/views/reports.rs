@@ -39,6 +39,9 @@ impl Default for RunForm {
 }
 
 fn model_hint(data: &DashboardData) -> String {
+    if !data.ai {
+        return "AI is off, so reports list your entries as you wrote them. The gap analysis needs AI; turn it on with /model in the terminal app.".into();
+    }
     let place = if data.model_local {
         "on this computer"
     } else {
@@ -66,7 +69,7 @@ fn run_card(data: &DashboardData, run: Option<&RunView>, form: &RunForm) -> Mark
                         div.field {
                             label.field-label for="run-kind" { "Analysis" }
                             select #run-kind.input name="kind" {
-                                @for kind in [Kind::Gap, Kind::Brag, Kind::Summary] {
+                                @for kind in [Kind::Gap, Kind::Brag, Kind::Summary].into_iter().filter(|k| data.ai || *k != Kind::Gap) {
                                     option value=(kind.value()) selected[form.kind == kind] { (kind.title()) }
                                 }
                             }
@@ -228,5 +231,20 @@ mod tests {
         assert!(html.contains("<h1>Title</h1>") && html.contains("<table>"));
         assert!(!html.contains("<script>") && !html.contains("<b>"));
         assert!(html.contains("&lt;script&gt;"));
+    }
+
+    #[test]
+    fn without_ai_the_gap_analysis_is_not_offered() {
+        let today = chrono::NaiveDate::from_ymd_opt(2026, 10, 19).unwrap();
+        let mut data = crate::web::demo::data(today);
+        let on = reports(&data).into_string();
+        assert!(on.contains(r#"value="gap""#), "{on}");
+        data.ai = false;
+        let off = reports(&data).into_string();
+        assert!(!off.contains(r#"value="gap""#));
+        assert!(off.contains(r#"value="brag""#) && off.contains("AI is off"));
+        let overview =
+            super::super::overview::overview(&DashboardData { gap: None, ..data }).into_string();
+        assert!(overview.contains("needs AI"));
     }
 }

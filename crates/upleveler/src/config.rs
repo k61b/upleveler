@@ -79,6 +79,11 @@ impl Provider {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(from = "StoredLlmConfig")]
 pub struct LlmConfig {
+    /// False when the person chose to use Upleveler without AI: nothing is
+    /// sent to a model and no model server is started. The rest of `[llm]`
+    /// is kept so AI can be turned on again.
+    #[serde(default = "yes", skip_serializing_if = "is_true")]
+    pub enabled: bool,
     pub provider: Provider,
     pub base_url: String,
     pub model: String,
@@ -99,6 +104,8 @@ pub struct LlmConfig {
 /// endpoints they also offer, so an existing setup keeps working.
 #[derive(Deserialize)]
 struct StoredLlmConfig {
+    #[serde(default = "yes")]
+    enabled: bool,
     provider: StoredProvider,
     base_url: String,
     model: String,
@@ -133,6 +140,7 @@ impl From<StoredLlmConfig> for LlmConfig {
             }
         };
         Self {
+            enabled: s.enabled,
             provider,
             base_url,
             model: s.model,
@@ -142,6 +150,14 @@ impl From<StoredLlmConfig> for LlmConfig {
             timeout_secs: s.timeout_secs,
         }
     }
+}
+
+fn yes() -> bool {
+    true
+}
+
+fn is_true(b: &bool) -> bool {
+    *b
 }
 
 fn default_context_tokens() -> usize {
@@ -155,6 +171,7 @@ fn default_timeout_secs() -> u64 {
 impl Default for LlmConfig {
     fn default() -> Self {
         Self {
+            enabled: true,
             provider: Provider::Llamacpp,
             base_url: Provider::Llamacpp.default_url().into(),
             model: Provider::Llamacpp.recommended_model().into(),
@@ -338,5 +355,32 @@ mod tests {
         let loaded = Config::load(&paths).unwrap();
         assert_eq!(loaded.target_level.as_deref(), Some("L3"));
         assert_eq!(loaded.llm.provider, Provider::Openai);
+    }
+
+    #[test]
+    fn ai_stays_on_unless_turned_off() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths::at(dir.path().to_path_buf());
+        std::fs::write(
+            &paths.config,
+            "[llm]\nprovider = \"llamacpp\"\nbase_url = \"http://127.0.0.1:4748\"\nmodel = \"m\"\n",
+        )
+        .unwrap();
+        assert!(Config::load(&paths).unwrap().llm.enabled);
+
+        let mut cfg = Config::default();
+        cfg.save(&paths).unwrap();
+        assert!(!std::fs::read_to_string(&paths.config)
+            .unwrap()
+            .contains("enabled"));
+
+        cfg.llm.enabled = false;
+        cfg.save(&paths).unwrap();
+        assert!(std::fs::read_to_string(&paths.config)
+            .unwrap()
+            .contains("enabled = false"));
+        let loaded = Config::load(&paths).unwrap();
+        assert!(!loaded.llm.enabled);
+        assert_eq!(loaded.llm.provider, Provider::Llamacpp);
     }
 }

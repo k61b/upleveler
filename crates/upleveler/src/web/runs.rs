@@ -81,13 +81,17 @@ struct Run {
     cancel: Arc<AtomicBool>,
 }
 
-/// Makes the model for a run (the configured one, or a fake in tests).
-/// The flag is the run's cancel flag, so a reply can stop mid-way.
-pub type MakeLlm = Arc<dyn Fn(&Session, Arc<AtomicBool>) -> Result<Box<dyn Llm>> + Send + Sync>;
+/// Makes the model for a run (the configured one, or a fake in tests);
+/// `None` when AI is turned off. The flag is the run's cancel flag, so a
+/// reply can stop mid-way.
+pub type MakeLlm =
+    Arc<dyn Fn(&Session, Arc<AtomicBool>) -> Result<Option<Box<dyn Llm>>> + Send + Sync>;
 
 pub fn configured_llm() -> MakeLlm {
     Arc::new(|session: &Session, cancel: Arc<AtomicBool>| {
-        Ok(Box::new(session.llm()?.with_cancel(cancel)) as Box<dyn Llm>)
+        Ok(session
+            .llm_if_on()?
+            .map(|l| Box::new(l.with_cancel(cancel)) as Box<dyn Llm>))
     })
 }
 
@@ -217,18 +221,15 @@ impl Runs {
             let result = (|| -> Result<String> {
                 let session = Session::at(paths)?;
                 let llm = make_llm(&session, cancel.clone())?;
+                let llm = llm.as_deref();
                 let path = match kind {
-                    Kind::Gap => session.gap(llm.as_ref(), range, &mut progress)?.path,
-                    Kind::Brag => {
-                        session
-                            .brag(llm.as_ref(), range, &name, &mut progress)?
-                            .path
-                    }
+                    Kind::Gap => session.gap(llm, range, &mut progress)?.path,
+                    Kind::Brag => session.brag(llm, range, &name, &mut progress)?.path,
                     Kind::Summary => {
                         let range = range.expect("summaries always have a range");
-                        session.summary(llm.as_ref(), range, &mut progress)?.path
+                        session.summary(llm, range, &mut progress)?.path
                     }
-                    Kind::Prep => session.prep(llm.as_ref(), &name, &mut progress)?.path,
+                    Kind::Prep => session.prep(llm, &name, &mut progress)?.path,
                 };
                 Ok(path
                     .file_stem()
@@ -259,11 +260,11 @@ mod tests {
 
     fn fake() -> MakeLlm {
         Arc::new(|_: &Session, _| {
-            Ok(Box::new(FakeLlm {
+            Ok(Some(Box::new(FakeLlm {
                 reply: |_: &[Message], _| {
                     "- Shipped the ledger export\n- Reviewed pull requests".to_string()
                 },
-            }) as Box<dyn Llm>)
+            }) as Box<dyn Llm>))
         })
     }
 
@@ -328,14 +329,14 @@ mod tests {
         let release = gate.clone();
         let slow: MakeLlm = Arc::new(move |_: &Session, _| {
             let gate = release.clone();
-            Ok(Box::new(FakeLlm {
+            Ok(Some(Box::new(FakeLlm {
                 reply: move |_: &[Message], _| {
                     while !gate.load(Ordering::Relaxed) {
                         std::thread::sleep(Duration::from_millis(5));
                     }
                     "- done".to_string()
                 },
-            }) as Box<dyn Llm>)
+            }) as Box<dyn Llm>))
         });
         let runs = Runs::default();
         runs.start(paths.clone(), slow, Kind::Summary, "").unwrap();

@@ -157,6 +157,10 @@ pub fn welcome(status: &Status, width: u16) -> Lines {
                     spans.extend(readiness_bar(g, room.clamp(4, 16)));
                     spans.push(Span::styled(label, theme::dim()));
                 }
+                _ if !status.ai => spans.push(Span::styled(
+                    "/brag lists your work by expectation",
+                    theme::dim(),
+                )),
                 _ => spans.push(Span::styled(
                     "run /gap to see where you stand",
                     theme::dim(),
@@ -174,15 +178,21 @@ pub fn welcome(status: &Status, width: u16) -> Lines {
         format!("{} logs{streak} · {} today", status.entries, status.today),
         theme::dim(),
     )]));
-    let place = if status.local { "local" } else { "remote" };
-    out.push(row(vec![Span::styled(
-        format!("{} · {place}", status.model),
-        theme::dim(),
-    )]));
+    let (model, hint) = if status.ai {
+        let place = if status.local { "local" } else { "remote" };
+        (
+            format!("{} · {place}", status.model),
+            "Type what you did to log it, or ask anything.",
+        )
+    } else {
+        (
+            "AI off · nothing leaves this computer".to_string(),
+            "Type what you did to log it, or ask a question to search your log.",
+        )
+    };
+    out.push(row(vec![Span::styled(model, theme::dim())]));
     out.push(row(vec![]));
-    out.push(row(vec![Span::raw(
-        "Type what you did to log it, or ask anything.",
-    )]));
+    out.push(row(vec![Span::raw(hint)]));
     out.push(row(vec![
         Span::styled("/", theme::accent()),
         Span::styled(" commands · ", theme::dim()),
@@ -643,6 +653,7 @@ mod tests {
             ladder_levels: Some(5),
             current: Some("L2".into()),
             target: Some("L3".into()),
+            ai: true,
             model: "gemma4:12b".into(),
             base_url: "http://localhost:11434".into(),
             local: true,

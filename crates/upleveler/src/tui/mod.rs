@@ -122,7 +122,10 @@ pub fn run(session: Session, wizard: bool) -> Result<()> {
 
 fn event_loop(session: Session, wizard: bool) -> Result<()> {
     let (width, _) = terminal::size()?;
-    if session.configured() && session.cfg.llm.provider != crate::config::Provider::Openai {
+    if session.configured()
+        && session.ai_enabled()
+        && session.cfg.llm.provider != crate::config::Provider::Openai
+    {
         // Typed text is routed by the model; load it while the screen draws.
         jobs::preload(session.cfg.llm.clone());
     }
@@ -196,10 +199,27 @@ fn handle(request: Request, app: &mut App, screen: &mut Screen) -> Result<()> {
     Ok(())
 }
 
+fn find_on_path(name: &str) -> bool {
+    let Some(path) = std::env::var_os("PATH") else {
+        return false;
+    };
+    std::env::split_paths(&path).any(|dir| dir.join(name).exists())
+}
+
+/// Returns the editor command, preferring `nano` over `vi` because nano is
+/// friendlier for people who do not know vi.
 fn editor() -> String {
     std::env::var("VISUAL")
-        .or_else(|_| std::env::var("EDITOR"))
-        .unwrap_or_else(|_| "vi".into())
+        .ok()
+        .filter(|v| !v.is_empty())
+        .or_else(|| std::env::var("EDITOR").ok().filter(|v| !v.is_empty()))
+        .unwrap_or_else(|| {
+            if find_on_path("nano") {
+                "nano".into()
+            } else {
+                "vi".into()
+            }
+        })
 }
 
 fn edit_file(path: &Path) -> Result<()> {

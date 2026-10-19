@@ -1590,6 +1590,37 @@ select.input {
   font-size: var(--text-sm);
 }
 
+.log-entry-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.log-entry-actions .btn {
+  padding: 0 14px;
+  font-size: var(--text-sm);
+}
+
+.log-entry-edit summary {
+  list-style: none;
+  cursor: pointer;
+}
+
+.log-entry-edit summary::-webkit-details-marker {
+  display: none;
+}
+
+.log-entry-edit[open] {
+  flex-basis: 100%;
+}
+
+.log-entry-edit .add-entry {
+  margin: 8px 0 0;
+  padding-bottom: 0;
+  border-bottom: 0;
+}
+
 /* ---------- Reports ---------- */
 
 .report-list {

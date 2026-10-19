@@ -23,6 +23,13 @@ pub fn today() -> NaiveDate {
     chrono::Local::now().date_naive()
 }
 
+/// What an AI-only feature says when AI is turned off.
+pub const AI_OFF: &str =
+    "AI is turned off. Turn it on with /model in the app, or run `upleveler init`.";
+
+const NO_ENTRIES: &str =
+    "no log entries yet. Add one with /log <what you did> in the app, or upleveler log \"…\"";
+
 const WHOSE_NOTES: &str =
     "say whose notes these are: the person's @handle (--person in the command line)";
 
@@ -60,6 +67,8 @@ pub struct Status {
     pub ladder_levels: Option<usize>,
     pub current: Option<String>,
     pub target: Option<String>,
+    /// False when AI is turned off; `model` and `base_url` are then unused.
+    pub ai: bool,
     pub model: String,
     pub base_url: String,
     pub local: bool,
@@ -144,8 +153,25 @@ impl Session {
         self.cfg.save(&self.paths)
     }
 
+    /// False when the person chose to use Upleveler without AI.
+    pub fn ai_enabled(&self) -> bool {
+        self.cfg.llm.enabled
+    }
+
     pub fn llm(&self) -> Result<HttpLlm> {
+        if !self.ai_enabled() {
+            bail!("{AI_OFF}");
+        }
         HttpLlm::new(&self.cfg.llm)
+    }
+
+    /// The model, or `None` when AI is turned off; the analyses then write
+    /// their plain versions.
+    pub fn llm_if_on(&self) -> Result<Option<HttpLlm>> {
+        if !self.ai_enabled() {
+            return Ok(None);
+        }
+        HttpLlm::new(&self.cfg.llm).map(Some)
     }
 
     pub fn ladder(&self) -> Result<Option<Ladder>> {
@@ -169,6 +195,7 @@ impl Session {
             ladder_levels: ladder.as_ref().map(|l| l.levels.len()),
             current: self.cfg.current_level.clone(),
             target: self.cfg.target_level.clone(),
+            ai: self.ai_enabled(),
             model: self.cfg.llm.model.clone(),
             base_url: self.cfg.llm.base_url.clone(),
             local: is_local_url(&self.cfg.llm.base_url),
@@ -177,15 +204,86 @@ impl Session {
     }
 
     /// Adds an entry; `None` means the same text was already logged that day.
-    pub fn add_log(&self, text: &str, date: NaiveDate, tags: Vec<String>) -> Result<Option<Entry>> {
+    /// `#tags` in the text become tags.
+    pub fn add_log(
+        &self,
+        text: &str,
+        date: NaiveDate,
+        mut tags: Vec<String>,
+    ) -> Result<Option<Entry>> {
         use crate::limits::{LOG_EMPTY, LOG_LONG, TEXT};
-        let text = crate::limits::text(text, TEXT, LOG_EMPTY, LOG_LONG)?;
+        let (text, found) = crate::intent::hashtags(text);
+        let text = crate::limits::text(&text, TEXT, LOG_EMPTY, LOG_LONG)?;
+        tags.extend(found);
         let entry = Entry::new(date, text, tags, "manual");
         Ok(self.store.add_new(vec![entry])?.into_iter().next())
     }
 
     pub fn remove_entry(&self, id: &str) -> Result<Option<Entry>> {
         self.store.remove(id)
+    }
+
+    /// Changes an entry's text, date and/or tags. When the text changes, the
+    /// ladder mapping is cleared so the next analysis maps it again. The id is
+    /// recomputed when the text or date changes.
+    pub fn edit_entry(
+        &self,
+        id: &str,
+        text: Option<&str>,
+        date: Option<NaiveDate>,
+        tags: Option<Vec<String>>,
+    ) -> Result<Option<Entry>> {
+        use crate::limits::{LOG_EMPTY, LOG_LONG, TEXT};
+        // `#tags` in the new text are added to the tags, as when logging.
+        let (text, found) = match text.map(crate::intent::hashtags) {
+            Some((t, found)) => (Some(t), found),
+            None => (None, Vec::new()),
+        };
+        let text = match &text {
+            Some(t) => Some(crate::limits::text(t, TEXT, LOG_EMPTY, LOG_LONG)?),
+            None => None,
+        };
+        // The id is the date and text, so an edit that makes the entry the
+        // same as another one would leave two entries with one id.
+        if text.is_some() || date.is_some() {
+            let entries = self.store.load()?;
+            if let Some(entry) = entries.iter().find(|e| e.id == id) {
+                let new_id =
+                    crate::store::make_id(date.unwrap_or(entry.date), text.unwrap_or(&entry.text));
+                if new_id != id && entries.iter().any(|e| e.id == new_id) {
+                    return Err(crate::limits::invalid(format!(
+                        "That entry is already in your log for {}.",
+                        date.unwrap_or(entry.date)
+                    )));
+                }
+            }
+        }
+        let tags_given = tags.is_some();
+        self.store.update_entry(id, |entry| {
+            if let Some(text) = &text {
+                if !same_words(&entry.text, text) {
+                    entry.expectations.clear();
+                    entry.tagged_with = None;
+                }
+                entry.text = text.to_string();
+            }
+            if let Some(date) = date {
+                entry.date = date;
+            }
+            if let Some(tags) = tags {
+                entry.tags = tags;
+            }
+            if tags_given || !found.is_empty() {
+                let mut all = std::mem::take(&mut entry.tags);
+                all.extend(found);
+                entry.tags = crate::store::normalize_tags(all);
+            }
+            if text.is_some() || date.is_some() {
+                entry.id = crate::store::make_id(entry.date, &entry.text);
+                entry.links = crate::store::extract_links(&entry.text);
+                entry.links.dedup();
+            }
+        })
     }
 
     pub fn people(&self) -> Result<People> {
@@ -833,7 +931,7 @@ impl Session {
         let levels = Levels::resolve(&self.cfg, &ladder)?;
         let mut entries = self.store.load()?;
         if entries.is_empty() {
-            bail!("no log entries yet; add some first");
+            bail!("{NO_ENTRIES}");
         }
         // Who the people mentioned are (name and role, never notes), so pairing
         // with a mentee counts as mentoring.
@@ -853,10 +951,13 @@ impl Session {
 
     pub fn gap(
         &self,
-        llm: &dyn Llm,
+        llm: Option<&dyn Llm>,
         range: Option<Range>,
         progress: Progress,
     ) -> Result<Analysis<GapReport>> {
+        let Some(llm) = llm else {
+            bail!("the gap analysis rates your work against the ladder, which needs AI. {AI_OFF} Without AI, the promotion document lists your entries by expectation.");
+        };
         let (ladder, entries, warnings) = self.prepare(llm, range, progress)?;
         let levels = Levels::resolve(&self.cfg, &ladder)?;
         let background = self.background(&entries)?;
@@ -869,6 +970,12 @@ impl Session {
             &background,
             progress,
         )?;
+        // A report the model could not rate at all would replace the last
+        // real one on the dashboard.
+        let rows = &report.summary.rows;
+        if !rows.is_empty() && report.summary.count("unknown") == rows.len() {
+            bail!("the model could not rate any expectation, so no gap report was saved. Check the model with /model and try again.");
+        }
         let name = format!("gap-{}", today());
         let path = self.save_report(&name, &report.markdown)?;
         fs::write(
@@ -884,11 +991,30 @@ impl Session {
 
     pub fn brag(
         &self,
-        llm: &dyn Llm,
+        llm: Option<&dyn Llm>,
         range: Option<Range>,
         name: &str,
         progress: Progress,
     ) -> Result<Analysis<String>> {
+        let Some(llm) = llm else {
+            let entries = self.store.load()?;
+            if entries.is_empty() {
+                bail!("{NO_ENTRIES}");
+            }
+            let ladder = self.ladder()?;
+            let levels = match &ladder {
+                // Without levels set, the entries go month by month.
+                Some(ladder) => Levels::resolve(&self.cfg, ladder).ok(),
+                None => None,
+            };
+            let md = analyze::brag_plain(&self.cfg, levels.as_ref(), &entries, range)?;
+            let path = self.save_report(&format!("brag-{name}"), &md)?;
+            return Ok(Analysis {
+                output: md,
+                path,
+                warnings: Vec::new(),
+            });
+        };
         let (ladder, entries, warnings) = self.prepare(llm, range, progress)?;
         let levels = Levels::resolve(&self.cfg, &ladder)?;
         let mut background = self.background(&entries)?;
@@ -913,11 +1039,15 @@ impl Session {
 
     pub fn summary(
         &self,
-        llm: &dyn Llm,
+        llm: Option<&dyn Llm>,
         range: Range,
         progress: Progress,
     ) -> Result<Analysis<String>> {
-        let md = analyze::summary(llm, &self.cfg, &self.store.load()?, range, progress)?;
+        let entries = self.store.load()?;
+        let md = match llm {
+            Some(llm) => analyze::summary(llm, &self.cfg, &entries, range, progress)?,
+            None => analyze::summary_plain(&self.cfg, &entries, range)?,
+        };
         let path = self.save_report(&format!("summary-{}_{}", range.0, range.1), &md)?;
         Ok(Analysis {
             output: md,
@@ -1044,7 +1174,7 @@ impl Session {
     /// A 1:1 preparation for someone, saved as `prep-<handle>-<date>.md`.
     pub fn prep(
         &self,
-        llm: &dyn Llm,
+        llm: Option<&dyn Llm>,
         handle: &str,
         progress: Progress,
     ) -> Result<Analysis<String>> {
@@ -1061,7 +1191,10 @@ impl Session {
             .filter(|e| e.mentions().contains(&person.handle))
             .collect();
         progress("Preparing your 1:1", 0, 1)?;
-        let md = analyze::prep(llm, &self.cfg, person, &about, &mentioned, today())?;
+        let md = match llm {
+            Some(llm) => analyze::prep(llm, &self.cfg, person, &about, &mentioned, today())?,
+            None => analyze::prep_plain(&self.cfg, person, &about, &mentioned)?,
+        };
         progress("Preparing your 1:1", 1, 1)?;
         let path = self.save_report(&format!("prep-{}-{}", person.handle, today()), &md)?;
         Ok(Analysis {
@@ -1320,11 +1453,12 @@ mod tests {
         let take =
             |sent: &Mutex<Vec<String>>| std::mem::take(&mut *sent.lock().unwrap()).join("\n===\n");
 
-        s.gap(&llm, None, &mut crate::no_progress).unwrap();
+        s.gap(Some(&llm), None, &mut crate::no_progress).unwrap();
         let gap = take(&sent);
-        s.brag(&llm, None, "test", &mut crate::no_progress).unwrap();
+        s.brag(Some(&llm), None, "test", &mut crate::no_progress)
+            .unwrap();
         let brag = take(&sent);
-        s.summary(&llm, (d(9, 1), d(10, 31)), &mut crate::no_progress)
+        s.summary(Some(&llm), (d(9, 1), d(10, 31)), &mut crate::no_progress)
             .unwrap();
         let summary = take(&sent);
         for (name, prompts) in [("gap", &gap), ("brag", &brag), ("summary", &summary)] {
@@ -1352,7 +1486,7 @@ mod tests {
         );
 
         // The 1:1 prep is made from the notes.
-        let prep = s.prep(&llm, "@ada", &mut crate::no_progress).unwrap();
+        let prep = s.prep(Some(&llm), "@ada", &mut crate::no_progress).unwrap();
         let prompts = take(&sent);
         assert!(
             prompts.contains("PRIVATE-NOTE")
@@ -1365,7 +1499,7 @@ mod tests {
             .unwrap()
             .to_string_lossy()
             .starts_with("prep-ada-"));
-        assert!(s.prep(&llm, "bo", &mut crate::no_progress).is_err());
+        assert!(s.prep(Some(&llm), "bo", &mut crate::no_progress).is_err());
 
         // Questions get the person's notes when they are about them, by handle or name.
         for q in ["What should I discuss with @ada?", "Ada'yla neler konuştuk"] {
@@ -1380,6 +1514,100 @@ mod tests {
             .ask_about("hedeflerim nasıl gidiyor")
             .unwrap()
             .contains("Speak at a meetup"));
+    }
+
+    /// With AI turned off nothing builds a model: the summary, promotion
+    /// document and 1:1 prep are written from the entries and notes as they
+    /// are, and the gap analysis says it needs AI without saving a report.
+    #[test]
+    fn without_ai_the_analyses_write_plain_reports() {
+        use crate::people::Relation;
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut s = Session::at(Paths::at(dir.path().to_path_buf())).unwrap();
+        s.cfg.llm.enabled = false;
+        assert!(s.llm().is_err());
+        assert!(s.llm_if_on().unwrap().is_none());
+
+        let Err(err) = s.brag(None, None, "x", &mut crate::no_progress) else {
+            panic!("a promotion document without entries");
+        };
+        assert!(format!("{err:#}").contains("upleveler log"), "{err:#}");
+
+        s.add_person(Person {
+            handle: "ada".into(),
+            name: "Ada".into(),
+            role: None,
+            team: None,
+            relation: Relation::Mentee,
+            about: None,
+            since: None,
+        })
+        .unwrap();
+        s.add_note("ada", NoteKind::FollowUp, d(10, 3), "Share the retry doc")
+            .unwrap();
+        s.add_log(
+            "Paired with @ada on the ledger retries",
+            d(10, 1),
+            vec!["mentoring".into()],
+        )
+        .unwrap();
+        s.add_log("Fixed the flaky deploy check", d(10, 8), vec![])
+            .unwrap();
+
+        let summary = s
+            .summary(None, (d(9, 1), d(10, 31)), &mut crate::no_progress)
+            .unwrap();
+        assert!(summary.output.contains("written without AI"));
+        assert!(summary.output.contains("mentoring (1)"));
+        assert!(summary.output.contains("Fixed the flaky deploy check"));
+
+        // No ladder yet: the entries go month by month.
+        let brag = s.brag(None, None, "x", &mut crate::no_progress).unwrap();
+        assert!(brag.output.contains("## 2026-10"), "{}", brag.output);
+        assert!(brag.path.exists());
+
+        let prep = s.prep(None, "ada", &mut crate::no_progress).unwrap();
+        assert!(prep.output.contains("Share the retry doc"));
+        assert!(prep.output.contains("Paired with @ada"));
+
+        let ladder = Ladder::from_yaml(include_str!("../ladder.example.yaml")).unwrap();
+        s.save_ladder(&ladder).unwrap();
+        s.set_levels(Some("L2"), Some("L3")).unwrap();
+        let Err(err) = s.gap(None, None, &mut crate::no_progress) else {
+            panic!("a gap analysis without AI");
+        };
+        assert!(format!("{err:#}").contains("needs AI"));
+        assert!(s.latest_gap().is_none());
+    }
+
+    /// A gap analysis the model could not rate at all is not saved, so the
+    /// dashboard keeps the last real one.
+    #[test]
+    fn an_unrated_gap_analysis_is_not_saved() {
+        use crate::llm::{FakeLlm, Message};
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut s = Session::at(Paths::at(dir.path().to_path_buf())).unwrap();
+        let ladder = Ladder::from_yaml(include_str!("../ladder.example.yaml")).unwrap();
+        s.save_ladder(&ladder).unwrap();
+        s.set_levels(Some("L2"), Some("L3")).unwrap();
+        s.add_log("Mentored a new teammate", d(10, 1), vec![])
+            .unwrap();
+        let llm = FakeLlm {
+            reply: |messages: &[Message], _| {
+                if messages[0].content.starts_with("You map") {
+                    r#"{"mappings":[{"entry":1,"expectations":["L3.mentoring.1"]}]}"#.into()
+                } else {
+                    "not JSON".into()
+                }
+            },
+        };
+        let Err(err) = s.gap(Some(&llm), None, &mut crate::no_progress) else {
+            panic!("an unrated gap analysis was saved");
+        };
+        assert!(format!("{err:#}").contains("no gap report was saved"));
+        assert!(s.latest_gap().is_none());
     }
 
     /// Separate sessions in separate threads (the terminal app and the browser
@@ -1444,6 +1672,125 @@ mod tests {
             .filter(|n| n.ends_with(".tmp"))
             .collect();
         assert!(stray.is_empty(), "{stray:?}");
+    }
+
+    /// Editing a log entry changes its text, date and tags. Changing the text
+    /// clears the ladder mapping and recomputes the id; changing only tags does
+    /// not.
+    #[test]
+    fn edit_entry_changes_text_date_tags_and_clears_mapping() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = Session::at(Paths::at(dir.path().to_path_buf())).unwrap();
+        let e = s
+            .add_log(
+                "Shipped the ledger export",
+                d(10, 5),
+                vec!["billing".into()],
+            )
+            .unwrap()
+            .unwrap();
+        s.store
+            .update_entry(&e.id, |entry| {
+                entry.expectations = vec!["L3.x".into()];
+                entry.tagged_with = Some("hash".into());
+            })
+            .unwrap();
+
+        let edited = s
+            .edit_entry(
+                &e.id,
+                Some("Shipped the cache warmup"),
+                Some(d(10, 6)),
+                Some(vec!["release".into()]),
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(edited.text, "Shipped the cache warmup");
+        assert_eq!(edited.date, d(10, 6));
+        assert_eq!(edited.tags, vec!["release"]);
+        assert!(edited.expectations.is_empty());
+        assert!(edited.tagged_with.is_none());
+        assert_ne!(edited.id, e.id);
+
+        let entries = s.entries().unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].id, edited.id);
+
+        // Editing only tags keeps the mapping and id.
+        s.store
+            .update_entry(&edited.id, |entry| {
+                entry.expectations = vec!["L3.x".into()];
+                entry.tagged_with = Some("hash".into());
+            })
+            .unwrap();
+        let retagged = s
+            .edit_entry(&edited.id, None, None, Some(vec!["billing".into()]))
+            .unwrap()
+            .unwrap();
+        assert_eq!(retagged.tags, vec!["billing"]);
+        assert_eq!(retagged.expectations, vec!["L3.x"]);
+        assert_eq!(retagged.tagged_with, Some("hash".into()));
+        assert_eq!(retagged.id, edited.id);
+
+        // `#tags` in the text become tags, when logging and when editing.
+        let tagged = s
+            .add_log(
+                "Rotated the signing keys #security",
+                d(10, 9),
+                vec!["ops".into()],
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(tagged.text, "Rotated the signing keys");
+        assert_eq!(tagged.tags, vec!["ops", "security"]);
+        let retagged = s
+            .edit_entry(
+                &tagged.id,
+                Some("Rotated the signing keys #urgent"),
+                None,
+                None,
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(retagged.text, "Rotated the signing keys");
+        assert_eq!(retagged.tags, vec!["ops", "security", "urgent"]);
+        s.remove_entry(&retagged.id).unwrap();
+
+        // An edit that would make it the same as another entry is refused.
+        s.add_log("Reviewed the billing design", d(10, 7), vec![])
+            .unwrap();
+        let err = s
+            .edit_entry(
+                &edited.id,
+                Some("Reviewed the billing design"),
+                Some(d(10, 7)),
+                None,
+            )
+            .unwrap_err();
+        assert!(
+            format!("{err:#}").contains("already in your log"),
+            "{err:#}"
+        );
+        assert_eq!(s.entries().unwrap().len(), 2);
+
+        // Unknown id.
+        assert!(s
+            .edit_entry("nope", Some("x"), None, None)
+            .unwrap()
+            .is_none());
+
+        // Validation errors are the same as when adding.
+        let err = s.edit_entry(&edited.id, Some(""), None, None).unwrap_err();
+        assert!(format!("{err:#}").contains("Write what you did first."));
+        let err = s
+            .edit_entry(
+                &edited.id,
+                Some(&"x".repeat(crate::limits::TEXT + 1)),
+                None,
+                None,
+            )
+            .unwrap_err();
+        assert!(format!("{err:#}").contains("longer than 4000 characters"));
     }
 
     /// Editing a note keeps its id; writing the old text again the same day is

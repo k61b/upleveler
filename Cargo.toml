@@ -15,6 +15,7 @@ axum = { version = "0.8", default-features = false, features = ["http1", "tokio"
 calamine = { version = "0.26", features = ["dates"] }
 chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4", features = ["derive"] }
+clap_complete = "4.5"
 csv = "1"
 dialoguer = "0.11"
 dirs = "5"

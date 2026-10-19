@@ -72,7 +72,9 @@ impl<'a> Levels<'a> {
         )?;
         let target = ladder
             .level(target_id)
-            .with_context(|| format!("target level {target_id} is not in the ladder"))?;
+            .with_context(|| {
+                format!("target level {target_id} is not in the ladder. See its levels with `upleveler ladder show`, then pick yours with /levels in the app or `upleveler ladder set`")
+            })?;
         let current = match cfg.current_level.as_deref() {
             Some(id) => Some(
                 ladder
@@ -532,6 +534,7 @@ fn label(cfg: &Config, en: &'static str) -> &'static str {
         "Summary" => "Özet",
         "Generated" => "Oluşturuldu",
         "log entries" => "kayıt",
+        "log entry" => "kayıt",
         "no entries" => "kayıt yok",
         "model" => "model",
         "Overview" => "Genel bakış",
@@ -548,6 +551,13 @@ fn label(cfg: &Config, en: &'static str) -> &'static str {
         "Next steps" => "Sonraki adımlar",
         "Assessment failed" => "Değerlendirme yapılamadı",
         "Other" => "Diğer",
+        "written without AI" => "AI kullanılmadan yazıldı",
+        "Promotion document" => "Terfi dokümanı",
+        "Week" => "Hafta",
+        "Tags" => "Etiketler",
+        "Open follow-ups" => "Açık takipler",
+        "Notes" => "Notlar",
+        "In your log" => "Logunda geçtiği yerler",
         "Other notable work not tied to a specific expectation" => {
             "Belirli bir beklentiye bağlı olmayan diğer önemli işler"
         }
@@ -563,14 +573,24 @@ fn header(title: &str, entries: &[&Entry], cfg: &Config) -> String {
         (Some(a), Some(b)) => format!("{} → {}", a.date, b.date),
         _ => label(cfg, "no entries").into(),
     };
+    let by = if cfg.llm.enabled {
+        format!("{} {}", label(cfg, "model"), cfg.llm.model)
+    } else {
+        label(cfg, "written without AI").to_string()
+    };
     format!(
-        "# {title}\n\n_{} {} · {} {} ({span}) · {} {}_\n",
+        "# {title}\n\n_{} {} · {} {} ({span}) · {by}_\n",
         label(cfg, "Generated"),
         chrono::Local::now().date_naive(),
         entries.len(),
-        label(cfg, "log entries"),
-        label(cfg, "model"),
-        cfg.llm.model
+        label(
+            cfg,
+            if entries.len() == 1 {
+                "log entry"
+            } else {
+                "log entries"
+            }
+        ),
     )
 }
 
@@ -1048,6 +1068,164 @@ pub fn summary(
     ))
 }
 
+/// Entries in `range`, oldest first.
+fn sorted_in_range(entries: &[Entry], range: Option<Range>) -> Vec<&Entry> {
+    let mut scoped = in_range(entries, range);
+    scoped.sort_by_key(|e| e.date);
+    scoped
+}
+
+/// Promotion document without a model: the entries under the expectations
+/// they are tied to, the rest month by month, as written.
+pub fn brag_plain(
+    cfg: &Config,
+    levels: Option<&Levels>,
+    entries: &[Entry],
+    range: Option<Range>,
+) -> Result<String> {
+    let scoped = sorted_in_range(entries, range);
+    if scoped.is_empty() {
+        bail!("no log entries in this period");
+    }
+    let title = match levels {
+        Some(l) => format!(
+            "{} {}",
+            label(cfg, "Promotion document: toward"),
+            l.target.id
+        ),
+        None => label(cfg, "Promotion document").to_string(),
+    };
+    let mut md = header(&title, &scoped, cfg);
+    let mut rest = scoped.clone();
+    if let Some(levels) = levels {
+        let mut group = String::new();
+        for level in levels.all().into_iter().rev() {
+            for exp in &level.expectations {
+                let matched: Vec<&Entry> = scoped
+                    .iter()
+                    .copied()
+                    .filter(|e| e.expectations.contains(&exp.id))
+                    .collect();
+                if matched.is_empty() {
+                    continue;
+                }
+                let heading = format!("{} · {}", level.id, exp.area);
+                if heading != group {
+                    md.push_str(&format!("\n## {heading}\n"));
+                    group = heading;
+                }
+                md.push_str(&format!("\n### {}\n\n", exp.described()));
+                for e in &matched {
+                    md.push_str(&format!("- {}\n", e.line()));
+                }
+            }
+        }
+        rest.retain(|e| e.expectations.is_empty());
+        if !rest.is_empty() {
+            md.push_str(&format!("\n## {}\n", label(cfg, "Other")));
+        }
+    }
+    let month = if levels.is_some() { "###" } else { "##" };
+    let mut current = String::new();
+    for e in rest {
+        let key = e.date.format("%Y-%m").to_string();
+        if key != current {
+            md.push_str(&format!("\n{month} {key}\n\n"));
+            current = key;
+        }
+        md.push_str(&format!("- {}\n", e.line()));
+    }
+    Ok(md)
+}
+
+/// Period summary without a model: the most used tags, then the entries
+/// week by week, as written.
+pub fn summary_plain(cfg: &Config, entries: &[Entry], range: Range) -> Result<String> {
+    let scoped = sorted_in_range(entries, Some(range));
+    if scoped.is_empty() {
+        bail!("no log entries between {} and {}", range.0, range.1);
+    }
+    let period = format!("{} → {}", range.0, range.1);
+    let mut md = header(&format!("{} {period}", label(cfg, "Summary")), &scoped, cfg);
+    let mut counts: HashMap<&str, usize> = HashMap::new();
+    for tag in scoped.iter().flat_map(|e| &e.tags) {
+        *counts.entry(tag.as_str()).or_default() += 1;
+    }
+    let mut tags: Vec<(&str, usize)> = counts.into_iter().collect();
+    tags.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(b.0)));
+    if !tags.is_empty() {
+        let top: Vec<String> = tags
+            .iter()
+            .take(8)
+            .map(|(t, n)| format!("{t} ({n})"))
+            .collect();
+        md.push_str(&format!("\n{}: {}\n", label(cfg, "Tags"), top.join(", ")));
+    }
+    let mut current = String::new();
+    for e in scoped {
+        let w = e.date.iso_week();
+        let key = format!("{}-W{:02}", w.year(), w.week());
+        if key != current {
+            md.push_str(&format!("\n## {} {key}\n\n", label(cfg, "Week")));
+            current = key;
+        }
+        md.push_str(&format!("- {}\n", e.line()));
+    }
+    Ok(md)
+}
+
+/// A 1:1 preparation without a model: open follow-ups, your notes and the
+/// entries that mention `person`, newest first.
+pub fn prep_plain(
+    cfg: &Config,
+    person: &Person,
+    notes: &[&Note],
+    entries: &[&Entry],
+) -> Result<String> {
+    if notes.is_empty() && entries.is_empty() {
+        bail!(
+            "nothing to prepare from yet: add a note (upleveler note {} \"…\") or mention @{} in your logs",
+            person.handle,
+            person.handle
+        );
+    }
+    let mut md = header(
+        &format!("{}: {}", label(cfg, "1:1 prep"), person.name),
+        entries,
+        cfg,
+    );
+    let open: Vec<String> = notes
+        .iter()
+        .rev()
+        .filter(|n| n.kind == NoteKind::FollowUp && !n.done)
+        .map(|n| format!("- {} {}", n.date, n.text.replace('\n', " / ")))
+        .collect();
+    if !open.is_empty() {
+        md.push_str(&format!(
+            "\n## {}\n\n{}\n",
+            label(cfg, "Open follow-ups"),
+            open.join("\n")
+        ));
+    }
+    let rest: Vec<&Note> = notes
+        .iter()
+        .copied()
+        .filter(|n| n.kind != NoteKind::FollowUp || n.done)
+        .collect();
+    if !rest.is_empty() {
+        md.push_str(&format!(
+            "\n## {}\n\n{}\n",
+            label(cfg, "Notes"),
+            note_lines(&rest, 6000)
+        ));
+    }
+    if !entries.is_empty() {
+        let (lines, _) = evidence_lines(entries, 6000);
+        md.push_str(&format!("\n## {}\n\n{lines}", label(cfg, "In your log")));
+    }
+    Ok(md)
+}
+
 /// Small models sometimes write the arrow the prompt asks for as LaTeX
 /// (`$\rightarrow$`), whose `\r` JSON then turns into a line break.
 fn plain_arrows(text: &str) -> String {
@@ -1274,6 +1452,43 @@ pub fn retrieve<'a>(
     }
     picked.sort_by_key(|e| e.date);
     picked
+}
+
+/// What a question gets without a model: the entries that share a word with
+/// it ("fix" finds "fixed") or fall in a period it names, newest first.
+pub fn plain_answer(entries: &[Entry], question: &str, today: NaiveDate) -> String {
+    let words = stems(question);
+    let range = range_in_text(question, today);
+    let shares_word = |e: &Entry| {
+        stems(&format!("{} {}", e.text, e.tags.join(" ")))
+            .iter()
+            .any(|s| {
+                words
+                    .iter()
+                    .any(|w| s.starts_with(w.as_str()) || w.starts_with(s.as_str()))
+            })
+    };
+    let mut hits: Vec<&Entry> = in_range(entries, range)
+        .into_iter()
+        .filter(|e| shares_word(e))
+        .collect();
+    if hits.is_empty() && range.is_some() {
+        // "What did I do last week?": every word is a stopword or a date.
+        hits = in_range(entries, range);
+    }
+    if hits.is_empty() {
+        return "AI is off, so questions are answered by searching your log, and no entry matches those words.".into();
+    }
+    hits.sort_by_key(|e| std::cmp::Reverse(e.date));
+    let lines: Vec<String> = hits
+        .iter()
+        .take(30)
+        .map(|e| format!("- {}", e.line()))
+        .collect();
+    format!(
+        "AI is off, so here are the entries that match your words:\n{}",
+        lines.join("\n")
+    )
 }
 
 /// Builds the prompt for one question; `history` holds earlier turns of a chat.
@@ -1711,6 +1926,21 @@ levels:
             "{}",
             report.markdown
         );
+    }
+
+    #[test]
+    fn without_ai_questions_search_the_log() {
+        let entries = vec![
+            Entry::new(d(10, 1), "Fixed the flaky deploy check", vec![], "manual"),
+            Entry::new(d(10, 8), "Reviewed the billing design", vec![], "manual"),
+        ];
+        let found = plain_answer(&entries, "what did I fix?", d(10, 19));
+        assert!(
+            found.contains("flaky deploy") && !found.contains("billing"),
+            "{found}"
+        );
+        let none = plain_answer(&entries, "kubernetes upgrade", d(10, 19));
+        assert!(none.contains("no entry matches"), "{none}");
     }
 
     #[test]

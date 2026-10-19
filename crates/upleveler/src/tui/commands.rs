@@ -19,13 +19,13 @@ pub const COMMANDS: &[Command] = &[
     Command {
         name: "ask",
         args: "<question>",
-        help: "ask about your logs",
+        help: "ask about your logs (a word search when AI is off)",
         runs_bare: false,
     },
     Command {
         name: "gap",
         args: "[period]",
-        help: "compare your logs with your target level",
+        help: "compare your logs with your target level (needs AI)",
         runs_bare: true,
     },
     Command {

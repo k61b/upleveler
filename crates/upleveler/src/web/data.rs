@@ -24,6 +24,8 @@ pub struct DashboardData {
     pub gap: Option<GapSummary>,
     /// Newest first.
     pub reports: Vec<Report>,
+    /// False when AI is turned off: reports are written without a model.
+    pub ai: bool,
     /// The configured model, for "runs on …" hints.
     pub model: String,
     /// Whether that model runs on this computer.
@@ -171,6 +173,7 @@ impl DashboardData {
             target: session.cfg.target_level.clone(),
             gap: session.latest_gap(),
             reports,
+            ai: session.ai_enabled(),
             model: session.cfg.llm.model_name().to_string(),
             model_local: crate::config::is_local_url(&session.cfg.llm.base_url),
             people: session.people()?,
