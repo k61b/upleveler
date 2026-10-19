@@ -222,7 +222,7 @@ Reports written without AI say so.
 - No account, no cloud, no telemetry. The browser dashboard (`upleveler web`) loads nothing from the internet.
 - With AI off, nothing goes to any model and no model is downloaded.
 - The only download is the model, from Hugging Face, when you choose it in the setup.
-- To remove the model: `rm -rf ~/.upleveler/llama` (and `pkill llama-server` if it is running). To remove everything, your data included: `rm -rf ~/.upleveler`.
+- To remove the model or everything, see [Uninstall](#uninstall).
 
 ## Scripts
 
@@ -232,9 +232,75 @@ Tab completion for your shell: `upleveler completions zsh > "${fpath[1]}/_upleve
 
 `upleveler import --list` shows the files you imported and how many entries each added. `upleveler import --remove notes.xlsx` removes the entries that came from that file and keeps a copy in `~/.upleveler/staging/`; `upleveler import` on that copy puts them back. Entries you logged yourself are never touched.
 
+## Settings and files
+
+Everything Upleveler keeps is in `~/.upleveler/` (or the folder `UPLEVELER_HOME` names):
+
+| File | What it holds |
+|---|---|
+| `config.toml` | Your settings (below) |
+| `logs.jsonl` | Your log entries, one per line |
+| `people.yaml`, `notes.jsonl` | The people you work with and your notes about them |
+| `goals.yaml` | Your goals and check-ins |
+| `ladder.yaml` | Your company's career ladder; you can edit it by hand |
+| `reports/` | Every report Upleveler writes, as Markdown |
+| `staging/` | Files being imported, and copies of removed imports |
+| `llama/` | Downloaded models (or the folder `UPLEVELER_LLAMA_DIR` names) |
+
+The setup writes `config.toml`; you rarely need to edit it. Every key:
+
+```toml
+language = "en"            # report language: "en" or "tr"
+current_level = "L2"       # your level in the ladder (/levels)
+target_level = "L3"        # the level you work toward
+
+[llm]
+enabled = true             # false: use Upleveler without AI
+provider = "llamacpp"      # "llamacpp" (on this computer) or "openai" (any OpenAI-compatible endpoint)
+base_url = "http://127.0.0.1:4748"
+model = "google/gemma-4-E4B-it-qat-q4_0-gguf"
+api_key_env = "COMPANY_LLM_KEY"  # name of the environment variable holding the key; the key itself is never stored
+allow_remote = false       # must be true before log text goes to a server that is not this computer
+context_tokens = 8192      # the model's context size
+timeout_secs = 300         # how long to wait for an answer
+```
+
+Environment variables:
+
+| Variable | What it changes |
+|---|---|
+| `UPLEVELER_HOME` | The data folder (default `~/.upleveler`) |
+| `UPLEVELER_LLAMA_DIR` | Where models are downloaded (default `~/.upleveler/llama`) |
+| `UPLEVELER_INSTALL_DIR` | Where the install script puts `upleveler` (default `~/.local/bin`) |
+| `VISUAL`, `EDITOR` | The editor `upleveler log` and imports open; without them, `nano`, then `vi` |
+
+## Troubleshooting
+
+- **`upleveler: command not found` after installing.** `~/.local/bin` is not on your PATH. The install script prints the line to add to your shell's file (`~/.zshrc` or `~/.bashrc`); open a new terminal afterwards.
+- **"llama.cpp is not installed".** Install it (`brew install llama.cpp`), or choose "No AI" or another server with `/model`.
+- **The model is slow or does not answer in time.** It may be too large for this computer's memory. Choose a smaller model with `/model`, raise `timeout_secs` in `config.toml`, or turn AI off. What llama.cpp printed is in `~/.upleveler/llama/server.log`.
+- **"could not reach …" with an OpenAI-compatible endpoint.** Check that the server is running and that `base_url` ends with `/v1` when the server expects it. A 401 or 403 means the variable named in `api_key_env` is not set or holds the wrong key.
+- **Answers come back cut off.** Set `context_tokens` to the context your server uses.
+- **The browser says the link has expired.** Every `upleveler web` prints a new link; open that one. If port 4747 is taken, Upleveler picks another and prints it; `--port` chooses one.
+- **A setup was stopped halfway.** Run `upleveler` or `/init` again; Esc on its first screen leaves AI off and the app usable.
+
+## Words used here
+
+- **Ladder:** your company's career levels and what each one expects (`ladder.yaml`).
+- **Expectation:** one thing a level expects, with an id like `L3.mentoring.1`. Writing the id in an entry ties the entry to it.
+- **Gap analysis (`/gap`):** how well your entries cover your target level's expectations; with AI a rating, without AI a count.
+- **Brag document (`/brag`):** a promotion or self-review document written from your entries.
+- **Check-in:** a note of progress on a goal.
+- **Handle:** the short name you write after `@` for someone (`@ada`).
+- **Staging file:** what an import read from your file, kept so you can review it before it is added.
+
+## Uninstall
+
+`rm ~/.local/bin/upleveler` removes the program. `rm -rf ~/.upleveler/llama` removes downloaded models (and `pkill llama-server` stops a running one). `rm -rf ~/.upleveler` removes everything, your data included.
+
 ## Türkçe
 
-Upleveler, yaptığınız işi şirketinizin seviye beklentileriyle karşılaştırır. Terminalde `upleveler` yazın. Ne yaptığınızı yazarsanız log'a eklenir, soru sorarsanız cevaplanır. Komutları görmek için `/` yazın. Panoyu tarayıcıda açmak için `upleveler web` yazın; yalnızca kendi bilgisayarınızda çalışır. Raporların Türkçe olması için kurulumda Türkçe'yi seçin. Takım arkadaşlarınız hakkında not tutmak için `upleveler person` ve `upleveler note`, hedefleriniz için `upleveler goal` komutlarını kullanın. Şirketinizin kariyer dokümanı çok sayfalıysa her sayfanın ne işe yaradığı (beklentiler, seviyeler, fiiller, odak alanları ya da atla) önerilir; ←/→ ile değiştirebilirsiniz. Liderinizle tuttuğunuz 1:1 Excel'indeki her sayfa log'a, o kişi hakkındaki notlara ya da hedeflerinize gidebilir. Dosyayı her 1:1'den sonra tekrar import edin, yalnızca yeni satırlar eklenir. Yapay zekâ kullanmadan da çalışabilir: şirketinizde yapay zekâ araçlarına izin verilmiyorsa kurulumda "No AI" seçeneğini seçin veya `upleveler init --no-ai` çalıştırın. Log, not, hedef, import, export ve pano bu modda da tam olarak çalışır; özet, terfi dokümanı ve 1:1 hazırlığı girdilerinizin kendi haliyle yazılır. Yalnızca gap analizi yapay zekâ gerektirir. Upleveler, 16 GB belleği olan bir dizüstünde yapay zekâ özellikleri için [llama.cpp](https://github.com/ggml-org/llama.cpp) (`brew install llama.cpp`) ve Google'ın Gemma 4 E4B modeliyle çalışacak şekilde tasarlandı; kurulum modeli Hugging Face'ten indirir, llama.cpp'yi gerektiğinde yalnızca bu bilgisayardan erişilebilir şekilde kendisi başlatır. Şirketinizin onaylı modelini ya da Ollama, LM Studio gibi başka bir sunucuyu kurulumdaki "OpenAI-compatible endpoint" seçeneğiyle kullanabilirsiniz. Bir 1:1'e hazırlanmak için `upleveler prep ada` ya da uygulamada `/prep @ada` yazın; notlarınız terfi dokümanına hiçbir zaman girmez. Verileriniz bilgisayarınızdan çıkmaz.
+Upleveler, yaptığınız işi şirketinizin seviye beklentileriyle karşılaştırır. Terminalde `upleveler` yazın. Ne yaptığınızı yazarsanız log'a eklenir, soru sorarsanız cevaplanır. Komutları görmek için `/` yazın. Panoyu tarayıcıda açmak için `upleveler web` yazın; yalnızca kendi bilgisayarınızda çalışır. Raporların Türkçe olması için kurulumda Türkçe'yi seçin. Takım arkadaşlarınız hakkında not tutmak için `upleveler person` ve `upleveler note`, hedefleriniz için `upleveler goal` komutlarını kullanın. Şirketinizin kariyer dokümanı çok sayfalıysa her sayfanın ne işe yaradığı (beklentiler, seviyeler, fiiller, odak alanları ya da atla) önerilir; ←/→ ile değiştirebilirsiniz. Liderinizle tuttuğunuz 1:1 Excel'indeki her sayfa log'a, o kişi hakkındaki notlara ya da hedeflerinize gidebilir. Dosyayı her 1:1'den sonra tekrar import edin, yalnızca yeni satırlar eklenir. Yapay zekâ kullanmadan da çalışabilir: şirketinizde yapay zekâ araçlarına izin verilmiyorsa kurulumda "No AI" seçeneğini seçin veya `upleveler init --no-ai` çalıştırın. Log, not, hedef, import, export ve pano bu modda da tam olarak çalışır; özet, terfi dokümanı ve 1:1 hazırlığı girdilerinizin kendi haliyle yazılır. Bir girdiye beklentinin kimliğini yazarsanız (`#L3.mentoring.1`) girdi o beklentiye bağlanır; yapay zekâ olmadan gap analizi her beklentiye bağlı girdileri sayar. Girdileri uygulamada `/edit` ve `/delete`, tarayıcıda ya da `upleveler edit` ve `upleveler remove` ile düzeltebilir veya silebilirsiniz. Upleveler, 16 GB belleği olan bir dizüstünde yapay zekâ özellikleri için [llama.cpp](https://github.com/ggml-org/llama.cpp) (`brew install llama.cpp`) ve Google'ın Gemma 4 E4B modeliyle çalışacak şekilde tasarlandı; kurulum modeli Hugging Face'ten indirir, llama.cpp'yi gerektiğinde yalnızca bu bilgisayardan erişilebilir şekilde kendisi başlatır. Şirketinizin onaylı modelini ya da Ollama, LM Studio gibi başka bir sunucuyu kurulumdaki "OpenAI-compatible endpoint" seçeneğiyle kullanabilirsiniz. Bir 1:1'e hazırlanmak için `upleveler prep ada` ya da uygulamada `/prep @ada` yazın; notlarınız terfi dokümanına hiçbir zaman girmez. Verileriniz bilgisayarınızdan çıkmaz.
 
 ## Development
 
