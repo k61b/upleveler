@@ -103,7 +103,9 @@ pub fn complete_json<T: DeserializeOwned>(
             }
         }
     }
-    bail!("model did not return valid JSON: {last_err}")
+    Err(anyhow!(last_err).context(
+        "the model's answer could not be read; try again, or choose a larger model with /model (or `upleveler init`)"
+    ))
 }
 
 /// Builders for the JSON schemas replies are held to. llama.cpp turns a schema
@@ -176,12 +178,14 @@ pub fn parse_json<T: DeserializeOwned>(raw: &str) -> Result<T> {
     if let Ok(v) = serde_json::from_str(trimmed) {
         return Ok(v);
     }
-    let start = trimmed.find(['{', '[']).context("no JSON found in reply")?;
+    let start = trimmed
+        .find(['{', '['])
+        .context("the model's answer had no JSON in it")?;
     let end = trimmed
         .rfind(['}', ']'])
-        .context("no JSON found in reply")?;
+        .context("the model's answer had no JSON in it")?;
     if end <= start {
-        bail!("no JSON found in reply");
+        bail!("the model's answer had no JSON in it");
     }
     Ok(serde_json::from_str(&trimmed[start..=end])?)
 }
@@ -381,7 +385,9 @@ impl HttpLlm {
             }
             if started.elapsed() > limit {
                 bail!(
-                    "llama.cpp at {} did not answer within {} s",
+                    "llama.cpp at {} did not answer within {} s; \
+                     the model may be too large for this computer's memory. \
+                     Choose a smaller model with /model.",
                     self.cfg.base_url,
                     limit.as_secs()
                 );
@@ -506,12 +512,27 @@ impl HttpLlm {
         match err {
             ureq::Error::Status(code, resp) => {
                 let body = resp.into_string().unwrap_or_default();
-                anyhow!("LLM request failed with HTTP {code}: {}", body.trim())
+                let trimmed = body.trim();
+                let preview: String = trimmed.chars().take(200).collect();
+                let more = if trimmed.chars().count() > 200 {
+                    "..."
+                } else {
+                    ""
+                };
+                let mut msg = format!("LLM request failed with HTTP {code}: {preview}{more}");
+                if matches!(code, 401 | 403) {
+                    if let Some(var) = &self.cfg.api_key_env {
+                        msg.push_str(&format!("; check that ${var} is set correctly"));
+                    } else {
+                        msg.push_str("; check that the API key is set");
+                    }
+                }
+                anyhow!(msg)
             }
             ureq::Error::Transport(t) => {
                 let hint = match self.cfg.provider {
                     Provider::Llamacpp => " Upleveler starts llama.cpp when it is needed; run `upleveler init` to check the setup.",
-                    Provider::Openai => "",
+                    Provider::Openai => " Check that the server is running and that base_url in config.toml is right.",
                 };
                 anyhow!("could not reach {}: {t}.{hint}", self.cfg.base_url)
             }
@@ -613,11 +634,15 @@ impl Llm for HttpLlm {
         let value: Value = self
             .post_chat(messages, format, false)?
             .into_json()
-            .context("LLM returned a non-JSON response")?;
+            .context(
+                "the server's reply was not in the OpenAI chat format; check base_url and model",
+            )?;
         value["choices"][0]["message"]["content"]
             .as_str()
             .map(str::to_string)
-            .with_context(|| format!("unexpected LLM response: {value}"))
+            .context(
+                "the server's reply was not in the OpenAI chat format; check base_url and model",
+            )
     }
 
     fn stream(

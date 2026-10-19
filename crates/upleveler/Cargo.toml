@@ -20,6 +20,7 @@ axum = { workspace = true, optional = true }
 calamine.workspace = true
 chrono.workspace = true
 clap.workspace = true
+clap_complete.workspace = true
 csv.workspace = true
 dialoguer.workspace = true
 dirs.workspace = true

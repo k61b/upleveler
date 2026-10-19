@@ -179,7 +179,7 @@ fn note_item(n: &Note, show_person: bool) -> Markup {
                         button.btn.btn--outline type="submit" { @if n.done { "Open again" } @else { "Done" } }
                     }
                 }
-                form method="post" action=(format!("{base}/delete")) {
+                form method="post" action=(format!("{base}/delete")) data-confirm="Delete this note? This cannot be undone." {
                     @if show_person { input type="hidden" name="back" value=(Tab::People.path()); }
                     button.btn.btn--outline type="submit" { "Delete" }
                 }
@@ -370,4 +370,23 @@ pub fn person(data: &DashboardData, handle: &str, form: &NoteForm) -> Option<Mar
             }
         },
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::web::demo;
+
+    #[test]
+    fn note_delete_asks_for_confirmation() {
+        let today = chrono::NaiveDate::from_ymd_opt(2026, 10, 6).unwrap();
+        let data = demo::data(today);
+        let html = person(&data, "ada", &NoteForm::empty(today))
+            .unwrap()
+            .into_string();
+        assert!(
+            html.contains(r#"data-confirm="Delete this note? This cannot be undone.""#),
+            "{html}"
+        );
+    }
 }

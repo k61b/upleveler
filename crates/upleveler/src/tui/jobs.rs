@@ -161,6 +161,11 @@ pub fn spawn(session: Session, job: Job, tx: Sender<Event>, cancel: Cancel) {
     });
 }
 
+/// The model with the job's cancel flag, or `None` when AI is turned off.
+fn optional(session: &Session, cancel: &Cancel) -> Result<Option<HttpLlm>> {
+    Ok(session.llm_if_on()?.map(|l| l.with_cancel(cancel.flag())))
+}
+
 fn run(session: &Session, job: Job, tx: &Sender<Event>, cancel: &Cancel) -> Result<Output> {
     let mut progress = |label: &str, done: usize, total: usize| -> Result<()> {
         if cancel.is_cancelled() {
@@ -181,8 +186,12 @@ fn run(session: &Session, job: Job, tx: &Sender<Event>, cancel: &Cancel) -> Resu
             )))
         }
         Job::Ask { question, history } => {
-            let llm = session.llm()?.with_cancel(cancel.flag());
             let entries = session.entries()?;
+            let Some(llm) = session.llm_if_on()? else {
+                let answer = analyze::plain_answer(&entries, &question, today());
+                return Ok(Output::Answer { question, answer });
+            };
+            let llm = llm.with_cancel(cancel.flag());
             let cfg = &session.cfg;
             let context =
                 analyze::retrieve(&entries, &question, today(), cfg.llm.input_budget_chars());
@@ -197,32 +206,44 @@ fn run(session: &Session, job: Job, tx: &Sender<Event>, cancel: &Cancel) -> Resu
             })?;
             Ok(Output::Answer { question, answer })
         }
-        Job::Gap(range) => Ok(Output::Gap(session.gap(
-            &session.llm()?.with_cancel(cancel.flag()),
-            range,
-            &mut progress,
-        )?)),
-        Job::Brag(range, name) => Ok(Output::Brag(session.brag(
-            &session.llm()?.with_cancel(cancel.flag()),
-            range,
-            &name,
-            &mut progress,
-        )?)),
-        Job::Summary(range) => Ok(Output::Summary(session.summary(
-            &session.llm()?.with_cancel(cancel.flag()),
-            range,
-            &mut progress,
-        )?)),
-        Job::Prep(handle) => Ok(Output::Prep(session.prep(
-            &session.llm()?.with_cancel(cancel.flag()),
-            &handle,
-            &mut progress,
-        )?)),
+        Job::Gap(range) => {
+            let llm = optional(session, cancel)?;
+            Ok(Output::Gap(session.gap(
+                llm.as_ref().map(|l| l as &dyn Llm),
+                range,
+                &mut progress,
+            )?))
+        }
+        Job::Brag(range, name) => {
+            let llm = optional(session, cancel)?;
+            Ok(Output::Brag(session.brag(
+                llm.as_ref().map(|l| l as &dyn Llm),
+                range,
+                &name,
+                &mut progress,
+            )?))
+        }
+        Job::Summary(range) => {
+            let llm = optional(session, cancel)?;
+            Ok(Output::Summary(session.summary(
+                llm.as_ref().map(|l| l as &dyn Llm),
+                range,
+                &mut progress,
+            )?))
+        }
+        Job::Prep(handle) => {
+            let llm = optional(session, cancel)?;
+            Ok(Output::Prep(session.prep(
+                llm.as_ref().map(|l| l as &dyn Llm),
+                &handle,
+                &mut progress,
+            )?))
+        }
         Job::Import(path, choices) => {
             let llm = if crate::import::is_staging(&path) {
                 None
             } else {
-                Some(session.llm()?.with_cancel(cancel.flag()))
+                optional(session, cancel)?
             };
             let preview = session.import_preview(
                 &path,

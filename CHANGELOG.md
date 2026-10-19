@@ -1,5 +1,26 @@
 # Changelog
 
+## Unreleased
+
+Upleveler works without AI, for workplaces where AI tools are not allowed, and is easier to start with.
+
+### Without AI
+
+- The setup's first question has a third choice, "No AI". Esc on that screen also leaves AI off, so the app is usable right away; `upleveler init --no-ai` does the same from a script, and `/model` turns AI on or off later (`enabled = false` under `[llm]` in `config.toml`).
+- With AI off nothing is sent to a model and no model server is started: typed text is logged at once, a question searches your log by its words, and imports keep your text as written.
+- `/summary` lists the period's entries week by week with the most used tags, `/brag` lists them under the expectations they are tied to (month by month without a ladder), and `/prep @ada` lists open follow-ups, notes and the entries that mention them. These reports say "written without AI".
+- `/gap` needs AI and says so. The browser hides it and runs the other reports without AI; the status line shows "AI off".
+- A gap analysis the model could not rate at all is no longer saved, so it does not replace the last real one.
+
+### Easier to use
+
+- Log entries can be edited and deleted in the browser. Deleting a note or a check-in and dropping a goal there now asks first.
+- `#tags` in an entry become tags, in the app, the browser and `upleveler log`; `#goal-2` counts an entry toward goal 2. `?` lists every shortcut, the date words and the dashboard keys.
+- `/dashboard` has People and Goals tabs.
+- Every command and flag has help, most commands show examples in `--help`, and `upleveler completions <shell>` prints tab completion for bash, zsh, fish, PowerShell and Elvish. `upleveler people`, `upleveler goals` and `--kind 1:1` work like in the app; `summary --week` with `--period` is an error instead of being ignored.
+- Clearer errors when a model's answer cannot be read, a server refuses a key or does not answer in time. Editing a file opens `nano` when no editor is set, before `vi`.
+- The install script names the right shell file for your PATH and no longer asks for llama.cpp first.
+
 ## 2.5.0
 
 Upleveler runs its model with [llama.cpp](https://github.com/ggml-org/llama.cpp), the open-source engine, with no app in between.

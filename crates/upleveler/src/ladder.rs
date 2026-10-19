@@ -268,7 +268,7 @@ pub fn read(
                     .collect();
             }
             let llm = llm.context(
-                "an LLM is needed to read this ladder: no sheet lists levels with their expectations",
+                "reading this ladder needs AI: no sheet lists levels with their expectations. Turn AI on with /model, or give each level its own column or sheet",
             )?;
             let parts = unread.iter().flat_map(|t| table_parts(t, budget)).collect();
             from_parts(llm, parts, progress)?
@@ -299,7 +299,9 @@ pub fn read(
         warnings.extend(more);
         return Ok((ladder, warnings));
     }
-    let llm = llm.context("an LLM is needed to read this ladder document")?;
+    let llm = llm.context(
+        "reading this ladder needs AI: it has no level headings (L2, Senior Engineer) with expectations under them. Turn AI on with /model, or write it that way (see ladder.example.yaml)",
+    )?;
     Ok((from_document(llm, &doc, budget, progress)?, warnings))
 }
 

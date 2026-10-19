@@ -143,7 +143,7 @@ fn ladder_from_the_expectations_sheet_of_a_framework_workbook() {
     let err = session
         .ladder_from_file(&file, &only_roadmap, None, &mut upleveler::no_progress)
         .unwrap_err();
-    assert!(format!("{err:#}").contains("an LLM is needed"), "{err:#}");
+    assert!(format!("{err:#}").contains("needs AI"), "{err:#}");
     let nope = vec![("Nope".to_string(), SheetRole::Expectations)];
     let err = session
         .ladder_from_file(&file, &nope, None, &mut upleveler::no_progress)

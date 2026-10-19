@@ -1,6 +1,7 @@
 use anyhow::{bail, Context, Result};
 use chrono::NaiveDate;
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, CommandFactory, Parser, Subcommand, ValueEnum};
+use clap_complete::{generate, Shell};
 use dialoguer::{Confirm, Select};
 use std::io::{self, BufRead, IsTerminal, Read, Write};
 use std::path::PathBuf;
@@ -46,7 +47,13 @@ struct RangeArgs {
 #[derive(Subcommand)]
 enum Command {
     /// Open the setup wizard (model, report language, ladder, levels)
-    Init,
+    #[command(after_help = "Examples:\n  upleveler init\n  upleveler init --no-ai")]
+    Init {
+        /// Use Upleveler without AI: nothing is sent to a model and no model
+        /// server is started. Works without a terminal, e.g. in a setup script.
+        #[arg(long)]
+        no_ai: bool,
+    },
     /// Print a short status (what running without a command does outside a terminal)
     Status,
     /// Import, show or configure your company's career ladder
@@ -55,15 +62,21 @@ enum Command {
         action: LadderCmd,
     },
     /// The people you work with: profiles, and notes about them
+    #[command(alias = "people")]
     Person {
         #[command(subcommand)]
         action: PersonCmd,
     },
     /// Add a note about someone: a 1:1, feedback, or something to follow up
+    #[command(
+        after_help = "Examples:\n  upleveler note ada \"Discussed the roadmap\" --kind 1:1\n  upleveler note lead \"Clear sprint priorities\" --kind received\n  upleveler note ada \"Share the runbook\" --kind followup"
+    )]
     Note {
         /// Their handle (`ada` or `@ada`)
         person: String,
+        /// Text of the note
         text: Vec<String>,
+        /// Kind of note: 1:1, given, received, followup or note
         #[arg(long, short, value_enum, default_value_t = NoteKindArg::Note)]
         kind: NoteKindArg,
         /// Date of the note (default: today)
@@ -83,12 +96,17 @@ enum Command {
         open: bool,
     },
     /// Your goals, free or tied to an expectation of your ladder
+    #[command(alias = "goals")]
     Goal {
         #[command(subcommand)]
         action: GoalCmd,
     },
     /// Add a log entry (opens $EDITOR, or reads stdin, when no text is given)
+    #[command(
+        after_help = "Examples:\n  upleveler log \"Fixed the flaky deploy check\" -t ci\n  upleveler log \"Reviewed the auth refactor\" -t code-review -t security\n  upleveler log --date yesterday \"Mentored @ada on error handling\""
+    )]
     Log {
+        /// What you did; `#tags` in it become tags
         text: Vec<String>,
         /// Date of the work (default: today)
         #[arg(long, short)]
@@ -98,9 +116,13 @@ enum Command {
         tags: Vec<String>,
     },
     /// List log entries
+    #[command(
+        after_help = "Examples:\n  upleveler list\n  upleveler list --period this-week\n  upleveler list --period 2026-Q3 --tag incident\n  upleveler list --grep \"refactor\" -n 10"
+    )]
     List {
         #[command(flatten)]
         range: RangeArgs,
+        /// Only entries with this tag
         #[arg(long)]
         tag: Option<String>,
         /// Only entries containing this text
@@ -113,7 +135,11 @@ enum Command {
     /// Import old logs from txt/md/csv/xlsx (AI-normalized) or a reviewed staging .jsonl.
     /// In a workbook, each sheet goes to the log, notes about a person or goals (--sheet);
     /// --list shows what you imported and --remove takes it out again
+    #[command(
+        after_help = "Examples:\n  upleveler import ./weekly-notes.md\n  upleveler import ./backlog.xlsx --sheet \"Agenda=notes\" --person lead\n  upleveler import --list\n  upleveler import --remove weekly-notes.md"
+    )]
     Import {
+        /// File to import (txt, md, csv, xlsx or a reviewed staging .jsonl)
         #[arg(required_unless_present_any = ["list", "remove"])]
         file: Option<PathBuf>,
         /// Write to this JSONL file instead of your main log
@@ -143,7 +169,11 @@ enum Command {
         remove: Option<String>,
     },
     /// Export entries as Markdown, CSV, Excel or JSONL
+    #[command(
+        after_help = "Examples:\n  upleveler export --format md\n  upleveler export --format xlsx --period 2026-Q3 -o ./review.xlsx\n  upleveler export --format jsonl --from 2026-01-01 --to 2026-03-31 -o -"
+    )]
     Export {
+        /// Output format
         #[arg(long, short, value_enum)]
         format: Format,
         #[command(flatten)]
@@ -153,36 +183,61 @@ enum Command {
         output: Option<PathBuf>,
     },
     /// Summarize a period (default: last 7 days)
+    #[command(
+        after_help = "Examples:\n  upleveler summary\n  upleveler summary --week\n  upleveler summary --month\n  upleveler summary --period 2026-Q3"
+    )]
     Summary {
         /// This calendar week
-        #[arg(long, conflicts_with_all = ["month", "quarter"])]
+        #[arg(long, conflicts_with_all = ["month", "quarter", "period", "from", "to"])]
         week: bool,
         /// This calendar month
-        #[arg(long, conflicts_with = "quarter")]
+        #[arg(long, conflicts_with_all = ["week", "quarter", "period", "from", "to"])]
         month: bool,
         /// This calendar quarter
-        #[arg(long)]
+        #[arg(long, conflicts_with_all = ["week", "month", "period", "from", "to"])]
         quarter: bool,
         #[command(flatten)]
         range: RangeArgs,
     },
     /// Compare your logs with the expectations of your target level
+    #[command(
+        after_help = "Examples:\n  upleveler gap\n  upleveler gap --period this-quarter\n  upleveler gap --from 2026-01-01 --to 2026-06-30"
+    )]
     Gap {
         #[command(flatten)]
         range: RangeArgs,
     },
     /// Write a promotion / self-review document from your logs
+    #[command(
+        after_help = "Examples:\n  upleveler brag\n  upleveler brag --period this-quarter\n  upleveler brag --period 2026-Q2"
+    )]
     Brag {
         #[command(flatten)]
         range: RangeArgs,
     },
     /// Prepare a 1:1 with someone from your notes about them and your shared work
+    #[command(after_help = "Examples:\n  upleveler prep ada\n  upleveler prep @lead")]
     Prep {
         /// Their handle, e.g. ada or @ada
         person: String,
     },
     /// Ask a question about your logs
-    Ask { question: Vec<String> },
+    #[command(
+        after_help = "Examples:\n  upleveler ask \"which incidents did I handle last month?\"\n  upleveler ask \"what did I work on with @ada?\""
+    )]
+    Ask {
+        /// Question to ask about your logs
+        question: Vec<String>,
+    },
+    /// Print a shell completion script for bash, zsh, fish, powershell or elvish
+    #[command(after_help = concat!("Install the script:\n",
+        "  bash:  upleveler completions bash > ~/.local/share/bash-completion/completions/upleveler\n",
+        "  zsh:   upleveler completions zsh > \"${fpath[1]}/_upleveler\"\n",
+        "  fish:  upleveler completions fish > ~/.config/fish/completions/upleveler.fish"))]
+    Completions {
+        /// Shell to generate completions for
+        shell: Shell,
+    },
     /// Chat about your logs (plain prompt; the interactive app is nicer)
     Chat,
     /// Open the dashboard in your browser (served on 127.0.0.1 only)
@@ -202,23 +257,28 @@ enum LadderCmd {
     /// Import a ladder document (txt/md/xlsx/csv, or a ladder.yaml as-is). Level headings
     /// ("L2") with items under them are read as written; anything else via AI
     Import {
+        /// Ladder file to import
         file: PathBuf,
         /// In a workbook, what a sheet is for, repeatable: --sheet "Competencies=expectations"
         /// (expectations, levels, verbs, focus or skip). Sheets not named get the suggested role
         #[arg(long = "sheet", value_name = "NAME=ROLE")]
         sheets: Vec<String>,
+        /// Do not ask for confirmation
         #[arg(long, short)]
         yes: bool,
     },
     /// Show the ladder, or one level in detail
     Show {
+        /// Level id to show in detail
         #[arg(long)]
         level: Option<String>,
     },
     /// Set your current and target level
     Set {
+        /// Your current level id
         #[arg(long)]
         current: Option<String>,
+        /// The level you are working toward
         #[arg(long)]
         target: Option<String>,
     },
@@ -227,12 +287,20 @@ enum LadderCmd {
 #[derive(Subcommand)]
 enum NotesCmd {
     /// Mark a follow-up as done (the id is shown by `upleveler notes`)
-    Done { id: String },
+    Done {
+        /// Note id to mark done
+        id: String,
+    },
     /// Open a follow-up again
-    Reopen { id: String },
+    Reopen {
+        /// Note id to reopen
+        id: String,
+    },
     /// Delete a note
     Delete {
+        /// Note id to delete
         id: String,
+        /// Do not ask for confirmation
         #[arg(long, short)]
         yes: bool,
     },
@@ -241,16 +309,22 @@ enum NotesCmd {
 #[derive(Subcommand)]
 enum PersonCmd {
     /// Add someone you work with
+    #[command(
+        after_help = "Examples:\n  upleveler person add ada --name \"Ada\" --relation mentee\n  upleveler person add lead --role \"Engineering manager\" --team Platform\n  upleveler person add rob --about \"Knows the payment service\""
+    )]
     Add {
         /// What you type after @ (`ada`)
         handle: String,
         /// Full name (default: the handle)
         #[arg(long)]
         name: Option<String>,
+        /// Job title or role
         #[arg(long)]
         role: Option<String>,
+        /// Team they are on
         #[arg(long)]
         team: Option<String>,
+        /// How they relate to you
         #[arg(long, value_enum, default_value_t = RelationArg::Other)]
         relation: RelationArg,
         /// A short description
@@ -260,25 +334,36 @@ enum PersonCmd {
     /// Change someone's name, role, team, relation or description
     /// (an empty value clears role, team or description)
     Edit {
+        /// Handle of the person to edit
         handle: String,
+        /// New full name
         #[arg(long)]
         name: Option<String>,
+        /// New job title or role (empty to clear)
         #[arg(long)]
         role: Option<String>,
+        /// New team (empty to clear)
         #[arg(long)]
         team: Option<String>,
+        /// New relation to you
         #[arg(long, value_enum)]
         relation: Option<RelationArg>,
+        /// New short description (empty to clear)
         #[arg(long)]
         about: Option<String>,
     },
     /// List the people you work with
     List,
     /// Show someone's profile, notes and the entries that mention them
-    Show { handle: String },
+    Show {
+        /// Handle of the person to show
+        handle: String,
+    },
     /// Remove someone and every note about them (your log entries stay)
     Remove {
+        /// Handle of the person to remove
         handle: String,
+        /// Do not ask for confirmation
         #[arg(long, short)]
         yes: bool,
     },
@@ -287,7 +372,11 @@ enum PersonCmd {
 #[derive(Subcommand)]
 enum GoalCmd {
     /// Add a goal
+    #[command(
+        after_help = "Examples:\n  upleveler goal add \"Speak at a local meetup\" --due 2026-12-01\n  upleveler goal add \"Improve test coverage\" --expectation TC-3\n  upleveler goal add \"Mentor a junior engineer\""
+    )]
     Add {
+        /// Text describing the goal
         text: Vec<String>,
         /// Tie it to a ladder expectation id (see `upleveler ladder show --level <ID>`)
         #[arg(long, short)]
@@ -298,7 +387,9 @@ enum GoalCmd {
     },
     /// Change a goal's text, expectation or due date
     Edit {
+        /// Goal id to edit
         id: u32,
+        /// New goal text
         #[arg(long)]
         text: Option<String>,
         /// A ladder expectation id, or "" to untie the goal
@@ -315,29 +406,49 @@ enum GoalCmd {
         all: bool,
     },
     /// Mark a goal as reached
-    Done { id: u32 },
+    Done {
+        /// Goal id to mark done
+        id: u32,
+    },
     /// Drop a goal
-    Drop { id: u32 },
+    Drop {
+        /// Goal id to drop
+        id: u32,
+    },
     /// Note progress on a goal
     Checkin {
+        /// Goal id to check in on
         id: u32,
+        /// Progress text
         text: Vec<String>,
         /// Date of the check-in (default: today)
         #[arg(long, short)]
         date: Option<String>,
     },
     /// Show a goal with its progress and numbered check-ins
-    Show { id: u32 },
+    Show {
+        /// Goal id to show
+        id: u32,
+    },
     /// Delete a check-in by its number in `goal show`
-    DropCheckin { id: u32, n: usize },
+    DropCheckin {
+        /// Goal id whose check-in to delete
+        id: u32,
+        /// Number of the check-in as shown by `goal show`
+        n: usize,
+    },
 }
 
-#[derive(Clone, Copy, clap::ValueEnum)]
+#[derive(Clone, Copy, ValueEnum)]
 enum NoteKindArg {
     Note,
+    #[value(alias = "1:1")]
     OneOnOne,
+    #[value(alias = "given")]
     FeedbackGiven,
+    #[value(alias = "received")]
     FeedbackReceived,
+    #[value(alias = "followup")]
     FollowUp,
 }
 
@@ -353,7 +464,7 @@ impl From<NoteKindArg> for NoteKind {
     }
 }
 
-#[derive(Clone, Copy, clap::ValueEnum)]
+#[derive(Clone, Copy, ValueEnum)]
 enum RelationArg {
     Manager,
     Peer,
@@ -386,10 +497,20 @@ fn run(cli: Cli) -> Result<()> {
     match cli.command {
         None if interactive() => upleveler::tui::run(session, false),
         None | Some(Command::Status) => status(&session),
-        Some(Command::Init) => {
+        Some(Command::Init { no_ai: true }) => {
+            session.cfg.llm.enabled = false;
+            session.save_config()?;
+            println!(
+                "AI is off: Upleveler will not send anything to a model. Settings are in {}.",
+                session.paths.config.display()
+            );
+            println!("Log your first entry: upleveler log \"What you did today\"");
+            Ok(())
+        }
+        Some(Command::Init { no_ai: false }) => {
             if !interactive() {
                 bail!(
-                    "init is interactive; edit {} directly instead",
+                    "init is interactive; run `upleveler init --no-ai` to use Upleveler without AI, or edit {} directly",
                     session.paths.config.display()
                 );
             }
@@ -463,7 +584,7 @@ fn run(cli: Cli) -> Result<()> {
             for e in &matched[skip..] {
                 println!("{}", e.line());
             }
-            eprintln!("{} entries", matched.len());
+            eprintln!("{}", plural(matched.len(), "entry", "entries"));
             Ok(())
         }
         Some(Command::Import { list: true, .. }) => imported_cmd(&session),
@@ -535,29 +656,34 @@ fn run(cli: Cli) -> Result<()> {
                 range.resolve()?.or_else(|| parse_period("7d", today()))
             }
             .context("could not determine the period")?;
-            let llm = session.llm()?;
-            let a = session.summary(&llm, range, &mut progress)?;
+            let llm = session.llm_if_on()?;
+            let a = session.summary(llm.as_ref().map(|l| l as &dyn Llm), range, &mut progress)?;
             print_report(&a.output, &a.path, &a.warnings);
             Ok(())
         }
         Some(Command::Gap { range }) => {
             let range = range.resolve()?;
-            let llm = session.llm()?;
-            let a = session.gap(&llm, range, &mut progress)?;
+            let llm = session.llm_if_on()?;
+            let a = session.gap(llm.as_ref().map(|l| l as &dyn Llm), range, &mut progress)?;
             print_report(&a.output.markdown, &a.path, &a.warnings);
             Ok(())
         }
         Some(Command::Brag { range }) => {
             let name = range.period.clone().unwrap_or_else(|| today().to_string());
             let range = range.resolve()?;
-            let llm = session.llm()?;
-            let a = session.brag(&llm, range, &name, &mut progress)?;
+            let llm = session.llm_if_on()?;
+            let a = session.brag(
+                llm.as_ref().map(|l| l as &dyn Llm),
+                range,
+                &name,
+                &mut progress,
+            )?;
             print_report(&a.output, &a.path, &a.warnings);
             Ok(())
         }
         Some(Command::Prep { person }) => {
-            let llm = session.llm()?;
-            let a = session.prep(&llm, &person, &mut progress)?;
+            let llm = session.llm_if_on()?;
+            let a = session.prep(llm.as_ref().map(|l| l as &dyn Llm), &person, &mut progress)?;
             print_report(&a.output, &a.path, &a.warnings);
             Ok(())
         }
@@ -566,9 +692,19 @@ fn run(cli: Cli) -> Result<()> {
             if question.trim().is_empty() {
                 bail!("ask what? e.g. upleveler ask \"which incidents did I handle last month?\"");
             }
-            let llm = session.llm()?;
+            let llm = session.llm_if_on()?;
             let entries = session.entries()?;
-            answer(&llm, &session, &entries, &question, &mut Vec::new())
+            answer(
+                llm.as_ref().map(|l| l as &dyn Llm),
+                &session,
+                &entries,
+                &question,
+                &mut Vec::new(),
+            )
+        }
+        Some(Command::Completions { shell }) => {
+            generate(shell, &mut Cli::command(), "upleveler", &mut io::stdout());
+            Ok(())
         }
         Some(Command::Chat) => chat(&session),
         #[cfg(feature = "server")]
@@ -685,14 +821,18 @@ fn status(session: &Session) -> Result<()> {
         ),
         None => println!("  ladder: not imported yet (`upleveler ladder import <file>`)"),
     }
-    println!(
-        "  llm:    {} at {}{}",
-        s.model,
-        s.base_url,
-        if s.local { " (local)" } else { " (remote)" }
-    );
+    if s.ai {
+        println!(
+            "  llm:    {} at {}{}",
+            s.model,
+            s.base_url,
+            if s.local { " (local)" } else { " (remote)" }
+        );
+    } else {
+        println!("  llm:    off (Upleveler runs without AI)");
+    }
     if !s.configured {
-        println!("\nRun `upleveler` in a terminal to get started.");
+        println!("\nRun `upleveler` in a terminal to get started, or `upleveler init --no-ai` to use it without AI.");
     }
     Ok(())
 }
@@ -1177,7 +1317,7 @@ fn import_cmd(
     let default_date = default_date
         .map(|d| parse_date(&d, today()).with_context(|| format!("unrecognized date {d:?}")))
         .transpose()?;
-    let llm = if no_ai || import::is_staging(file) {
+    let llm = if no_ai || !session.ai_enabled() || import::is_staging(file) {
         None
     } else {
         let llm = session.llm()?;
@@ -1421,12 +1561,16 @@ fn remove_import_cmd(session: &Session, file: &str, yes: bool) -> Result<()> {
 }
 
 fn answer(
-    llm: &dyn Llm,
+    llm: Option<&dyn Llm>,
     session: &Session,
     entries: &[Entry],
     question: &str,
     history: &mut Vec<Message>,
 ) -> Result<()> {
+    let Some(llm) = llm else {
+        println!("{}", analyze::plain_answer(entries, question, today()));
+        return Ok(());
+    };
     let cfg = &session.cfg;
     let context = analyze::retrieve(entries, question, today(), cfg.llm.input_budget_chars());
     let about = session.ask_about(question)?;
@@ -1444,7 +1588,7 @@ fn answer(
 }
 
 fn chat(session: &Session) -> Result<()> {
-    let llm = session.llm()?;
+    let llm = session.llm_if_on()?;
     let entries = session.entries()?;
     let mut history = Vec::new();
     eprintln!("Ask about your logs. Empty line or Ctrl-D to quit.");
@@ -1460,9 +1604,138 @@ fn chat(session: &Session) -> Result<()> {
         if q.is_empty() || q == "exit" || q == "quit" {
             break;
         }
-        if let Err(err) = answer(&llm, session, &entries, q, &mut history) {
+        let llm = llm.as_ref().map(|l| l as &dyn Llm);
+        if let Err(err) = answer(llm, session, &entries, q, &mut history) {
             eprintln!("error: {err:#}");
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod cli_tests {
+    use super::*;
+
+    #[test]
+    fn cli_debug_assert() {
+        Cli::command().debug_assert();
+    }
+
+    #[test]
+    fn every_argument_has_help() {
+        fn check(cmd: &clap::Command) {
+            for arg in cmd.get_arguments() {
+                let help = arg.get_help().map(|h| h.to_string()).unwrap_or_default();
+                assert!(
+                    !help.trim().is_empty(),
+                    "{}: argument --{} has no help",
+                    cmd.get_name(),
+                    arg.get_id()
+                );
+            }
+            for sub in cmd.get_subcommands() {
+                check(sub);
+            }
+        }
+        check(&Cli::command());
+    }
+
+    /// Splits an example command line on spaces, keeping "quoted words" together.
+    fn words(line: &str) -> Vec<String> {
+        let mut out = Vec::new();
+        let mut word = String::new();
+        let mut quoted = false;
+        for c in line.chars() {
+            match c {
+                '"' => quoted = !quoted,
+                ' ' if !quoted => {
+                    if !word.is_empty() {
+                        out.push(std::mem::take(&mut word));
+                    }
+                }
+                c => word.push(c),
+            }
+        }
+        if !word.is_empty() {
+            out.push(word);
+        }
+        out
+    }
+
+    /// Every example in `--help` is a command line Upleveler accepts.
+    #[test]
+    fn help_examples_parse() {
+        fn check(cmd: &clap::Command, seen: &mut usize) {
+            if let Some(help) = cmd.get_after_help() {
+                let help = help.to_string();
+                if let Some((_, examples)) = help.split_once("Examples:") {
+                    for line in examples.lines().map(str::trim) {
+                        if !line.starts_with("upleveler") {
+                            continue;
+                        }
+                        *seen += 1;
+                        if let Err(e) = Cli::try_parse_from(words(line)) {
+                            panic!("example `{line}` does not parse: {e}");
+                        }
+                    }
+                }
+            }
+            for sub in cmd.get_subcommands() {
+                check(sub, seen);
+            }
+        }
+        let mut seen = 0;
+        check(&Cli::command(), &mut seen);
+        assert!(seen > 20, "only {seen} examples found");
+    }
+
+    #[test]
+    fn command_aliases_are_recognized() {
+        let people = Cli::try_parse_from(["upleveler", "people", "list"]).unwrap();
+        assert!(matches!(
+            people.command,
+            Some(Command::Person {
+                action: PersonCmd::List
+            })
+        ));
+        let goals = Cli::try_parse_from(["upleveler", "goals", "list"]).unwrap();
+        assert!(matches!(
+            goals.command,
+            Some(Command::Goal {
+                action: GoalCmd::List { .. }
+            })
+        ));
+    }
+
+    #[test]
+    fn note_kind_aliases_parse() {
+        let cases = ["1:1", "given", "received", "followup"];
+        for kind in cases {
+            let cli =
+                Cli::try_parse_from(["upleveler", "note", "ada", "--kind", kind, "text"]).unwrap();
+            assert!(
+                matches!(
+                    cli.command,
+                    Some(Command::Note {
+                        kind: NoteKindArg::OneOnOne
+                            | NoteKindArg::FeedbackGiven
+                            | NoteKindArg::FeedbackReceived
+                            | NoteKindArg::FollowUp,
+                        ..
+                    })
+                ),
+                "kind alias {kind:?} should parse"
+            );
+        }
+    }
+
+    #[test]
+    fn summary_shortcuts_conflict_with_period_flags() {
+        let bad = Cli::try_parse_from(["upleveler", "summary", "--week", "--period", "7d"]);
+        assert!(bad.is_err(), "--week and --period must conflict");
+        let bad = Cli::try_parse_from(["upleveler", "summary", "--month", "--from", "2026-01-01"]);
+        assert!(bad.is_err(), "--month and --from must conflict");
+        let bad = Cli::try_parse_from(["upleveler", "summary", "--week", "--month"]);
+        assert!(bad.is_err(), "--week and --month must conflict");
+    }
 }

@@ -298,7 +298,7 @@ fn main() -> anyhow::Result<()> {
         chrono::NaiveDate::from_ymd_opt(2026, 1, 1).unwrap(),
         chrono::NaiveDate::from_ymd_opt(2026, 12, 31).unwrap(),
     ));
-    let gap = session.gap(&llm, range, &mut upleveler::no_progress)?;
+    let gap = session.gap(Some(&llm), range, &mut upleveler::no_progress)?;
     let entries = session.entries()?;
     let mapped = DIARY_MAPPINGS
         .iter()
@@ -347,7 +347,7 @@ fn main() -> anyhow::Result<()> {
 
     // The promotion document.
     let (started, calls) = (Instant::now(), llm.calls.get());
-    let brag = session.brag(&llm, range, "eval", &mut upleveler::no_progress)?;
+    let brag = session.brag(Some(&llm), range, "eval", &mut upleveler::no_progress)?;
     let statements = brag.output.lines().filter(|l| l.starts_with("- ")).count();
     stage(
         "promotion document",

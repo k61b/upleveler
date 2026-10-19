@@ -179,6 +179,68 @@ fn clean_rest(rest: &str) -> String {
         .to_string()
 }
 
+/// Takes `#word` tokens out of `text` and returns the remaining text with
+/// spacing tidied, plus the lowercased tags (unique, at most 5).
+///
+/// A tag starts with `#` at a word boundary, followed by a letter, then any
+/// number of letters, digits, `-` or `_`. Ticket numbers like `#123` and
+/// language names like `C#` are left in the text.
+pub fn hashtags(text: &str) -> (String, Vec<String>) {
+    let chars: Vec<char> = text.chars().collect();
+    let mut tags = Vec::new();
+    let mut out = String::with_capacity(text.len());
+    let mut i = 0;
+    while i < chars.len() {
+        if chars[i] == '#' && (i == 0 || !chars[i - 1].is_alphanumeric()) {
+            let start = i + 1;
+            if start < chars.len() && chars[start].is_alphabetic() {
+                let mut end = start + 1;
+                while end < chars.len()
+                    && (chars[end].is_alphanumeric() || chars[end] == '-' || chars[end] == '_')
+                {
+                    end += 1;
+                }
+                let tag: String = chars[start..end].iter().collect();
+                let tag = tag.to_lowercase();
+                if !tags.contains(&tag) && tags.len() < 5 {
+                    tags.push(tag);
+                }
+                i = end;
+                continue;
+            }
+        }
+        out.push(chars[i]);
+        i += 1;
+    }
+    (tidy_spacing(&out), tags)
+}
+
+fn tidy_spacing(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut prev_ws = true;
+    for c in s.chars() {
+        if c == '\n' {
+            while out.ends_with(' ') {
+                out.pop();
+            }
+            out.push('\n');
+            prev_ws = true;
+        } else if c.is_whitespace() {
+            if !prev_ws {
+                out.push(' ');
+                prev_ws = true;
+            }
+        } else {
+            out.push(c);
+            prev_ws = false;
+        }
+    }
+    while out.ends_with(' ') || out.ends_with('\n') {
+        out.pop();
+    }
+    out
+}
+
 #[derive(Deserialize)]
 struct Route {
     intent: String,
@@ -316,6 +378,47 @@ mod tests {
             (t, "dünya kupası izledim".into())
         );
         assert_eq!(split_date("Deployed v2", t), (t, "Deployed v2".into()));
+    }
+
+    #[test]
+    fn hashtags_extract_tags_and_tidy_text() {
+        assert_eq!(hashtags(""), ("".into(), vec![]));
+        assert_eq!(
+            hashtags("fixed #bug in #auth"),
+            ("fixed in".into(), vec!["bug".into(), "auth".into()])
+        );
+        assert_eq!(hashtags("#bug #bug #bug"), ("".into(), vec!["bug".into()]));
+        assert_eq!(hashtags("#123 ticket"), ("#123 ticket".into(), vec![]));
+        assert_eq!(hashtags("C# code"), ("C# code".into(), vec![]));
+        assert_eq!(
+            hashtags(" #bug  and  #feat "),
+            ("and".into(), vec!["bug".into(), "feat".into()])
+        );
+        assert_eq!(
+            hashtags("#BUG_FIX-2"),
+            ("".into(), vec!["bug_fix-2".into()])
+        );
+        assert_eq!(
+            hashtags("#güvenlik kontrolü"),
+            ("kontrolü".into(), vec!["güvenlik".into()])
+        );
+        assert_eq!(
+            hashtags("fixed #bug\nand #feat"),
+            ("fixed\nand".into(), vec!["bug".into(), "feat".into()])
+        );
+        assert_eq!(
+            hashtags("#one #two #three #four #five #six"),
+            (
+                "".into(),
+                vec![
+                    "one".into(),
+                    "two".into(),
+                    "three".into(),
+                    "four".into(),
+                    "five".into(),
+                ]
+            )
+        );
     }
 
     #[test]

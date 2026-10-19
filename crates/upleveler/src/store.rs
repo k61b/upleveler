@@ -194,6 +194,16 @@ impl Store {
         })
     }
 
+    /// Loads the entry with `id`, changes it and writes it back under the
+    /// same lock; returns the changed entry if it existed.
+    pub fn update_entry(&self, id: &str, change: impl FnOnce(&mut Entry)) -> Result<Option<Entry>> {
+        self.update(|all| {
+            let entry = all.iter_mut().find(|e| e.id == id)?;
+            change(entry);
+            Some(entry.clone())
+        })
+    }
+
     /// Removes every entry `remove` picks; returns them.
     pub fn remove_where(&self, remove: impl Fn(&Entry) -> bool) -> Result<Vec<Entry>> {
         self.update(|all| {
@@ -334,6 +344,30 @@ mod tests {
         assert_eq!(store.remove(&first.id).unwrap().unwrap().id, first.id);
         assert_eq!(store.load().unwrap().len(), 49);
         assert!(store.remove("missing").unwrap().is_none());
+    }
+
+    #[test]
+    fn update_entry_changes_and_returns_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::new(dir.path().join("logs.jsonl"));
+        let e = Entry::new(d(2025, 1, 1), "first", vec![], "manual");
+        store.append(std::slice::from_ref(&e)).unwrap();
+
+        let updated = store
+            .update_entry(&e.id, |entry| {
+                entry.text = "second".into();
+                entry.tags = vec!["tag".into()];
+            })
+            .unwrap()
+            .unwrap();
+        assert_eq!(updated.text, "second");
+        assert_eq!(updated.tags, vec!["tag"]);
+
+        let loaded = store.load().unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].text, "second");
+        assert_eq!(loaded[0].tags, vec!["tag"]);
+        assert!(store.update_entry("missing", |_| {}).unwrap().is_none());
     }
 
     #[test]

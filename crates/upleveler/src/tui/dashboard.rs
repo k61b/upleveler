@@ -1,11 +1,14 @@
-//! Full-screen dashboard (alternate screen): overview with heatmap, logs, ladder, reports.
+//! Full-screen dashboard (alternate screen): overview with heatmap, logs,
+//! ladder, reports, people and goals.
 
 use super::app::Tab;
 use super::history::{fit, truncate};
 use super::markdown;
 use super::theme;
 use crate::analyze::GapSummary;
+use crate::goals::{Goal, GoalStatus};
 use crate::ladder::Ladder;
+use crate::people::{Note, NoteKind, Person};
 use crate::session::{activity, streak, today, ReportFile, Session};
 use crate::store::Entry;
 use anyhow::Result;
@@ -18,7 +21,14 @@ use ratatui::widgets::{Block, BorderType, Borders, Gauge, Paragraph, Tabs, Wrap}
 use ratatui::Frame;
 use std::collections::{BTreeMap, HashMap};
 
-const TABS: [Tab; 4] = [Tab::Overview, Tab::Logs, Tab::Ladder, Tab::Reports];
+const TABS: [Tab; 6] = [
+    Tab::Overview,
+    Tab::Logs,
+    Tab::Ladder,
+    Tab::Reports,
+    Tab::People,
+    Tab::Goals,
+];
 const WEEKS: usize = 26;
 
 pub struct Dashboard {
@@ -40,6 +50,15 @@ pub struct Dashboard {
     today: NaiveDate,
     /// Active goals: how many, and the nearest due date.
     goals: (usize, Option<NaiveDate>),
+    people: Vec<Person>,
+    /// Notes about people, oldest first.
+    notes: Vec<Note>,
+    person_sel: usize,
+    /// Active goals first, then done and dropped ones.
+    goal_list: Vec<Goal>,
+    goal_sel: usize,
+    /// False when AI is turned off: no gap analysis to point to.
+    ai: bool,
 }
 
 impl Dashboard {
@@ -79,6 +98,19 @@ impl Dashboard {
             goals: session.goals().map_or((0, None), |g| {
                 (g.active().count(), g.active().filter_map(|x| x.due).min())
             }),
+            people: session.people().map(|p| p.people).unwrap_or_default(),
+            notes: session.notes().unwrap_or_default(),
+            person_sel: 0,
+            goal_list: session.goals().map_or_else(
+                |_| Vec::new(),
+                |g| {
+                    let mut list = g.goals;
+                    list.sort_by_key(|x| (x.status != GoalStatus::Active, x.id));
+                    list
+                },
+            ),
+            goal_sel: 0,
+            ai: session.ai_enabled(),
         }
     }
 
@@ -121,7 +153,7 @@ impl Dashboard {
             KeyCode::BackTab | KeyCode::Left => {
                 self.tab = TABS[(idx + TABS.len() - 1) % TABS.len()]
             }
-            KeyCode::Char(c @ '1'..='4') => self.tab = TABS[c as usize - '1' as usize],
+            KeyCode::Char(c @ '1'..='6') => self.tab = TABS[c as usize - '1' as usize],
             KeyCode::Char('/') if self.tab == Tab::Logs => self.filtering = true,
             KeyCode::Up | KeyCode::Char('k') => self.step(-1),
             KeyCode::Down | KeyCode::Char('j') => self.step(1),
@@ -161,6 +193,8 @@ impl Dashboard {
                     self.report_scroll = 0;
                 }
             }
+            Tab::People => move_sel(&mut self.person_sel, self.people.len()),
+            Tab::Goals => move_sel(&mut self.goal_sel, self.goal_list.len()),
             Tab::Overview => {}
         }
     }
@@ -173,10 +207,17 @@ impl Dashboard {
             Constraint::Length(1),
         ])
         .areas(area);
-        let titles: Vec<Line> = ["1 Overview", "2 Logs", "3 Ladder", "4 Reports"]
-            .iter()
-            .map(|t| Line::from(*t))
-            .collect();
+        let titles: Vec<Line> = [
+            "1 Overview",
+            "2 Logs",
+            "3 Ladder",
+            "4 Reports",
+            "5 People",
+            "6 Goals",
+        ]
+        .iter()
+        .map(|t| Line::from(*t))
+        .collect();
         let idx = TABS.iter().position(|t| *t == self.tab).unwrap_or(0);
         let [tabs_area, brand] =
             Layout::horizontal([Constraint::Min(10), Constraint::Length(14)]).areas(header);
@@ -208,6 +249,8 @@ impl Dashboard {
             Tab::Logs => self.logs(frame, body),
             Tab::Ladder => self.ladder_tab(frame, body),
             Tab::Reports => self.reports_tab(frame, body),
+            Tab::People => self.people_tab(frame, body),
+            Tab::Goals => self.goals_tab(frame, body),
         }
         let hint = match (self.tab, self.filtering) {
             (_, true) => "type to filter · enter keep · esc clear".to_string(),
@@ -215,7 +258,13 @@ impl Dashboard {
             (Tab::Reports, _) => {
                 "↑↓ choose · space/pgdn scroll · tab next tab · esc back".to_string()
             }
-            _ => "tab / 1-4 switch · ↑↓ move · esc back".to_string(),
+            (Tab::People, _) => {
+                "↑↓ choose · /people changes them · tab next tab · esc back".to_string()
+            }
+            (Tab::Goals, _) => {
+                "↑↓ choose · /goal changes them · tab next tab · esc back".to_string()
+            }
+            _ => "tab / 1-6 switch · ↑↓ move · esc back".to_string(),
         };
         frame.render_widget(Paragraph::new(Span::styled(hint, theme::dim())), footer);
     }
@@ -257,6 +306,14 @@ impl Dashboard {
                     top,
                 );
             }
+            _ if !self.ai => frame.render_widget(
+                Paragraph::new(Span::styled(
+                    "Readiness needs AI · /brag lists your entries by expectation",
+                    theme::dim(),
+                ))
+                .block(Self::panel(&title)),
+                top,
+            ),
             _ => frame.render_widget(
                 Paragraph::new(Line::from(vec![
                     Span::styled("No gap analysis yet · run ", theme::dim()),
@@ -312,7 +369,11 @@ impl Dashboard {
             }
         } else {
             lines.push(Line::styled(
-                " Areas appear here after your first /gap.",
+                if self.ai {
+                    " Areas appear here after your first /gap."
+                } else {
+                    " Areas are rated by the gap analysis, which needs AI."
+                },
                 theme::dim(),
             ));
         }
@@ -485,6 +546,260 @@ impl Dashboard {
         );
     }
 
+    /// A list on the left, the selected item's details on the right.
+    fn list_and_detail(
+        frame: &mut Frame,
+        area: Rect,
+        title: &str,
+        rows: Vec<Vec<Span<'static>>>,
+        sel: usize,
+        detail: Vec<Line<'static>>,
+        detail_title: &str,
+    ) {
+        let [list_area, detail_area] =
+            Layout::horizontal([Constraint::Percentage(45), Constraint::Percentage(55)])
+                .areas(area);
+        let height = list_area.height.saturating_sub(2) as usize;
+        let start = sel.saturating_sub(height.saturating_sub(1));
+        let w = list_area.width.saturating_sub(4) as usize;
+        let lines: Vec<Line> = rows
+            .into_iter()
+            .enumerate()
+            .skip(start)
+            .take(height)
+            .map(|(i, spans)| {
+                let spans = if i == sel {
+                    spans
+                        .into_iter()
+                        .map(|s| Span::styled(s.content, theme::selected()))
+                        .collect()
+                } else {
+                    spans
+                };
+                Line::from(fit(spans, w))
+            })
+            .collect();
+        frame.render_widget(Paragraph::new(lines).block(Self::panel(title)), list_area);
+        frame.render_widget(
+            Paragraph::new(detail)
+                .wrap(Wrap { trim: false })
+                .block(Self::panel(detail_title)),
+            detail_area,
+        );
+    }
+
+    fn people_tab(&self, frame: &mut Frame, area: Rect) {
+        if self.people.is_empty() {
+            frame.render_widget(
+                Paragraph::new(Span::styled(
+                    " Nobody yet · /people add @ada Ada, Junior developer, mentee",
+                    theme::dim(),
+                ))
+                .block(Self::panel("People")),
+                area,
+            );
+            return;
+        }
+        let sel = self.person_sel.min(self.people.len() - 1);
+        let rows = self
+            .people
+            .iter()
+            .map(|p| {
+                let open = self
+                    .notes
+                    .iter()
+                    .filter(|n| n.person == p.handle && n.kind == NoteKind::FollowUp && !n.done)
+                    .count();
+                let mut spans = vec![
+                    Span::styled(format!("@{} ", p.handle), theme::accent()),
+                    Span::raw(p.name.clone()),
+                ];
+                if open > 0 {
+                    spans.push(Span::styled(format!(" · {open} open"), theme::warn()));
+                }
+                spans
+            })
+            .collect();
+        let p = &self.people[sel];
+        let mut lines = vec![
+            Line::styled(p.name.clone(), theme::accent_bold()),
+            Line::styled(p.label(), theme::dim()),
+        ];
+        if let Some(team) = &p.team {
+            lines.push(Line::from(vec![
+                Span::styled("team  ", theme::dim()),
+                Span::raw(team.clone()),
+            ]));
+        }
+        if let Some(about) = &p.about {
+            lines.push(Line::default());
+            lines.push(Line::raw(about.clone()));
+        }
+        let notes: Vec<&Note> = self.notes.iter().filter(|n| n.person == p.handle).collect();
+        let open: Vec<&&Note> = notes
+            .iter()
+            .filter(|n| n.kind == NoteKind::FollowUp && !n.done)
+            .collect();
+        if !open.is_empty() {
+            lines.push(Line::default());
+            lines.push(Line::styled("Open follow-ups", theme::bold()));
+            for n in open.iter().rev() {
+                lines.push(Line::from(vec![
+                    Span::styled(format!("{} ", n.date), theme::accent()),
+                    Span::raw(n.text.replace('\n', " / ")),
+                ]));
+            }
+        }
+        lines.push(Line::default());
+        lines.push(Line::styled("Notes", theme::bold()));
+        let rest: Vec<&&Note> = notes
+            .iter()
+            .filter(|n| n.kind != NoteKind::FollowUp || n.done)
+            .collect();
+        if rest.is_empty() {
+            lines.push(Line::styled(
+                format!("None yet · /note @{} …", p.handle),
+                theme::dim(),
+            ));
+        }
+        for n in rest.iter().rev().take(8) {
+            lines.push(Line::from(vec![
+                Span::styled(format!("{} ", n.date), theme::accent()),
+                Span::styled(format!("{} ", n.kind.label()), theme::dim()),
+                Span::raw(n.text.replace('\n', " / ")),
+            ]));
+        }
+        let mentioned: Vec<&Entry> = self
+            .entries
+            .iter()
+            .filter(|e| e.mentions().contains(&p.handle))
+            .take(5)
+            .collect();
+        if !mentioned.is_empty() {
+            lines.push(Line::default());
+            lines.push(Line::styled("In your log", theme::bold()));
+            for e in mentioned {
+                lines.push(Line::from(vec![
+                    Span::styled(format!("{} ", e.date), theme::accent()),
+                    Span::raw(e.text.replace('\n', " / ")),
+                ]));
+            }
+        }
+        let title = format!("People · {}", self.people.len());
+        Self::list_and_detail(
+            frame,
+            area,
+            &title,
+            rows,
+            sel,
+            lines,
+            &format!("@{}", p.handle),
+        );
+    }
+
+    fn goals_tab(&self, frame: &mut Frame, area: Rect) {
+        if self.goal_list.is_empty() {
+            frame.render_widget(
+                Paragraph::new(Span::styled(
+                    " No goals yet · /goal Speak at a meetup",
+                    theme::dim(),
+                ))
+                .block(Self::panel("Goals")),
+                area,
+            );
+            return;
+        }
+        let sel = self.goal_sel.min(self.goal_list.len() - 1);
+        let rows = self
+            .goal_list
+            .iter()
+            .map(|g| {
+                let (mark, style) = match g.status {
+                    GoalStatus::Active => ("○ ", theme::accent()),
+                    GoalStatus::Done => ("✓ ", theme::good()),
+                    GoalStatus::Dropped => ("× ", theme::dim()),
+                };
+                let mut spans = vec![
+                    Span::styled(format!("{mark}{} ", g.id), style),
+                    Span::raw(g.text.clone()),
+                ];
+                if let Some(due) = g.due.filter(|_| g.status == GoalStatus::Active) {
+                    let style = if due < self.today {
+                        theme::bad()
+                    } else {
+                        theme::dim()
+                    };
+                    spans.push(Span::styled(format!(" · due {due}"), style));
+                }
+                spans
+            })
+            .collect();
+        let g = &self.goal_list[sel];
+        let p = crate::goals::progress(g, &self.entries, self.gap.as_ref());
+        let mut lines = vec![
+            Line::styled(g.text.clone(), theme::accent_bold()),
+            Line::styled(
+                format!(
+                    "goal {} · {} · since {}",
+                    g.id,
+                    g.status.as_str(),
+                    g.created
+                ),
+                theme::dim(),
+            ),
+        ];
+        if let Some(due) = g.due {
+            lines.push(Line::from(vec![
+                Span::styled("due   ", theme::dim()),
+                Span::raw(due.to_string()),
+            ]));
+        }
+        if let Some(id) = &g.expectation {
+            let text = self
+                .ladder
+                .as_ref()
+                .and_then(|l| l.expectation(id))
+                .map_or(id.clone(), |x| format!("{id} · {}", x.text));
+            lines.push(Line::from(vec![
+                Span::styled("for   ", theme::dim()),
+                Span::raw(text),
+            ]));
+        }
+        lines.push(Line::default());
+        lines.push(Line::from(vec![
+            Span::styled("Progress  ", theme::bold()),
+            Span::raw(format!(
+                "{} · {} tagged {} · {}",
+                crate::plural(p.checkins, "check-in", "check-ins"),
+                crate::plural(p.tagged, "entry", "entries"),
+                g.tag(),
+                crate::plural(
+                    p.evidence,
+                    "entry for its expectation",
+                    "entries for its expectation"
+                ),
+            )),
+        ]));
+        if let Some(r) = &p.rating {
+            lines.push(Line::from(vec![
+                Span::styled("rated     ", theme::dim()),
+                Span::styled(r.clone(), theme::rating(r)),
+            ]));
+        }
+        if !g.checkins.is_empty() {
+            lines.push(Line::default());
+            lines.push(Line::styled("Check-ins", theme::bold()));
+            for c in g.checkins.iter().rev().take(8) {
+                lines.push(Line::from(vec![
+                    Span::styled(format!("{} ", c.date), theme::accent()),
+                    Span::raw(c.text.replace('\n', " / ")),
+                ]));
+            }
+        }
+        let title = format!("Goals · {} active", self.goals.0);
+        Self::list_and_detail(frame, area, &title, rows, sel, lines, "Goal");
+    }
+
     fn ladder_tab(&self, frame: &mut Frame, area: Rect) {
         let Some(ladder) = &self.ladder else {
             frame.render_widget(
@@ -579,7 +894,11 @@ impl Dashboard {
         if self.reports.is_empty() {
             frame.render_widget(
                 Paragraph::new(Span::styled(
-                    " No reports yet · try /gap, /brag or /summary",
+                    if self.ai {
+                        " No reports yet · try /gap, /brag or /summary"
+                    } else {
+                        " No reports yet · try /brag or /summary"
+                    },
                     theme::dim(),
                 ))
                 .block(Self::panel("Reports")),
@@ -759,6 +1078,21 @@ mod tests {
                 vec!["incident".into()],
             )
             .unwrap();
+        session
+            .add_person(Person {
+                handle: "ada".into(),
+                name: "Ada".into(),
+                role: Some("Junior developer".into()),
+                team: None,
+                relation: crate::people::Relation::Mentee,
+                about: None,
+                since: None,
+            })
+            .unwrap();
+        session
+            .add_note("ada", NoteKind::FollowUp, today(), "Share the retry doc")
+            .unwrap();
+        session.add_goal("Speak at a meetup", None, None).unwrap();
         std::fs::create_dir_all(&session.paths.reports).unwrap();
         std::fs::write(
             session.paths.reports.join("gap-2026-10-05.md"),
@@ -804,6 +1138,23 @@ mod tests {
         term.draw(|f| dash.draw(f)).unwrap();
         let s = screen(&term);
         assert!(s.contains("gap-2026-10-05") && s.contains("• one"), "{s}");
+
+        let mut dash = Dashboard::load(&session, Tab::Overview);
+        dash.on_key(KeyCode::Char('5'), KeyModifiers::NONE);
+        term.draw(|f| dash.draw(f)).unwrap();
+        let s = screen(&term);
+        assert!(
+            s.contains("People · 1") && s.contains("1 open") && s.contains("Share the retry doc"),
+            "{s}"
+        );
+
+        dash.on_key(KeyCode::Char('6'), KeyModifiers::NONE);
+        term.draw(|f| dash.draw(f)).unwrap();
+        let s = screen(&term);
+        assert!(
+            s.contains("Goals · 1 active") && s.contains("Speak at a meetup"),
+            "{s}"
+        );
         assert!(!dash.on_key(KeyCode::Esc, KeyModifiers::NONE));
     }
 }

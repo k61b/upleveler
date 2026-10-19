@@ -8,11 +8,22 @@
 
 Upleveler is a work log for software developers. You write down what you do. Upleveler compares it with what your company expects at the next level, shows what is missing, and writes your promotion document.
 
-Everything stays on your computer. The AI runs locally with [llama.cpp](https://github.com/ggml-org/llama.cpp), the open-source engine: no account, no app in between.
+Everything stays on your computer. The AI runs locally with [llama.cpp](https://github.com/ggml-org/llama.cpp), the open-source engine: no account, no app in between. Where AI tools are not allowed, Upleveler works [without AI](#without-ai).
+
+## Quick start
+
+Install with curl and run the app:
+
+```sh
+curl -fsSL https://upleveler.dev/install.sh | sh
+upleveler
+```
+
+Pick a model or "No AI", then type what you did. You can also log from any shell with `upleveler log "..."`.
 
 ## Install
 
-You need [llama.cpp](https://github.com/ggml-org/llama.cpp) and about 16 GB of RAM. On macOS and Linux: `brew install llama.cpp`. On Windows, download it from [its releases](https://github.com/ggml-org/llama.cpp/releases) and put `llama-server.exe` on your PATH.
+For the AI features on this computer you need [llama.cpp](https://github.com/ggml-org/llama.cpp) and about 16 GB of RAM. On macOS and Linux: `brew install llama.cpp`. On Windows, download it from [its releases](https://github.com/ggml-org/llama.cpp/releases) and put `llama-server.exe` on your PATH. Upleveler also works without AI.
 
 On macOS and Linux:
 
@@ -20,7 +31,7 @@ On macOS and Linux:
 curl -fsSL https://upleveler.dev/install.sh | sh
 ```
 
-The script downloads the [latest release](https://github.com/k61b/upleveler/releases/latest) for your system, checks it against the release's checksums and installs `upleveler` to `~/.local/bin`. Run it again to update. The setup downloads the model (Google's Gemma 4 E4B, about 5 GB) from Hugging Face into `~/.upleveler/llama/`. Upleveler starts llama.cpp's server when it needs the model: on this computer only (`127.0.0.1`), with a key only Upleveler knows, so no web page in your browser can use it. After five idle minutes the server gives the model's memory back, and takes it again in a second or two.
+The script downloads the [latest release](https://github.com/k61b/upleveler/releases/latest) for your system, checks it against the release's checksums and installs `upleveler` to `~/.local/bin`. Run it again to update.
 
 On Windows, download `upleveler-x86_64-pc-windows-msvc.zip` from the [latest release](https://github.com/k61b/upleveler/releases/latest) and put `upleveler.exe` on your PATH.
 
@@ -36,7 +47,7 @@ To update a source install: `git pull && cargo install --path crates/upleveler -
 
 ## Use
 
-Run `upleveler`. The first time, a short setup asks for the model (and downloads it if needed), the report language, your company's career ladder, your current and target level, and, if you like, a file with the notes you already have (a 1:1 workbook or old work notes). The setup tries the model once and tells you how fast it answered.
+Run `upleveler`. The first time, a short setup asks for the model or "No AI" (and downloads the model if needed), the report language, your company's career ladder, your current and target level, and, if you like, a file with the notes you already have (a 1:1 workbook or old work notes). The setup tries the model once and tells you how fast it answered.
 
 ```text
 › dün PAY-412 circuit breaker'ı prod'a aldım
@@ -49,7 +60,7 @@ Run `upleveler`. The first time, a short setup asks for the model (and downloads
   ○ Mentoring  Mentors junior developers                          0
 ```
 
-**Just type.** Write what you did and it is logged. Write what you want to remember about someone (`@ada ile 1:1 yaptık, …`) and it becomes a note about them; progress on a goal becomes a check-in. Ask a question and it is answered from your logs. If Upleveler is not sure, it asks.
+**Just type.** Write what you did and it is logged. Write what you want to remember about someone (`@ada ile 1:1 yaptık, …`) and it becomes a note about them; progress on a goal becomes a check-in. Ask a question and it is answered from your logs. If Upleveler is not sure, it asks. Without AI, typed text is logged right away and questions search your log for matching entries.
 
 | Command | What it does |
 |---|---|
@@ -64,9 +75,11 @@ Run `upleveler`. The first time, a short setup asks for the model (and downloads
 | `/people add @ada Ada, Junior developer, mentee` | Add someone without leaving the app |
 | `/people edit @ada role: Developer, team: Payments` | Change a profile (`name`, `role`, `team`, `relation`, `about`; an empty value clears); `/people remove @ada` removes them and their notes, and `/undo` brings them back |
 | `/goals`, `/goal …`, `/checkin` | Your goals: list, add (`/goal Speak at a meetup`, or end with an expectation id like `L3.mentoring.1` to tie it to your ladder), change (`/goal edit 2 due: 2026-12-31`), finish (`/goal done 2`), record progress; `/goal show 2` and `/checkin delete 2 1` to see and delete check-ins |
-| `/dashboard` | Progress, activity heatmap, logs and reports |
+| `/dashboard` | Progress, activity heatmap, logs, ladder, reports, people and goals |
 | `/web` | The same dashboard in your browser |
 | `/undo` | Undo the last entry, note, check-in, import or removed import |
+
+Start an entry with `yesterday`, `dün` or a date to log it for that day, and add `#tags` anywhere (`/log Fixed the flaky deploy check #ci`; also in the browser and `upleveler log`). Tagging an entry `#goal-2` counts it toward goal 2. Press `?` for all shortcuts.
 
 Type `/` to see all commands and `?` for keyboard shortcuts. Reports are saved in `~/.upleveler/reports/`.
 
@@ -81,13 +94,13 @@ Opens the dashboard in your browser (or type `/web` in the app). It runs on your
 | Tab | What it shows |
 |---|---|
 | Overview | Entries, streak, a 26-week activity heatmap, readiness from your latest gap analysis, latest reports, active goals and open follow-ups |
-| Logs | Every entry by day, filtered as you type (text, tag or date); add new entries with a date and tags; under "Imported files", remove what an imported file added |
+| Logs | Every entry by day, filtered as you type (text, tag or date); add new entries with a date and tags, edit or delete any entry; under "Imported files", remove what an imported file added |
 | People | The people you work with; add someone, then open their page to write notes (1:1, feedback, follow-ups), close, edit or delete notes, see the entries that mention them, edit their profile or remove them |
 | Goals | Active and finished goals with progress from your log, the latest gap analysis and check-ins; add or edit a goal, check in or delete a check-in, mark it done or drop it |
 | Ladder | Each level's expectations with the entries that back them; your target level is marked |
-| Reports | Run a gap analysis, promotion document or summary with live progress; read or copy any report as Markdown |
+| Reports | Run a gap analysis, promotion document or summary with live progress (without AI, the promotion document and summary list your entries); read or copy any report as Markdown |
 
-The dashboard reads and writes the same files as the terminal app and shows fresh data on every page load. The terminal app and the dashboard can be open at the same time: every change is written in one step while the data folder is locked, so neither overwrites the other. Analyses use the model you chose in the setup, one at a time, and keep running if you close the page while `upleveler web` is open.
+The dashboard reads and writes the same files as the terminal app and shows fresh data on every page load. The terminal app and the dashboard can be open at the same time: every change is written in one step while the data folder is locked, so neither overwrites the other. Analyses use the model you chose in the setup (or none, with AI off), one at a time, and keep running if you close the page while `upleveler web` is open.
 
 ## Bringing your existing files
 
@@ -162,6 +175,8 @@ upleveler goal list
 
 Upleveler is built for small models that run on a laptop: about 16 GB of memory is enough.
 
+The setup downloads the model (Google's Gemma 4 E4B, about 5 GB) from Hugging Face into `~/.upleveler/llama/`. Upleveler starts llama.cpp's server when it needs the model: on this computer only (`127.0.0.1`), with a key only Upleveler knows, so no web page in your browser can use it. After five idle minutes the server gives the model's memory back, and takes it again in a second or two.
+
 **llama.cpp with Google's Gemma 4 E4B (`google/gemma-4-E4B-it-qat-q4_0-gguf`) is recommended.** On a 16 GB Mac, with the invented sample files in this repository (a seven-sheet career framework, a 1:1 workbook with a next-level sheet, notes with a colleague and an old diary), it read every note correctly, tied all 8 goals to the right expectation, mapped every diary entry we checked to the right expectation, kept every fact of the diary word for word and wrote clean Turkish. The ladder itself is read without the model. The whole first setup, analyses included, waited about three minutes for the model.
 
 | Model (llama.cpp) | Waiting for the model | Log entries mapped as expected | What it got wrong |
@@ -180,24 +195,45 @@ Run the same comparison for any model: `cargo run --release --example eval -- --
 - The server is started with the context Upleveler needs (8K tokens). A server Upleveler started with another model or less context is replaced; one started by someone else is never touched.
 - **Your company's model, or another server:** choose "OpenAI-compatible endpoint" in the setup. Ollama, LM Studio and vLLM work this way too, through their OpenAI-compatible address (`http://localhost:11434/v1`, `http://localhost:1234/v1`); Upleveler then neither downloads nor starts the model. Upleveler asks for a JSON schema and falls back to plain JSON when the server does not support it.
 
+## Without AI
+
+Use Upleveler without AI if your workplace does not allow AI tools. Choose "No AI" in the first setup question, run `upleveler init --no-ai` from a script, or turn it off later with `/model`.
+
+| Feature | Without AI |
+|---|---|
+| Logging | Typed text is saved as a log entry. |
+| Notes, people and goals | Work as usual. |
+| Import and export | Work as usual; imports keep your text as written. |
+| Dashboard | Works as usual; reports run without AI. |
+| Questions | Searches your log for entries that match the words you typed. |
+| `/summary` | Lists the period's entries week by week with the most used tags. |
+| `/brag` | Lists entries under ladder expectations, or month by month without a ladder. |
+| `/prep @ada` | Lists open follow-ups, notes and entries that mention the person. |
+| `/gap` | Needs AI; no report is saved. |
+
+Reports written without AI say so.
+
 ## Privacy
 
 - Your data is plain files in `~/.upleveler/`, including what you note about other people (`people.yaml`, `notes.jsonl`) and your goals (`goals.yaml`). Edit or delete them any time.
 - Notes about a person go to your model only for a 1:1 prep or a question about that person. They never go into the gap analysis, the promotion document or a summary.
 - Nothing is sent anywhere. To use your company's own LLM instead of a model on your computer, choose "OpenAI-compatible endpoint" in the setup (`/init`) and confirm that the endpoint is approved.
 - No account, no cloud, no telemetry. The browser dashboard (`upleveler web`) loads nothing from the internet.
+- With AI off, nothing goes to any model and no model is downloaded.
 - The only download is the model, from Hugging Face, when you choose it in the setup.
 - To remove the model: `rm -rf ~/.upleveler/llama` (and `pkill llama-server` if it is running). To remove everything, your data included: `rm -rf ~/.upleveler`.
 
 ## Scripts
 
-Every feature is also a plain command, for example `upleveler log "..."`, `upleveler gap` or `upleveler export -f xlsx -o worklog.xlsx`. Run `upleveler --help` to see them all.
+Every feature is also a plain command, for example `upleveler log "..."`, `upleveler gap` or `upleveler export -f xlsx -o worklog.xlsx`. Run `upleveler --help` to see them all; `upleveler <command> --help` shows examples. The commands take the names the app uses too (`upleveler people`, `upleveler goals`, `--kind 1:1`).
+
+Tab completion for your shell: `upleveler completions zsh > "${fpath[1]}/_upleveler"` (zsh), `upleveler completions bash > ~/.local/share/bash-completion/completions/upleveler` (bash) or `upleveler completions fish > ~/.config/fish/completions/upleveler.fish` (fish), then open a new terminal.
 
 `upleveler import --list` shows the files you imported and how many entries each added. `upleveler import --remove notes.xlsx` removes the entries that came from that file and keeps a copy in `~/.upleveler/staging/`; `upleveler import` on that copy puts them back. Entries you logged yourself are never touched.
 
 ## Türkçe
 
-Upleveler, yaptığınız işi şirketinizin seviye beklentileriyle karşılaştırır. Terminalde `upleveler` yazın. Ne yaptığınızı yazarsanız log'a eklenir, soru sorarsanız cevaplanır. Komutları görmek için `/` yazın. Panoyu tarayıcıda açmak için `upleveler web` yazın; yalnızca kendi bilgisayarınızda çalışır. Raporların Türkçe olması için kurulumda Türkçe'yi seçin. Takım arkadaşlarınız hakkında not tutmak için `upleveler person` ve `upleveler note`, hedefleriniz için `upleveler goal` komutlarını kullanın. Şirketinizin kariyer dokümanı çok sayfalıysa her sayfanın ne işe yaradığı (beklentiler, seviyeler, fiiller, odak alanları ya da atla) önerilir; ←/→ ile değiştirebilirsiniz. Liderinizle tuttuğunuz 1:1 Excel'indeki her sayfa log'a, o kişi hakkındaki notlara ya da hedeflerinize gidebilir. Dosyayı her 1:1'den sonra tekrar import edin, yalnızca yeni satırlar eklenir. Upleveler 16 GB belleği olan bir dizüstünde [llama.cpp](https://github.com/ggml-org/llama.cpp) (`brew install llama.cpp`) ve Google'ın Gemma 4 E4B modeliyle çalışacak şekilde tasarlandı; kurulum modeli Hugging Face'ten indirir, llama.cpp'yi gerektiğinde yalnızca bu bilgisayardan erişilebilir şekilde kendisi başlatır. Şirketinizin onaylı modelini ya da Ollama, LM Studio gibi başka bir sunucuyu kurulumdaki "OpenAI-compatible endpoint" seçeneğiyle kullanabilirsiniz. Bir 1:1'e hazırlanmak için `upleveler prep ada` ya da uygulamada `/prep @ada` yazın; notlarınız terfi dokümanına hiçbir zaman girmez. Verileriniz bilgisayarınızdan çıkmaz.
+Upleveler, yaptığınız işi şirketinizin seviye beklentileriyle karşılaştırır. Terminalde `upleveler` yazın. Ne yaptığınızı yazarsanız log'a eklenir, soru sorarsanız cevaplanır. Komutları görmek için `/` yazın. Panoyu tarayıcıda açmak için `upleveler web` yazın; yalnızca kendi bilgisayarınızda çalışır. Raporların Türkçe olması için kurulumda Türkçe'yi seçin. Takım arkadaşlarınız hakkında not tutmak için `upleveler person` ve `upleveler note`, hedefleriniz için `upleveler goal` komutlarını kullanın. Şirketinizin kariyer dokümanı çok sayfalıysa her sayfanın ne işe yaradığı (beklentiler, seviyeler, fiiller, odak alanları ya da atla) önerilir; ←/→ ile değiştirebilirsiniz. Liderinizle tuttuğunuz 1:1 Excel'indeki her sayfa log'a, o kişi hakkındaki notlara ya da hedeflerinize gidebilir. Dosyayı her 1:1'den sonra tekrar import edin, yalnızca yeni satırlar eklenir. Yapay zekâ kullanmadan da çalışabilir: şirketinizde yapay zekâ araçlarına izin verilmiyorsa kurulumda "No AI" seçeneğini seçin veya `upleveler init --no-ai` çalıştırın. Log, not, hedef, import, export ve pano bu modda da tam olarak çalışır; özet, terfi dokümanı ve 1:1 hazırlığı girdilerinizin kendi haliyle yazılır. Yalnızca gap analizi yapay zekâ gerektirir. Upleveler, 16 GB belleği olan bir dizüstünde yapay zekâ özellikleri için [llama.cpp](https://github.com/ggml-org/llama.cpp) (`brew install llama.cpp`) ve Google'ın Gemma 4 E4B modeliyle çalışacak şekilde tasarlandı; kurulum modeli Hugging Face'ten indirir, llama.cpp'yi gerektiğinde yalnızca bu bilgisayardan erişilebilir şekilde kendisi başlatır. Şirketinizin onaylı modelini ya da Ollama, LM Studio gibi başka bir sunucuyu kurulumdaki "OpenAI-compatible endpoint" seçeneğiyle kullanabilirsiniz. Bir 1:1'e hazırlanmak için `upleveler prep ada` ya da uygulamada `/prep @ada` yazın; notlarınız terfi dokümanına hiçbir zaman girmez. Verileriniz bilgisayarınızdan çıkmaz.
 
 ## Development
 
