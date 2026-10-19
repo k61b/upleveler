@@ -1,8 +1,8 @@
 # Changelog
 
-## Unreleased
+## 2.6.0
 
-Upleveler works without AI, for workplaces where AI tools are not allowed, and is easier to start with.
+Upleveler works without AI, for workplaces where AI tools are not allowed, and is easier to start with: entries can be tied to expectations and edited anywhere, and the browser does what used to need the terminal.
 
 ### Without AI
 
@@ -21,6 +21,7 @@ Upleveler works without AI, for workplaces where AI tools are not allowed, and i
 - Every command and flag has help, most commands show examples in `--help`, and `upleveler completions <shell>` prints tab completion for bash, zsh, fish, PowerShell and Elvish. `upleveler people`, `upleveler goals` and `--kind 1:1` work like in the app; `summary --week` with `--period` is an error instead of being ignored.
 - Clearer errors when a model's answer cannot be read, a server refuses a key or does not answer in time. Editing a file opens `nano` when no editor is set, before `vi`.
 - The install script names the right shell file for your PATH and no longer asks for llama.cpp first.
+- The README explains every setting in `config.toml`, the environment variables, common problems, the words it uses, and how to uninstall.
 
 ## 2.5.0
 
