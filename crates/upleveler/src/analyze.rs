@@ -252,6 +252,7 @@ pub fn map_entries(
                 let mut updates: HashMap<String, Vec<String>> = HashMap::new();
                 for (n, &i) in batch.iter().enumerate() {
                     let mut ids = found.remove(&(n + 1)).unwrap_or_default();
+                    ids.extend(entries[i].linked.iter().cloned());
                     ids.sort();
                     ids.dedup();
                     entries[i].expectations = ids.clone();
@@ -262,7 +263,11 @@ pub fn map_entries(
                 store.update(|all| {
                     for e in all.iter_mut() {
                         if let Some(ids) = updates.get(&e.id) {
-                            e.expectations = ids.clone();
+                            let mut ids = ids.clone();
+                            ids.extend(e.linked.iter().cloned());
+                            ids.sort();
+                            ids.dedup();
+                            e.expectations = ids;
                             e.tagged_with = Some(hash.clone());
                         }
                     }
@@ -482,6 +487,14 @@ pub struct GapSummary {
     pub overview: String,
     #[serde(default)]
     pub priorities: Vec<String>,
+    /// Made without AI: ratings are counts of the entries tied to each
+    /// expectation, not an assessment.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub counted: bool,
+}
+
+fn is_false(b: &bool) -> bool {
+    !*b
 }
 
 impl GapSummary {
@@ -551,6 +564,8 @@ fn label(cfg: &Config, en: &'static str) -> &'static str {
         "Next steps" => "Sonraki adımlar",
         "Assessment failed" => "Değerlendirme yapılamadı",
         "Other" => "Diğer",
+        "Coverage without AI" => "AI olmadan kapsam",
+        "counted" => "sayım",
         "written without AI" => "AI kullanılmadan yazıldı",
         "Promotion document" => "Terfi dokümanı",
         "Week" => "Hafta",
@@ -828,6 +843,7 @@ pub fn gap(
             .collect(),
         overview: overview_text,
         priorities,
+        counted: false,
     };
     Ok(GapReport {
         markdown: md,
@@ -1066,6 +1082,126 @@ pub fn summary(
         header(&format!("{} {period}", label(cfg, "Summary")), &scoped, cfg),
         clean_markdown(&out)
     ))
+}
+
+/// What a rating means when it is counted, not assessed: three entries tied
+/// to an expectation are "strong", one or two (or work one level down)
+/// "partial".
+fn counted_rating(count: usize, below: usize) -> &'static str {
+    match (count, below) {
+        (0, 0) => "none",
+        (0, _) | (1..=2, _) => "partial",
+        _ => "strong",
+    }
+}
+
+/// The gap analysis without a model: for each expectation of the target
+/// level, the entries tied to it (by you with `#L3.mentoring.1`, or by the
+/// model earlier), counted rather than assessed.
+pub fn gap_plain(
+    cfg: &Config,
+    levels: &Levels,
+    entries: &[Entry],
+    range: Option<Range>,
+) -> Result<GapReport> {
+    let scoped = sorted_in_range(entries, range);
+    let target = levels.target;
+    if target.expectations.is_empty() {
+        bail!("level {} has no expectations in the ladder", target.id);
+    }
+    let current_id = levels.current.map_or("", |c| c.id.as_str());
+    let mut md = header(
+        &format!(
+            "{}: {} → {}",
+            label(cfg, "Coverage without AI"),
+            levels.current.map_or("?", |c| c.id.as_str()),
+            target.id
+        ),
+        &scoped,
+        cfg,
+    );
+    md.push_str(
+        "\nThe entries you tied to each expectation, counted: three or more is strong, \
+         one or two (or work one level down) partial. Tie an entry by writing the \
+         expectation's id in it, like `#L3.mentoring.1`. This is a count, not an assessment.\n",
+    );
+    md.push_str(&format!(
+        "\n| | {} | {} | {} | {} |\n|---|---|---|---|---|\n",
+        label(cfg, "Area"),
+        label(cfg, "Expectation"),
+        label(cfg, "Entries"),
+        label(cfg, "Last evidence")
+    ));
+    let mut rows = Vec::new();
+    let mut details = String::new();
+    for exp in &target.expectations {
+        let matched: Vec<&Entry> = scoped
+            .iter()
+            .copied()
+            .filter(|e| e.expectations.contains(&exp.id))
+            .collect();
+        let below = levels.below(exp).map_or(0, |b| {
+            scoped
+                .iter()
+                .filter(|e| e.expectations.contains(&b.id) && !e.expectations.contains(&exp.id))
+                .count()
+        });
+        let rating = counted_rating(matched.len(), below);
+        let last = matched.iter().map(|e| e.date).max();
+        let count = if below == 0 {
+            matched.len().to_string()
+        } else {
+            format!("{} (+{below} {current_id})", matched.len())
+        };
+        md.push_str(&format!(
+            "| {} | {} | {} | {count} | {} |\n",
+            rating_icon(rating),
+            exp.area,
+            exp.text.replace('|', "/"),
+            last.map_or("—".into(), |d| d.to_string())
+        ));
+        details.push_str(&format!(
+            "\n### {} {}\n\n_{}_\n\n",
+            rating_icon(rating),
+            exp.text,
+            exp.id
+        ));
+        if matched.is_empty() {
+            details.push_str("—\n");
+        }
+        for e in matched.iter().rev() {
+            details.push_str(&format!("- {}\n", e.line()));
+        }
+        rows.push(GapRow {
+            id: exp.id.clone(),
+            area: exp.area.clone(),
+            text: exp.text.clone(),
+            rating: rating.to_string(),
+            count: matched.len(),
+            below,
+            last,
+        });
+    }
+    md.push_str(&format!("\n## {}\n{details}", label(cfg, "Details")));
+    let priorities = rows
+        .iter()
+        .filter(|r| r.rating == "none")
+        .take(3)
+        .map(|r| format!("Find or log work for: {}", r.text))
+        .collect();
+    let summary = GapSummary {
+        date: chrono::Local::now().date_naive(),
+        current: levels.current.map(|c| c.id.clone()),
+        target: target.id.clone(),
+        rows,
+        overview: String::new(),
+        priorities,
+        counted: true,
+    };
+    Ok(GapReport {
+        markdown: md,
+        summary,
+    })
 }
 
 /// Entries in `range`, oldest first.

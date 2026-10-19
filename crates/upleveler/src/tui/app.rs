@@ -141,6 +141,13 @@ struct Carried {
 /// Something saved in this session that `/undo` can take back.
 enum Undo {
     Entry(String),
+    /// A log entry as it was before `/edit`.
+    EntryEdit {
+        before: crate::store::Entry,
+        after_id: String,
+    },
+    /// A deleted log entry, to put back.
+    DeletedEntry(crate::store::Entry),
     Note(String),
     Checkin {
         goal: u32,
@@ -262,6 +269,33 @@ fn model_hint(provider: Provider) -> &'static str {
     }
 }
 
+/// The entry a full id, an 8-character hash, or at least 4 characters of a
+/// unique suffix of its id picks.
+fn find_entry(session: &Session, key: &str) -> anyhow::Result<crate::store::Entry> {
+    use anyhow::bail;
+    let key = key.trim().trim_start_matches('#').to_lowercase();
+    if key.chars().count() < 4 {
+        bail!("give at least 4 characters of the entry's id (see /list or /dashboard)");
+    }
+    let entries = session.entries()?;
+    let matches: Vec<&crate::store::Entry> = entries
+        .iter()
+        .filter(|e| e.id == key || e.id.ends_with(&key))
+        .collect();
+    match matches.as_slice() {
+        [one] => Ok((*one).clone()),
+        [] => bail!("no entry with id {key} (see /list or /dashboard)"),
+        more => bail!(
+            "{key} matches {} entries; give more of the id: {}",
+            more.len(),
+            more.iter()
+                .map(|e| e.id.clone())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    }
+}
+
 fn input(title: &str, hint: &str, value: &str, purpose: Purpose) -> Panel {
     let mut t = new_textarea("");
     t.insert_str(value);
@@ -345,7 +379,7 @@ impl App {
         self.composer.lines().join("\n")
     }
 
-    fn set_composer(&mut self, text: &str) {
+    pub(crate) fn set_composer(&mut self, text: &str) {
         self.composer = new_textarea(PLACEHOLDER);
         self.composer.insert_str(text);
         self.composer.move_cursor(CursorMove::Bottom);
@@ -608,7 +642,15 @@ impl App {
                 } else {
                     format!(" for {}", e.date)
                 };
-                self.success(&format!("Logged{when}: {}  (/undo to remove)", e.text));
+                let ties = if e.linked.is_empty() {
+                    String::new()
+                } else {
+                    format!(" · evidence for {}", e.linked.join(", "))
+                };
+                self.success(&format!(
+                    "Logged{when}: {}{ties}  (/undo to remove)",
+                    e.text
+                ));
                 self.refresh_status();
             }
             Ok(None) => self.info("Already logged that today."),
@@ -727,6 +769,8 @@ impl App {
             }
             "levels" => self.level_picker(),
             "list" => self.list(args),
+            "edit" => self.edit_command(args),
+            "delete" => self.delete_command(args),
             "undo" => self.undo(),
             "note" => self.note_command(args),
             "notes" => self.notes_command(args),
@@ -869,6 +913,60 @@ impl App {
         }
     }
 
+    /// `/edit <id> <new text>` keeps the date and adds `#tags` from the text.
+    fn edit_command(&mut self, args: &str) {
+        let usage = "Usage: /edit <id> <new text>  (the id is shown in /dashboard or /list)";
+        let (key, rest) = args
+            .trim()
+            .split_once(char::is_whitespace)
+            .unwrap_or((args.trim(), ""));
+        if key.is_empty() || rest.trim().is_empty() {
+            return self.info(usage);
+        }
+        let entry = match find_entry(&self.session, key) {
+            Ok(e) => e,
+            Err(e) => return self.error(&format!("{e:#}")),
+        };
+        let before = entry.clone();
+        match self.session.edit_entry(&entry.id, Some(rest), None, None) {
+            Ok(Some(updated)) => {
+                self.logged.push(Undo::EntryEdit {
+                    before,
+                    after_id: updated.id.clone(),
+                });
+                self.success(&format!(
+                    "Updated: {}  (/undo to take it back)",
+                    updated.text
+                ));
+                self.refresh_status();
+            }
+            Ok(None) => self.info("That entry was already gone."),
+            Err(e) => self.error(&format!("{e:#}")),
+        }
+    }
+
+    /// `/delete <id>` removes a log entry.
+    fn delete_command(&mut self, args: &str) {
+        let usage = "Usage: /delete <id>  (the id is shown in /dashboard or /list)";
+        let key = args.trim();
+        if key.is_empty() {
+            return self.info(usage);
+        }
+        let entry = match find_entry(&self.session, key) {
+            Ok(e) => e,
+            Err(e) => return self.error(&format!("{e:#}")),
+        };
+        match self.session.remove_entry(&entry.id) {
+            Ok(Some(e)) => {
+                self.logged.push(Undo::DeletedEntry(e.clone()));
+                self.success(&format!("Deleted: {}  (/undo to restore)", e.text));
+                self.refresh_status();
+            }
+            Ok(None) => self.info("That entry was already gone."),
+            Err(e) => self.error(&format!("{e:#}")),
+        }
+    }
+
     fn undo(&mut self) {
         let Some(last) = self.logged.pop() else {
             return self.info("Nothing to undo in this session.");
@@ -878,6 +976,24 @@ impl App {
                 .session
                 .remove_entry(&id)
                 .map(|e| e.map(|e| format!("Removed: {}", e.text))),
+            // Under the data lock and only if no entry has that id again, so
+            // undoing never leaves two copies.
+            Undo::EntryEdit { before, after_id } => {
+                let text = before.text.clone();
+                self.session.remove_entry(&after_id).and_then(|_| {
+                    self.session
+                        .store
+                        .add_new(vec![before])
+                        .map(|added| (!added.is_empty()).then(|| format!("Restored: {text}")))
+                })
+            }
+            Undo::DeletedEntry(entry) => {
+                let text = entry.text.clone();
+                self.session
+                    .store
+                    .add_new(vec![entry])
+                    .map(|added| (!added.is_empty()).then(|| format!("Restored: {text}")))
+            }
             Undo::Note(id) => self
                 .session
                 .remove_note(&id)
@@ -2214,12 +2330,7 @@ impl App {
                 match self.session.set_levels(Some(&current), Some(&value)) {
                     Ok(()) => {
                         self.refresh_status();
-                        let next = if self.session.ai_enabled() {
-                            "/gap"
-                        } else {
-                            "/brag"
-                        };
-                        self.success(&format!("Levels set: {current} → {value}. Try {next}."));
+                        self.success(&format!("Levels set: {current} → {value}. Try /gap."));
                         if self.wizard {
                             self.wizard_notes();
                         }
@@ -2997,6 +3108,74 @@ mod setup_tests {
         key(&mut app, KeyCode::Enter);
         assert_eq!(app.session.notes().unwrap().len(), 2);
         assert!(printed(&app).contains("Added 2 notes"), "{}", printed(&app));
+    }
+
+    #[test]
+    fn edit_delete_and_undo_log_entries() {
+        let (mut app, _home) = app();
+        app.submit("/log Shipped the ledger export #billing");
+        app.submit("/log Fixed the flaky deploy check");
+        let entries = app.session.entries().unwrap();
+        assert_eq!(entries.len(), 2);
+        let first = entries[0].clone();
+        let second = entries[1].clone();
+
+        // /edit by full id changes the text and keeps the date.
+        app.submit(&format!("/edit {} Shipped the cache warmup", first.id));
+        let entries = app.session.entries().unwrap();
+        assert_eq!(entries.len(), 2);
+        assert!(entries.iter().any(|e| e.text == "Shipped the cache warmup"));
+        assert!(!entries
+            .iter()
+            .any(|e| e.text == "Shipped the ledger export"));
+        assert!(printed(&app).contains("Updated:"));
+
+        // /undo restores the old entry.
+        app.submit("/undo");
+        let entries = app.session.entries().unwrap();
+        assert!(entries
+            .iter()
+            .any(|e| e.text == "Shipped the ledger export"));
+        assert_eq!(entries.len(), 2);
+
+        // /edit by the 8-character hash works, and #tags become tags.
+        let hash = first.id.rsplit_once('-').map(|(_, h)| h).unwrap();
+        app.submit(&format!("/edit {} Shipped the cache warmup #release", hash));
+        let entries = app.session.entries().unwrap();
+        let edited = entries
+            .iter()
+            .find(|e| e.text == "Shipped the cache warmup")
+            .cloned()
+            .unwrap();
+        assert!(edited.tags.contains(&"release".to_string()));
+        assert!(edited.tags.contains(&"billing".to_string()));
+
+        // /delete by a unique 4-character suffix removes the entry.
+        let suffix = &second.id[second.id.len() - 4..];
+        app.submit(&format!("/delete {suffix}"));
+        let entries = app.session.entries().unwrap();
+        assert!(!entries
+            .iter()
+            .any(|e| e.text == "Fixed the flaky deploy check"));
+        assert!(printed(&app).contains("Deleted:"));
+
+        // /undo puts it back.
+        app.submit("/undo");
+        let entries = app.session.entries().unwrap();
+        assert!(entries
+            .iter()
+            .any(|e| e.text == "Fixed the flaky deploy check"));
+
+        // Ambiguous or short ids are reported clearly.
+        app.submit("/edit abcd nope");
+        assert!(printed(&app).contains("no entry with id abcd"));
+        app.submit("/delete 12");
+        assert!(printed(&app).contains("give at least 4 characters"));
+
+        // Deleting an entry that is no longer there is reported clearly.
+        app.submit(&format!("/delete {}", first.id));
+        app.submit(&format!("/delete {}", first.id));
+        assert!(printed(&app).contains("no entry with id"));
     }
 
     #[test]

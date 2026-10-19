@@ -31,8 +31,18 @@ const TABS: [Tab; 6] = [
 ];
 const WEEKS: usize = 26;
 
+/// The 8-character hash at the end of an entry id (`<date>-<hash>`).
+fn entry_hash(entry: &Entry) -> &str {
+    entry
+        .id
+        .rsplit_once('-')
+        .map(|(_, h)| h)
+        .unwrap_or(&entry.id)
+}
+
 pub struct Dashboard {
     pub tab: Tab,
+    session: Session,
     entries: Vec<Entry>,
     days: BTreeMap<NaiveDate, usize>,
     ladder: Option<Ladder>,
@@ -59,6 +69,10 @@ pub struct Dashboard {
     goal_sel: usize,
     /// False when AI is turned off: no gap analysis to point to.
     ai: bool,
+    /// Set by `e` on the Logs tab; read by the event loop after the dashboard closes.
+    pub(crate) fill_composer: Option<String>,
+    pending_delete: bool,
+    notice: Option<(String, std::time::Instant)>,
 }
 
 impl Dashboard {
@@ -80,6 +94,7 @@ impl Dashboard {
             .unwrap_or(0);
         Self {
             tab,
+            session: session.clone(),
             days,
             entries,
             ladder,
@@ -111,6 +126,9 @@ impl Dashboard {
             ),
             goal_sel: 0,
             ai: session.ai_enabled(),
+            fill_composer: None,
+            pending_delete: false,
+            notice: None,
         }
     }
 
@@ -145,6 +163,28 @@ impl Dashboard {
             self.log_sel = 0;
             return true;
         }
+        if self.pending_delete {
+            match code {
+                KeyCode::Char('y') | KeyCode::Char('Y') => {
+                    if let Some(e) = self.selected_entry().cloned() {
+                        match self.session.remove_entry(&e.id) {
+                            Ok(Some(_)) => {
+                                self.refresh_entries();
+                                self.set_notice("Deleted. /undo in the app restores it.");
+                            }
+                            Ok(None) => self.set_notice("That entry was already gone."),
+                            Err(e) => self.set_notice(&format!("Could not delete: {e:#}")),
+                        }
+                    }
+                    self.pending_delete = false;
+                }
+                KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+                    self.pending_delete = false;
+                }
+                _ => {}
+            }
+            return true;
+        }
         let idx = TABS.iter().position(|t| *t == self.tab).unwrap_or(0);
         match code {
             KeyCode::Esc | KeyCode::Char('q') => return false,
@@ -155,6 +195,21 @@ impl Dashboard {
             }
             KeyCode::Char(c @ '1'..='6') => self.tab = TABS[c as usize - '1' as usize],
             KeyCode::Char('/') if self.tab == Tab::Logs => self.filtering = true,
+            KeyCode::Char('e') if self.tab == Tab::Logs => {
+                if let Some(e) = self.selected_entry() {
+                    self.fill_composer = Some(format!(
+                        "/edit {} {}",
+                        entry_hash(e),
+                        e.text.replace('\n', " ")
+                    ));
+                    return false;
+                }
+            }
+            KeyCode::Char('d') if self.tab == Tab::Logs => {
+                if self.selected_entry().is_some() {
+                    self.pending_delete = true;
+                }
+            }
             KeyCode::Up | KeyCode::Char('k') => self.step(-1),
             KeyCode::Down | KeyCode::Char('j') => self.step(1),
             KeyCode::PageDown | KeyCode::Char(' ') => {
@@ -164,6 +219,22 @@ impl Dashboard {
             _ => {}
         }
         true
+    }
+
+    fn selected_entry(&self) -> Option<&Entry> {
+        self.filtered().into_iter().nth(self.log_sel)
+    }
+
+    fn refresh_entries(&mut self) {
+        let mut entries = self.session.entries().unwrap_or_default();
+        entries.reverse();
+        self.entries = entries;
+        self.days = activity(&self.entries);
+        self.log_sel = self.log_sel.min(self.filtered().len().saturating_sub(1));
+    }
+
+    fn set_notice(&mut self, text: &str) {
+        self.notice = Some((text.into(), std::time::Instant::now()));
     }
 
     fn step(&mut self, dir: i32) {
@@ -252,9 +323,24 @@ impl Dashboard {
             Tab::People => self.people_tab(frame, body),
             Tab::Goals => self.goals_tab(frame, body),
         }
-        let hint = match (self.tab, self.filtering) {
+        let hint = if self.pending_delete {
+            "Delete this entry? y / n".to_string()
+        } else if let Some((text, at)) = &self.notice {
+            if at.elapsed().as_secs() < 3 {
+                text.clone()
+            } else {
+                self.default_hint()
+            }
+        } else {
+            self.default_hint()
+        };
+        frame.render_widget(Paragraph::new(Span::styled(hint, theme::dim())), footer);
+    }
+
+    fn default_hint(&self) -> String {
+        match (self.tab, self.filtering) {
             (_, true) => "type to filter · enter keep · esc clear".to_string(),
-            (Tab::Logs, _) => "↑↓ move · / filter · tab next tab · esc back".to_string(),
+            (Tab::Logs, _) => "↑↓ move · e edit · d delete · / filter · esc back".to_string(),
             (Tab::Reports, _) => {
                 "↑↓ choose · space/pgdn scroll · tab next tab · esc back".to_string()
             }
@@ -265,8 +351,7 @@ impl Dashboard {
                 "↑↓ choose · /goal changes them · tab next tab · esc back".to_string()
             }
             _ => "tab / 1-6 switch · ↑↓ move · esc back".to_string(),
-        };
-        frame.render_widget(Paragraph::new(Span::styled(hint, theme::dim())), footer);
+        }
     }
 
     fn panel(title: &str) -> Block<'static> {
@@ -308,7 +393,7 @@ impl Dashboard {
             }
             _ if !self.ai => frame.render_widget(
                 Paragraph::new(Span::styled(
-                    "Readiness needs AI · /brag lists your entries by expectation",
+                    "No coverage yet · tie entries with #L3.mentoring.1, then /gap",
                     theme::dim(),
                 ))
                 .block(Self::panel(&title)),
@@ -372,7 +457,7 @@ impl Dashboard {
                 if self.ai {
                     " Areas appear here after your first /gap."
                 } else {
-                    " Areas are rated by the gap analysis, which needs AI."
+                    " Areas appear here after /gap counts the entries you tied."
                 },
                 theme::dim(),
             ));
@@ -894,11 +979,7 @@ impl Dashboard {
         if self.reports.is_empty() {
             frame.render_widget(
                 Paragraph::new(Span::styled(
-                    if self.ai {
-                        " No reports yet · try /gap, /brag or /summary"
-                    } else {
-                        " No reports yet · try /brag or /summary"
-                    },
+                    " No reports yet · try /gap, /brag or /summary",
                     theme::dim(),
                 ))
                 .block(Self::panel("Reports")),
@@ -1013,7 +1094,7 @@ pub fn heatmap(
 pub fn run<B: ratatui::backend::Backend>(
     terminal: &mut ratatui::Terminal<B>,
     dash: &mut Dashboard,
-) -> Result<()> {
+) -> Result<Option<String>> {
     loop {
         terminal.draw(|f| dash.draw(f))?;
         if let Event::Key(key) = event::read()? {
@@ -1021,7 +1102,7 @@ pub fn run<B: ratatui::backend::Backend>(
                 continue;
             }
             if !dash.on_key(key.code, key.modifiers) {
-                return Ok(());
+                return Ok(dash.fill_composer.take());
             }
         }
     }
@@ -1156,5 +1237,58 @@ mod tests {
             "{s}"
         );
         assert!(!dash.on_key(KeyCode::Esc, KeyModifiers::NONE));
+    }
+
+    #[test]
+    fn logs_tab_edit_and_delete_keys() {
+        let dir = tempfile::tempdir().unwrap();
+        let session = Session::at(Paths::at(dir.path().to_path_buf())).unwrap();
+        session
+            .add_log(
+                "Led the payment outage call",
+                today(),
+                vec!["incident".into()],
+            )
+            .unwrap();
+        session
+            .add_log("Wrote the queue runbook", today(), vec![])
+            .unwrap();
+
+        let mut dash = Dashboard::load(&session, Tab::Logs);
+        dash.on_key(KeyCode::Char('2'), KeyModifiers::NONE);
+        dash.on_key(KeyCode::Down, KeyModifiers::NONE);
+        assert_eq!(dash.tab, Tab::Logs);
+
+        // `e` closes the dashboard and fills the composer command.
+        assert!(!dash.on_key(KeyCode::Char('e'), KeyModifiers::NONE));
+        let fill = dash.fill_composer.as_ref().unwrap();
+        assert!(
+            fill.starts_with("/edit ") && fill.contains("Led the payment outage call"),
+            "{fill}"
+        );
+
+        // `d` asks for confirmation; `n` cancels.
+        let mut dash = Dashboard::load(&session, Tab::Logs);
+        dash.on_key(KeyCode::Char('2'), KeyModifiers::NONE);
+        dash.on_key(KeyCode::Down, KeyModifiers::NONE);
+        assert!(dash.on_key(KeyCode::Char('d'), KeyModifiers::NONE));
+        assert!(dash.pending_delete);
+        assert!(dash.on_key(KeyCode::Char('n'), KeyModifiers::NONE));
+        assert!(!dash.pending_delete);
+        assert_eq!(dash.session.entries().unwrap().len(), 2);
+
+        // `d` then `y` deletes and refreshes the list.
+        dash.on_key(KeyCode::Char('d'), KeyModifiers::NONE);
+        assert!(dash.pending_delete);
+        assert!(dash.on_key(KeyCode::Char('y'), KeyModifiers::NONE));
+        assert!(!dash.pending_delete);
+        assert_eq!(dash.session.entries().unwrap().len(), 1);
+        assert!(dash
+            .session
+            .entries()
+            .unwrap()
+            .iter()
+            .all(|e| e.text != "Led the payment outage call"));
+        assert!(dash.notice.is_some());
     }
 }

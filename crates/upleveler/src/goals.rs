@@ -275,6 +275,7 @@ mod tests {
         );
         let other = Entry::new(d(9, 25), "Fixed a bug", vec![], "manual");
         let gap = GapSummary {
+            counted: false,
             date: d(9, 30),
             current: None,
             target: "L3".into(),

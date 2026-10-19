@@ -443,6 +443,7 @@ mod tests {
             last: None,
         };
         let gap = GapSummary {
+            counted: false,
             date: NaiveDate::from_ymd_opt(2026, 10, 8).unwrap(),
             current: Some("L3".into()),
             target: "L4".into(),

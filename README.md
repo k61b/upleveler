@@ -77,9 +77,10 @@ Run `upleveler`. The first time, a short setup asks for the model or "No AI" (an
 | `/goals`, `/goal …`, `/checkin` | Your goals: list, add (`/goal Speak at a meetup`, or end with an expectation id like `L3.mentoring.1` to tie it to your ladder), change (`/goal edit 2 due: 2026-12-31`), finish (`/goal done 2`), record progress; `/goal show 2` and `/checkin delete 2 1` to see and delete check-ins |
 | `/dashboard` | Progress, activity heatmap, logs, ladder, reports, people and goals |
 | `/web` | The same dashboard in your browser |
-| `/undo` | Undo the last entry, note, check-in, import or removed import |
+| `/edit <id> <text>`, `/delete <id>` | Change or delete a log entry; in `/dashboard` → Logs, press `e` or `d` on it |
+| `/undo` | Undo the last entry, note, check-in, edit, deletion, import or removed import |
 
-Start an entry with `yesterday`, `dün` or a date to log it for that day, and add `#tags` anywhere (`/log Fixed the flaky deploy check #ci`; also in the browser and `upleveler log`). Tagging an entry `#goal-2` counts it toward goal 2. Press `?` for all shortcuts.
+Start an entry with `yesterday`, `dün` or a date to log it for that day, and add `#tags` anywhere (`/log Fixed the flaky deploy check #ci`; also in the browser and `upleveler log`). Tagging an entry `#goal-2` counts it toward goal 2, and writing an expectation id from your ladder (`#L3.mentoring.1`) ties it to that expectation, with or without AI. Press `?` for all shortcuts.
 
 Type `/` to see all commands and `?` for keyboard shortcuts. Reports are saved in `~/.upleveler/reports/`.
 
@@ -94,10 +95,10 @@ Opens the dashboard in your browser (or type `/web` in the app). It runs on your
 | Tab | What it shows |
 |---|---|
 | Overview | Entries, streak, a 26-week activity heatmap, readiness from your latest gap analysis, latest reports, active goals and open follow-ups |
-| Logs | Every entry by day, filtered as you type (text, tag or date); add new entries with a date and tags, edit or delete any entry; under "Imported files", remove what an imported file added |
+| Logs | Every entry by day, filtered as you type (text, tag or date); add new entries with a date and tags, edit or delete any entry; export your log (Markdown, CSV, Excel or JSON Lines); import a txt, md, csv or xlsx file with a preview first; under "Imported files", remove what an imported file added |
 | People | The people you work with; add someone, then open their page to write notes (1:1, feedback, follow-ups), close, edit or delete notes, see the entries that mention them, edit their profile or remove them |
 | Goals | Active and finished goals with progress from your log, the latest gap analysis and check-ins; add or edit a goal, check in or delete a check-in, mark it done or drop it |
-| Ladder | Each level's expectations with the entries that back them; your target level is marked |
+| Ladder | Each level's expectations, with their ids and the entries that back them; choose your current and target level |
 | Reports | Run a gap analysis, promotion document or summary with live progress (without AI, the promotion document and summary list your entries); read or copy any report as Markdown |
 
 The dashboard reads and writes the same files as the terminal app and shows fresh data on every page load. The terminal app and the dashboard can be open at the same time: every change is written in one step while the data folder is locked, so neither overwrites the other. Analyses use the model you chose in the setup (or none, with AI off), one at a time, and keep running if you close the page while `upleveler web` is open.
@@ -209,7 +210,7 @@ Use Upleveler without AI if your workplace does not allow AI tools. Choose "No A
 | `/summary` | Lists the period's entries week by week with the most used tags. |
 | `/brag` | Lists entries under ladder expectations, or month by month without a ladder. |
 | `/prep @ada` | Lists open follow-ups, notes and entries that mention the person. |
-| `/gap` | Needs AI; no report is saved. |
+| `/gap` | Counts the entries you tied to each expectation (write its id in an entry, like `#L3.mentoring.1`): three or more is strong, one or two partial. A count, not an assessment. |
 
 Reports written without AI say so.
 
@@ -225,7 +226,7 @@ Reports written without AI say so.
 
 ## Scripts
 
-Every feature is also a plain command, for example `upleveler log "..."`, `upleveler gap` or `upleveler export -f xlsx -o worklog.xlsx`. Run `upleveler --help` to see them all; `upleveler <command> --help` shows examples. The commands take the names the app uses too (`upleveler people`, `upleveler goals`, `--kind 1:1`).
+Every feature is also a plain command, for example `upleveler log "..."`, `upleveler gap` or `upleveler export -f xlsx -o worklog.xlsx`. `upleveler list --ids` shows each entry's short id for `upleveler edit <id>` and `upleveler remove <id>`. Run `upleveler --help` to see them all; `upleveler <command> --help` shows examples. The commands take the names the app uses too (`upleveler people`, `upleveler goals`, `--kind 1:1`).
 
 Tab completion for your shell: `upleveler completions zsh > "${fpath[1]}/_upleveler"` (zsh), `upleveler completions bash > ~/.local/share/bash-completion/completions/upleveler` (bash) or `upleveler completions fish > ~/.config/fish/completions/upleveler.fish` (fish), then open a new terminal.
 

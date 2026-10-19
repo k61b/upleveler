@@ -195,8 +195,13 @@ pub fn hashtags(text: &str) -> (String, Vec<String>) {
             let start = i + 1;
             if start < chars.len() && chars[start].is_alphabetic() {
                 let mut end = start + 1;
+                // A dot inside, as in `#L3.mentoring.1`, but not one that ends a sentence.
                 while end < chars.len()
-                    && (chars[end].is_alphanumeric() || chars[end] == '-' || chars[end] == '_')
+                    && (chars[end].is_alphanumeric()
+                        || chars[end] == '-'
+                        || chars[end] == '_'
+                        || (chars[end] == '.'
+                            && chars.get(end + 1).is_some_and(|c| c.is_alphanumeric())))
                 {
                     end += 1;
                 }
@@ -225,6 +230,11 @@ fn tidy_spacing(s: &str) -> String {
             }
             out.push('\n');
             prev_ws = true;
+        } else if matches!(c, '.' | ',' | ';' | ':' | '!' | '?') && out.ends_with(' ') {
+            // "Fixed it #ci." leaves no space before the full stop.
+            out.pop();
+            out.push(c);
+            prev_ws = false;
         } else if c.is_whitespace() {
             if !prev_ws {
                 out.push(' ');
@@ -397,6 +407,13 @@ mod tests {
         assert_eq!(
             hashtags("#BUG_FIX-2"),
             ("".into(), vec!["bug_fix-2".into()])
+        );
+        assert_eq!(
+            hashtags("Mentored Ada #L3.mentoring.1 on retries #ci."),
+            (
+                "Mentored Ada on retries.".into(),
+                vec!["l3.mentoring.1".into(), "ci".into()]
+            )
         );
         assert_eq!(
             hashtags("#güvenlik kontrolü"),

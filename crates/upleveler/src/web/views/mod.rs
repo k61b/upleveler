@@ -4,6 +4,7 @@
 
 mod gallery;
 mod goals;
+mod import;
 mod ladder;
 mod logs;
 mod overview;
@@ -12,8 +13,16 @@ mod reports;
 
 pub use gallery::gallery;
 pub use goals::{goals, goals_with, GoalForm};
-pub use ladder::ladder;
-pub use logs::{log_results, logs, logs_with, remove_import, AddForm, EditForm, REMOVE_IMPORT};
+pub use import::{
+    error_page as import_error, preview as import_preview, reading as import_reading,
+    upload_form as import_upload_form, CANCEL as IMPORT_CANCEL, CONFIRM as IMPORT_CONFIRM,
+    PREVIEW as IMPORT_PREVIEW, UPLOAD as IMPORT_UPLOAD,
+};
+pub use ladder::{ladder, ladder_with, LevelForm};
+pub use logs::{
+    log_results, logs, logs_with, logs_with_import, remove_import, AddForm, EditForm, ExportForm,
+    REMOVE_IMPORT,
+};
 pub use overview::{demo_frame, overview, overview_body};
 pub use people::{people, people_with, person, person_path, remove_person, NoteForm, PersonForm};
 pub use reports::{render_markdown, report, reports, reports_with, run, RunForm};
@@ -217,7 +226,7 @@ mod tests {
         let pages = [
             overview(&data),
             logs(&data, ""),
-            ladder(&data, None),
+            ladder_with(&data, None, &LevelForm::default()),
             reports(&data),
             report(&data.reports[0]),
             people(&data),
@@ -237,5 +246,107 @@ mod tests {
                 assert!(!html.contains(needle), "{needle} in {html}");
             }
         }
+    }
+
+    #[test]
+    fn ladder_page_shows_the_level_form() {
+        let data = sample();
+        let html = ladder_with(&data, None, &LevelForm::default()).into_string();
+        assert!(html.contains(r#"action="/ladder""#), "{html}");
+        assert!(
+            html.contains("Current level") && html.contains("Target level"),
+            "{html}"
+        );
+        assert!(
+            html.contains(r#"value="L2""#) && html.contains(r#"value="L3""#),
+            "{html}"
+        );
+    }
+
+    #[test]
+    fn ladder_page_warns_when_no_target_is_set() {
+        let mut data = sample();
+        data.target = None;
+        let html = ladder_with(&data, None, &LevelForm::default()).into_string();
+        assert!(
+            html.contains("No target level set")
+                && html.contains("Choose your current and target level"),
+            "{html}"
+        );
+    }
+
+    #[test]
+    fn logs_page_shows_the_export_control() {
+        let data = sample();
+        let html = logs(&data, "").into_string();
+        assert!(html.contains(r#"action="/export""#), "{html}");
+        assert!(
+            html.contains(r#"value="md""#)
+                && html.contains(r#"value="csv""#)
+                && html.contains(r#"value="xlsx""#)
+                && html.contains(r#"value="jsonl""#),
+            "{html}"
+        );
+    }
+
+    fn empty_data(today: NaiveDate) -> crate::web::data::DashboardData {
+        crate::web::data::DashboardData {
+            today,
+            entries: Vec::new(),
+            ladder: None,
+            current: None,
+            target: None,
+            gap: None,
+            reports: Vec::new(),
+            ai: true,
+            model: "m".into(),
+            model_local: true,
+            people: crate::people::People::default(),
+            notes: Vec::new(),
+            goals: crate::goals::Goals::default(),
+        }
+    }
+
+    #[test]
+    fn empty_states_point_to_browser_actions() {
+        let today = NaiveDate::from_ymd_opt(2026, 10, 6).unwrap();
+        let empty = empty_data(today);
+        let overview_html = overview(&empty).into_string();
+        assert!(
+            overview_html.contains(r#"href="/logs""#) && overview_html.contains("Add an entry"),
+            "{overview_html}"
+        );
+
+        let with_entries = crate::web::data::DashboardData {
+            entries: vec![crate::store::Entry::new(
+                today,
+                "Fixed a bug",
+                vec![],
+                "manual",
+            )],
+            ..empty_data(today)
+        };
+        let overview_no_ladder = overview(&with_entries).into_string();
+        assert!(
+            overview_no_ladder.contains("/ladder import @file"),
+            "{overview_no_ladder}"
+        );
+
+        let with_ladder = crate::web::data::DashboardData {
+            ladder: Some(crate::web::demo::ladder()),
+            ..empty_data(today)
+        };
+        let overview_with_ladder = overview(&with_ladder).into_string();
+        assert!(
+            overview_with_ladder.contains(r#"href="/reports""#)
+                && overview_with_ladder.contains("Run a promotion document"),
+            "{overview_with_ladder}"
+        );
+
+        let logs_html = logs(&empty, "").into_string();
+        assert!(
+            logs_html.contains(r#"href="/logs""#) && logs_html.contains("Add an entry"),
+            "{logs_html}"
+        );
     }
 }

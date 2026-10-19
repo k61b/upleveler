@@ -27,6 +27,10 @@ pub struct Entry {
     /// Hash of the ladder `expectations` was computed against; stale when the ladder changes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tagged_with: Option<String>,
+    /// Expectation ids you tied the entry to yourself (`#L3.mentoring.1`).
+    /// Always part of `expectations`, and kept when the model maps entries again.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub linked: Vec<String>,
     pub created_at: DateTime<Utc>,
 }
 
@@ -48,6 +52,7 @@ impl Entry {
             source: source.to_string(),
             expectations: Vec::new(),
             tagged_with: None,
+            linked: Vec::new(),
             created_at: Utc::now(),
         }
     }

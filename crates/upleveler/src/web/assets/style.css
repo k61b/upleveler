@@ -1467,9 +1467,31 @@ select.input {
 
 /* ---------- Analyses ---------- */
 
-.run-form {
+.run-form,
+.level-form,
+.export-form {
   display: grid;
   gap: 8px;
+}
+
+.level-form {
+  margin-bottom: 24px;
+  padding-bottom: 24px;
+  border-bottom: 1px solid var(--rule);
+}
+
+.export-form {
+  margin-bottom: 24px;
+  padding-bottom: 24px;
+  border-bottom: 1px solid var(--rule);
+}
+
+.empty-action-stack {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  max-width: 100%;
 }
 
 .run-actions {
@@ -1520,6 +1542,31 @@ select.input {
   display: flex;
   gap: 8px;
   margin-bottom: 16px;
+}
+
+.import-form {
+  margin-bottom: 16px;
+}
+
+.import-form .form-hint {
+  margin-top: 4px;
+  color: var(--fg-muted);
+  font-size: var(--text-sm);
+}
+
+.import-form input[type="file"] {
+  padding: 10px 14px;
+  cursor: pointer;
+}
+
+.preview-counts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 16px;
+}
+
+.preview-warnings > * + * {
+  margin-top: 8px;
 }
 
 .input {

@@ -174,7 +174,7 @@ fn handle(request: Request, app: &mut App, screen: &mut Screen) -> Result<()> {
         Request::Dashboard(tab) => {
             screen.clear()?;
             execute!(io::stdout(), EnterAlternateScreen)?;
-            let result = (|| -> Result<()> {
+            let fill = (|| -> Result<Option<String>> {
                 let mut full = Terminal::new(CrosstermBackend::new(io::stdout()))?;
                 full.clear()?;
                 let mut dash = dashboard::Dashboard::load(&app.session, tab);
@@ -182,7 +182,12 @@ fn handle(request: Request, app: &mut App, screen: &mut Screen) -> Result<()> {
             })();
             execute!(io::stdout(), LeaveAlternateScreen)?;
             *screen = Screen::new(screen.height)?;
-            result?;
+            match fill {
+                Ok(Some(text)) => app.set_composer(&text),
+                Ok(None) => {}
+                Err(e) => return Err(e),
+            }
+            app.refresh_status();
         }
         Request::EditStaging(path) => {
             screen.clear()?;

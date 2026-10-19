@@ -159,6 +159,7 @@ fn gap(today: NaiveDate, entries: &[Entry], ladder: &Ladder) -> Option<GapSummar
         })
         .collect();
     Some(GapSummary {
+        counted: false,
         date: today - Duration::days(3),
         current: Some("L2".into()),
         target: "L3".into(),
