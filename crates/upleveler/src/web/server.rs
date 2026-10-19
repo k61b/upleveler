@@ -10,20 +10,24 @@
 use super::data::{DashboardData, Report};
 use super::runs::{self, Kind, MakeLlm, Runs, StartError};
 use super::ui::Alert;
-use super::views::{AddForm, GoalForm, NoteForm, PersonForm, RunForm};
+use super::views::{AddForm, ExportForm, GoalForm, LevelForm, NoteForm, PersonForm, RunForm};
 use super::{brand, views, FONTS, SCRIPT};
 use crate::config::Paths;
-use crate::session::Session;
-use anyhow::{Context, Result};
-use axum::extract::{Form, Path, Query, Request, State};
+use crate::export::Format;
+use crate::session::{ImportPreview, Session};
+use anyhow::{bail, Context, Result};
+use axum::extract::{Form, Multipart, Path, Query, Request, State};
 use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::get;
 use axum::Router;
 use serde::Deserialize;
+use std::collections::HashMap;
 use std::net::Ipv4Addr;
-use std::sync::Arc;
+use std::path::PathBuf;
+use std::sync::atomic::AtomicBool;
+use std::sync::{Arc, Mutex};
 use tokio::net::TcpListener;
 
 /// Used when `--port` is not given and the port is free; otherwise any free port.
@@ -32,6 +36,41 @@ pub const DEFAULT_PORT: u16 = 4747;
 const CSP: &str = "default-src 'none'; style-src 'self'; script-src 'self'; font-src 'self'; \
                    img-src 'self' data:; connect-src 'self'; base-uri 'none'; form-action 'self'; \
                    frame-ancestors 'none'";
+
+/// A file uploaded for import and the preview being computed for it.
+#[derive(Clone)]
+struct PendingImport {
+    state: Arc<Mutex<PendingState>>,
+    /// The uploaded file in the staging folder.
+    file: PathBuf,
+    /// The generated file name, shown on the reading and preview pages.
+    name: String,
+}
+
+enum PendingState {
+    Reading,
+    Done(Result<Box<ImportPreview>, String>),
+}
+
+impl PendingImport {
+    fn new(file: PathBuf, name: String) -> Self {
+        Self {
+            state: Arc::new(Mutex::new(PendingState::Reading)),
+            file,
+            name,
+        }
+    }
+
+    fn set_done(&self, result: Result<ImportPreview, String>) {
+        *self.state.lock().unwrap_or_else(|e| e.into_inner()) =
+            PendingState::Done(result.map(Box::new));
+    }
+
+    fn with_state<R>(&self, f: impl FnOnce(&mut PendingState) -> R) -> R {
+        let mut guard = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        f(&mut guard)
+    }
+}
 
 struct AppState {
     port: u16,
@@ -42,6 +81,8 @@ struct AppState {
     make_llm: MakeLlm,
     /// Per port, because browsers share cookies across ports of one host.
     cookie: String,
+    /// Uploads being read; the key is the id on the preview URL.
+    pending_imports: Arc<Mutex<HashMap<String, PendingImport>>>,
 }
 
 impl AppState {
@@ -53,6 +94,7 @@ impl AppState {
             runs: Runs::default(),
             make_llm: runs::configured_llm(),
             cookie: format!("upleveler_token_{port}"),
+            pending_imports: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 }
@@ -151,6 +193,15 @@ fn router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/", get(overview))
         .route("/logs", get(logs).post(add_log))
+        .route(
+            "/logs/import",
+            axum::routing::post(import_upload).layer(axum::extract::DefaultBodyLimit::max(
+                UPLOAD_MAX_BYTES + 64 * 1024,
+            )),
+        )
+        .route("/logs/import/preview", get(import_preview_page))
+        .route("/logs/import/confirm", axum::routing::post(import_confirm))
+        .route("/logs/import/cancel", axum::routing::post(import_cancel))
         .route("/logs/{id}/edit", axum::routing::post(edit_log))
         .route("/logs/{id}/delete", axum::routing::post(delete_log))
         .route(
@@ -185,7 +236,8 @@ fn router(state: Arc<AppState>) -> Router {
             axum::routing::post(delete_checkin),
         )
         .route("/goals/{id}/status", axum::routing::post(goal_status))
-        .route("/ladder", get(ladder))
+        .route("/ladder", get(ladder).post(set_levels))
+        .route("/export", get(export_logs))
         .route("/reports", get(reports))
         .route("/run", get(run_page).post(start_run))
         .route("/run/cancel", axum::routing::post(cancel_run))
@@ -262,6 +314,22 @@ struct LadderQuery {
     level: Option<String>,
 }
 
+#[derive(Deserialize)]
+struct LevelInput {
+    #[serde(default)]
+    current: String,
+    #[serde(default)]
+    target: String,
+}
+
+#[derive(Deserialize)]
+struct ExportQuery {
+    #[serde(default)]
+    format: String,
+    #[serde(default)]
+    period: String,
+}
+
 async fn overview(State(state): State<Arc<AppState>>) -> Response {
     with_data(state, |data| page(views::overview(data))).await
 }
@@ -293,7 +361,7 @@ async fn logs(State(state): State<Arc<AppState>>, Query(query): Query<LogsQuery>
             (None, None, None, Some(notice)) => Some(notice),
             _ => None,
         };
-        page(views::logs_with(data, &query.q, &form))
+        page(views::logs_with(data, &query.q, &form, &ExportForm::default()))
     })
     .await
 }
@@ -343,7 +411,12 @@ async fn add_log(
                     notice: Some((Alert::Error, problem)),
                     edit: None,
                 };
-                Ok(invalid(views::logs_with(&data, "", &form)))
+                Ok(invalid(views::logs_with(
+                    &data,
+                    "",
+                    &form,
+                    &ExportForm::default(),
+                )))
             }
         }
     })
@@ -385,7 +458,12 @@ async fn edit_log(
                         notice: Some((Alert::Error, problem)),
                     }),
                 };
-                Ok(invalid(views::logs_with(&data, "", &form)))
+                Ok(invalid(views::logs_with(
+                    &data,
+                    "",
+                    &form,
+                    &ExportForm::default(),
+                )))
             }
         }
     })
@@ -425,6 +503,26 @@ where
     }
 }
 
+/// The same as [`write`], but the handler needs a mutable session (for example
+/// to change config through `Session::set_levels`).
+async fn write_mut<F>(state: Arc<AppState>, headers: &HeaderMap, handle: F) -> Response
+where
+    F: FnOnce(&mut Session) -> Result<Response> + Send + 'static,
+{
+    if !same_origin(headers, state.port) {
+        return forbidden_post();
+    }
+    let paths = state.paths.clone();
+    let result =
+        tokio::task::spawn_blocking(move || Session::at(paths).and_then(|mut s| handle(&mut s)))
+            .await;
+    match result {
+        Ok(Ok(response)) => response,
+        Ok(Err(err)) => error_page(&format!("{err:#}")),
+        Err(err) => error_page(&err.to_string()),
+    }
+}
+
 /// The message to show next to a form when `err` is a rule the user broke
 /// (`limits::Invalid`); any other error goes on to the error page.
 fn rule(err: anyhow::Error) -> Result<String> {
@@ -433,6 +531,15 @@ fn rule(err: anyhow::Error) -> Result<String> {
 
 fn see_other(location: String) -> Response {
     (StatusCode::SEE_OTHER, [(header::LOCATION, location)]).into_response()
+}
+
+fn export_content_type(format: Format) -> &'static str {
+    match format {
+        Format::Md => "text/markdown; charset=utf-8",
+        Format::Csv => "text/csv; charset=utf-8",
+        Format::Xlsx => "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        Format::Jsonl => "application/x-ndjson",
+    }
 }
 
 fn invalid(markup: maud::Markup) -> Response {
@@ -483,6 +590,8 @@ impl Saved {
             "uncheckin" => "Check-in deleted.",
             "entry" => "Entry saved.",
             "entrydeleted" => "Entry deleted.",
+            "levels" => "Levels saved.",
+            "imported" => "File imported.",
             _ => return None,
         };
         Some((Alert::Success, text.to_string()))
@@ -721,6 +830,268 @@ async fn remove_import(
         })
     })
     .await
+}
+
+const UPLOAD_MAX_BYTES: usize = 10 * 1024 * 1024;
+
+/// Uploaded files must be one of these types.
+fn allowed_upload_extension(name: &str) -> Option<&'static str> {
+    let ext = name.rsplit_once('.').map(|(_, e)| e.to_lowercase())?;
+    match ext.as_str() {
+        "txt" | "md" | "csv" | "xlsx" => Some(match ext.as_str() {
+            "txt" => "txt",
+            "md" => "md",
+            "csv" => "csv",
+            _ => "xlsx",
+        }),
+        _ => None,
+    }
+}
+
+/// A folder of its own for one upload, so its file can keep its name: the
+/// name is what "Imported files" lists and `--remove` takes.
+fn upload_dir() -> Result<String> {
+    let mut bytes = [0u8; 12];
+    getrandom::fill(&mut bytes).map_err(|e| anyhow::anyhow!("no secure random source: {e}"))?;
+    Ok(format!(
+        "upload-{}",
+        bytes.iter().map(|b| format!("{b:02x}")).collect::<String>()
+    ))
+}
+
+/// The browser's file name without any folder and with only plain
+/// characters, or `upload.<ext>`.
+fn safe_file_name(name: &str, ext: &str) -> String {
+    let base = name.rsplit(['/', '\\']).next().unwrap_or("");
+    let clean: String = base
+        .chars()
+        .filter(|c| c.is_alphanumeric() || matches!(c, ' ' | '.' | '-' | '_' | '(' | ')'))
+        .take(100)
+        .collect();
+    let clean = clean.trim().trim_start_matches('.');
+    if clean.to_lowercase().ends_with(&format!(".{ext}")) && clean.len() > ext.len() + 1 {
+        clean.to_string()
+    } else {
+        format!("upload.{ext}")
+    }
+}
+
+/// Deletes an uploaded file and the folder made for it.
+fn remove_upload(file: &std::path::Path) {
+    let _ = std::fs::remove_file(file);
+    if let Some(dir) = file.parent() {
+        if dir
+            .file_name()
+            .is_some_and(|n| n.to_string_lossy().starts_with("upload-"))
+        {
+            let _ = std::fs::remove_dir(dir);
+        }
+    }
+}
+
+/// Saves a multipart file field to the staging folder and returns its path and
+/// generated name.
+async fn save_upload(
+    staging: &std::path::Path,
+    mut multipart: Multipart,
+) -> Result<(PathBuf, String)> {
+    let field = multipart
+        .next_field()
+        .await
+        .context("reading upload")?
+        .context("no file uploaded")?;
+    if field.name() != Some("file") {
+        bail!("upload a file named file");
+    }
+    let file_name = field.file_name().unwrap_or("upload").to_string();
+    let ext = allowed_upload_extension(&file_name)
+        .with_context(|| format!("{file_name} is not a txt, md, csv or xlsx file"))?;
+    let bytes = field.bytes().await.context("reading upload")?;
+    if bytes.len() > UPLOAD_MAX_BYTES {
+        bail!("the file is larger than 10 MB");
+    }
+    let name = safe_file_name(&file_name, ext);
+    let dir = staging.join(upload_dir()?);
+    std::fs::create_dir_all(&dir)?;
+    let path = dir.join(&name);
+    std::fs::write(&path, &bytes).with_context(|| format!("writing {}", path.display()))?;
+    Ok((path, name))
+}
+
+/// Handles the upload form: validates the file, saves it to staging and starts
+/// reading it on a blocking thread so the async runtime is not held up.
+async fn import_upload(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    multipart: Multipart,
+) -> Response {
+    if !same_origin(&headers, state.port) {
+        return forbidden_post();
+    }
+
+    let staging = state.paths.staging.clone();
+    let save = match save_upload(&staging, multipart).await {
+        Ok(save) => save,
+        Err(err) => {
+            return with_data(state, move |data| {
+                let notice = (Alert::Error, rule(err).unwrap_or_else(|e| format!("{e:#}")));
+                invalid(views::logs_with_import(
+                    data,
+                    "",
+                    &AddForm::empty(data.today),
+                    &ExportForm::default(),
+                    Some(&notice),
+                ))
+            })
+            .await;
+        }
+    };
+
+    let id = match new_import_id() {
+        Ok(id) => id,
+        Err(err) => {
+            remove_upload(&save.0);
+            return error_page(&format!("{err:#}"));
+        }
+    };
+    let pending = PendingImport::new(save.0.clone(), save.1.clone());
+    state
+        .pending_imports
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(id.clone(), pending.clone());
+
+    let paths = state.paths.clone();
+    let make_llm = state.make_llm.clone();
+    let file = save.0;
+    tokio::task::spawn_blocking(move || {
+        let result = (|| -> Result<ImportPreview> {
+            let session = Session::at(paths)?;
+            let llm = make_llm(&session, Arc::new(AtomicBool::new(false)))?
+                .map(|b| b as Box<dyn crate::llm::Llm>);
+            session.import_preview(
+                &file,
+                llm.as_deref(),
+                None,
+                None,
+                &Default::default(),
+                &mut crate::no_progress,
+            )
+        })();
+        pending.set_done(result.map_err(|e| format!("{e:#}")));
+    });
+
+    see_other(format!("{}?id={}", views::IMPORT_PREVIEW, id))
+}
+
+fn new_import_id() -> Result<String> {
+    let mut bytes = [0u8; 12];
+    getrandom::fill(&mut bytes).map_err(|e| anyhow::anyhow!("no secure random source: {e}"))?;
+    Ok(bytes.iter().map(|b| format!("{b:02x}")).collect())
+}
+
+#[derive(Deserialize)]
+struct ImportId {
+    id: String,
+}
+
+async fn import_preview_page(
+    State(state): State<Arc<AppState>>,
+    Query(input): Query<ImportId>,
+) -> Response {
+    let pending = {
+        let guard = state
+            .pending_imports
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        guard.get(&input.id).cloned()
+    };
+    let Some(pending) = pending else {
+        return missing();
+    };
+    pending.with_state(|s| match s {
+        PendingState::Reading => page(views::import_reading(&pending.name)),
+        PendingState::Done(Ok(preview)) => {
+            page(views::import_preview(preview, &input.id, &pending.name))
+        }
+        PendingState::Done(Err(err)) => page(views::import_error(&pending.name, err)),
+    })
+}
+
+async fn import_confirm(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Form(input): Form<ImportId>,
+) -> Response {
+    if !same_origin(&headers, state.port) {
+        return forbidden_post();
+    }
+    let pending = {
+        let mut guard = state
+            .pending_imports
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        guard.remove(&input.id)
+    };
+    let Some(pending) = pending else {
+        return missing();
+    };
+    let preview = match pending.with_state(|s| match std::mem::replace(s, PendingState::Reading) {
+        PendingState::Done(Ok(preview)) => Ok(preview),
+        PendingState::Done(Err(err)) => Err(err),
+        PendingState::Reading => Err("the file is still being read".to_string()),
+    }) {
+        Ok(p) => p,
+        Err(err) => {
+            remove_upload(&pending.file);
+            return error_page(&err);
+        }
+    };
+
+    let paths = state.paths.clone();
+    let result = tokio::task::spawn_blocking(move || {
+        let session = Session::at(paths)?;
+        session.apply_import(&preview)?;
+        // Clean up the uploaded source and the generated staging file.
+        remove_upload(&pending.file);
+        if pending.file != preview.staging {
+            let _ = std::fs::remove_file(&preview.staging);
+        }
+        Ok::<_, anyhow::Error>(())
+    })
+    .await;
+
+    match result {
+        Ok(Ok(())) => see_other(format!("{}?saved=imported", views::Tab::Logs.path())),
+        Ok(Err(err)) => error_page(&format!("{err:#}")),
+        Err(err) => error_page(&err.to_string()),
+    }
+}
+
+async fn import_cancel(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Form(input): Form<ImportId>,
+) -> Response {
+    if !same_origin(&headers, state.port) {
+        return forbidden_post();
+    }
+    let pending = {
+        let mut guard = state
+            .pending_imports
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        guard.remove(&input.id)
+    };
+    if let Some(pending) = pending {
+        remove_upload(&pending.file);
+        pending.with_state(|s| {
+            if let PendingState::Done(Ok(preview)) = s {
+                let _ = std::fs::remove_file(&preview.staging);
+            }
+        });
+    }
+    see_other(views::Tab::Logs.path().to_string())
 }
 
 async fn confirm_remove(
@@ -1050,9 +1421,52 @@ async fn goal_status(
     .await
 }
 
-async fn ladder(State(state): State<Arc<AppState>>, Query(query): Query<LadderQuery>) -> Response {
+async fn ladder(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<LadderQuery>,
+    Query(saved): Query<Saved>,
+) -> Response {
     with_data(state, move |data| {
-        page(views::ladder(data, query.level.as_deref()))
+        let form = LevelForm {
+            notice: saved.notice(),
+            ..Default::default()
+        };
+        page(views::ladder_with(data, query.level.as_deref(), &form))
+    })
+    .await
+}
+
+async fn set_levels(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Form(input): Form<LevelInput>,
+) -> Response {
+    write_mut(state, &headers, move |session| {
+        let current = Some(input.current.as_str()).filter(|s| !s.is_empty());
+        let target = Some(input.target.as_str()).filter(|s| !s.is_empty());
+        match session.set_levels(current, target) {
+            Ok(_) => Ok(see_other(format!(
+                "{}?saved=levels",
+                views::Tab::Ladder.path()
+            ))),
+            Err(err) => {
+                let problem = rule(err).or_else(|e| {
+                    let text = format!("{e:#}");
+                    if text.starts_with("no level ") || text.contains("no career ladder") {
+                        Ok(text)
+                    } else {
+                        Err(e)
+                    }
+                })?;
+                let data = DashboardData::load(session)?;
+                let form = LevelForm {
+                    current: input.current,
+                    target: input.target,
+                    notice: Some((Alert::Error, problem)),
+                };
+                Ok(invalid(views::ladder_with(&data, None, &form)))
+            }
+        }
     })
     .await
 }
@@ -1141,6 +1555,98 @@ async fn cancel_run(State(state): State<Arc<AppState>>, headers: HeaderMap) -> R
     }
     state.runs.cancel();
     (StatusCode::SEE_OTHER, [(header::LOCATION, "/run")]).into_response()
+}
+
+/// Exports entries in the requested format and period as a downloadable file.
+async fn export_logs(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<ExportQuery>,
+) -> Response {
+    let format = match query.format.as_str() {
+        "md" => Format::Md,
+        "csv" => Format::Csv,
+        "xlsx" => Format::Xlsx,
+        "jsonl" => Format::Jsonl,
+        _ => {
+            return with_data(state, move |data| {
+                let export = ExportForm {
+                    format: Format::Md,
+                    period: query.period,
+                    notice: Some((Alert::Error, "Choose a format.".into())),
+                };
+                invalid(views::logs_with(
+                    data,
+                    "",
+                    &AddForm::empty(data.today),
+                    &export,
+                ))
+            })
+            .await
+        }
+    };
+    let period = query.period.trim();
+    let range = if period.is_empty() {
+        None
+    } else {
+        match crate::dates::parse_period(period, crate::session::today()) {
+            Some(r) => Some(r),
+            None => {
+                return with_data(state, move |data| {
+                    let export = ExportForm {
+                        format,
+                        period: query.period,
+                        notice: Some((
+                            Alert::Error,
+                            "Unknown period. Try 2026-Q3, H2 or 90d.".into(),
+                        )),
+                    };
+                    invalid(views::logs_with(
+                        data,
+                        "",
+                        &AddForm::empty(data.today),
+                        &export,
+                    ))
+                })
+                .await
+            }
+        }
+    };
+
+    let paths = state.paths.clone();
+    let filename = format!("upleveler-export.{}", format.extension());
+    let result = tokio::task::spawn_blocking(move || {
+        std::fs::create_dir_all(&paths.staging)?;
+        let path = paths.staging.join(format!(
+            "export-{}.tmp",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        let count = Session::at(paths.clone())?.export(format, range, &path)?;
+        let bytes = std::fs::read(&path)?;
+        // Best effort cleanup of the temporary file.
+        let _ = std::fs::remove_file(&path);
+        Ok::<_, anyhow::Error>((bytes, count))
+    })
+    .await;
+
+    match result {
+        Ok(Ok((bytes, _))) => {
+            let disposition = format!("attachment; filename=\"{}\"", filename);
+            (
+                StatusCode::OK,
+                [
+                    (header::CONTENT_TYPE, export_content_type(format)),
+                    (header::CONTENT_DISPOSITION, disposition.as_str()),
+                ],
+                bytes,
+            )
+                .into_response()
+        }
+        Ok(Err(err)) => error_page(&format!("{err:#}")),
+        Err(err) => error_page(&err.to_string()),
+    }
 }
 
 /// Only names of existing reports resolve, so the URL cannot reach other files.
@@ -1580,6 +2086,43 @@ mod tests {
                 .len(),
             1
         );
+    }
+
+    /// An entry tied to an expectation shows it, and editing it in the
+    /// browser keeps the tie (the form lists it with the tags).
+    #[tokio::test]
+    async fn ties_to_expectations_survive_a_browser_edit() {
+        let home = tempfile::tempdir().unwrap();
+        let paths = Paths::at(home.path().to_path_buf());
+        let mut session = Session::at(paths.clone()).unwrap();
+        let ladder =
+            crate::ladder::Ladder::from_yaml(include_str!("../../ladder.example.yaml")).unwrap();
+        session.save_ladder(&ladder).unwrap();
+        let day = chrono::NaiveDate::from_ymd_opt(2026, 10, 2).unwrap();
+        let entry = session
+            .add_log("Paired with Ada #pairing #L3.mentoring.1", day, vec![])
+            .unwrap()
+            .unwrap();
+        let state = Arc::new(AppState::new(4747, TOKEN.into(), paths.clone()));
+        let logs = body(send(&state, Request::get("/logs"), "").await).await;
+        assert!(logs.contains("→ L3.mentoring.1"), "{logs}");
+        assert!(
+            logs.contains(r#"value="pairing, L3.mentoring.1""#),
+            "{logs}"
+        );
+
+        let edited = send(
+            &state,
+            Request::post(format!("/logs/{}/edit", entry.id))
+                .header("origin", "http://127.0.0.1:4747")
+                .header("sec-fetch-site", "same-origin"),
+            "text=Paired+with+Ada+on+retries&date=2026-10-02&tags=pairing%2C+L3.mentoring.1",
+        )
+        .await;
+        assert_eq!(edited.status(), StatusCode::SEE_OTHER);
+        let e = &session.entries().unwrap()[0];
+        assert_eq!(e.linked, vec!["L3.mentoring.1"]);
+        assert_eq!(e.tags, vec!["pairing"]);
     }
 
     #[tokio::test]
@@ -2175,10 +2718,187 @@ mod tests {
         let notice = body(send(&state, Request::get(&to), "").await).await;
         assert!(
             notice.contains("Removed 2 entries imported from old notes.xlsx")
-                && notice.contains("upleveler import ")
-                && !notice.contains("Imported files"),
+                && notice.contains("upleveler import "),
             "{notice}"
         );
+    }
+
+    fn disable_ai(paths: &crate::config::Paths) {
+        std::fs::create_dir_all(&paths.root).unwrap();
+        std::fs::write(
+            &paths.config,
+            "[llm]\nenabled = false\nprovider = \"llamacpp\"\nbase_url = \"http://127.0.0.1:8080\"\nmodel = \"test\"\n",
+        )
+        .unwrap();
+    }
+
+    fn multipart_body(name: &str, file_name: &str, content: &[u8]) -> (String, Vec<u8>) {
+        let boundary = "----UplevelerBoundary";
+        let mut body = Vec::new();
+        body.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
+        body.extend_from_slice(
+            format!(
+                "Content-Disposition: form-data; name=\"{name}\"; filename=\"{file_name}\"\r\n"
+            )
+            .as_bytes(),
+        );
+        body.extend_from_slice(b"Content-Type: application/octet-stream\r\n\r\n");
+        body.extend_from_slice(content);
+        body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
+        (format!("multipart/form-data; boundary={boundary}"), body)
+    }
+
+    #[tokio::test]
+    async fn importing_a_file_from_the_browser() {
+        let home = tempfile::tempdir().unwrap();
+        let paths = Paths::at(home.path().to_path_buf());
+        disable_ai(&paths);
+        let state = Arc::new(AppState::new(4747, TOKEN.into(), paths.clone()));
+        let post = |path: &str| {
+            Request::post(path)
+                .header("origin", "http://127.0.0.1:4747")
+                .header("sec-fetch-site", "same-origin")
+        };
+
+        let md = "## 2026-10-02\n- Shipped the ledger export\n- Reviewed pull requests\n\n## 2026-10-03\n- Fixed the retry bug\n";
+        let (content_type, body_bytes) = multipart_body("file", "notes.md", md.as_bytes());
+        let upload = send(
+            &state,
+            post("/logs/import").header(header::CONTENT_TYPE, &content_type),
+            &String::from_utf8(body_bytes).unwrap(),
+        )
+        .await;
+        assert_eq!(upload.status(), StatusCode::SEE_OTHER);
+        let location = upload.headers()[header::LOCATION]
+            .to_str()
+            .unwrap()
+            .to_string();
+        assert!(
+            location.starts_with("/logs/import/preview?id="),
+            "{location}"
+        );
+
+        // The preview may need a moment to finish reading.
+        let mut preview = String::new();
+        for _ in 0..100 {
+            let page = body(send(&state, Request::get(&location), "").await).await;
+            if page.contains("Import preview") {
+                preview = page;
+                break;
+            }
+            assert!(page.contains("Reading the file"), "{page}");
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert!(preview.contains("3 new entries"), "{preview}");
+        assert!(
+            preview.contains("Shipped the ledger export")
+                && preview.contains("Fixed the retry bug"),
+            "{preview}"
+        );
+
+        let confirm = send(
+            &state,
+            post("/logs/import/confirm"),
+            &format!("id={}", &location["/logs/import/preview?id=".len()..]),
+        )
+        .await;
+        assert_eq!(confirm.status(), StatusCode::SEE_OTHER);
+        assert_eq!(confirm.headers()[header::LOCATION], "/logs?saved=imported");
+        let entries = Session::at(paths.clone()).unwrap().entries().unwrap();
+        assert_eq!(entries.len(), 3, "{:?}", entries);
+
+        let logs = body(send(&state, Request::get("/logs?saved=imported"), "").await).await;
+        assert!(logs.contains("File imported."), "{logs}");
+        assert!(logs.contains("Imported files"), "{logs}");
+        // The import keeps the browser's file name, and the upload is gone.
+        let files = Session::at(paths.clone())
+            .unwrap()
+            .imported_files()
+            .unwrap();
+        assert_eq!(files.len(), 1);
+        assert!(files[0].name.contains("notes.md"), "{:?}", files[0].name);
+        let staging: Vec<_> = std::fs::read_dir(&paths.staging)
+            .map(|d| d.flatten().map(|e| e.file_name()).collect())
+            .unwrap_or_default();
+        assert!(
+            !staging
+                .iter()
+                .any(|n| n.to_string_lossy().starts_with("upload-")),
+            "{staging:?}"
+        );
+    }
+
+    #[test]
+    fn uploaded_file_names_are_kept_but_made_safe() {
+        assert_eq!(safe_file_name("notes.md", "md"), "notes.md");
+        assert_eq!(safe_file_name("../../etc/passwd.md", "md"), "passwd.md");
+        assert_eq!(
+            safe_file_name("C:\\work\\1on1 (Ada).xlsx", "xlsx"),
+            "1on1 (Ada).xlsx"
+        );
+        assert_eq!(safe_file_name(".md", "md"), "upload.md");
+        assert_eq!(safe_file_name("x;rm -rf.md", "md"), "xrm -rf.md");
+    }
+
+    #[tokio::test]
+    async fn import_upload_refuses_cross_origin() {
+        let home = tempfile::tempdir().unwrap();
+        let paths = Paths::at(home.path().to_path_buf());
+        disable_ai(&paths);
+        let state = Arc::new(AppState::new(4747, TOKEN.into(), paths));
+        let (content_type, body_bytes) = multipart_body("file", "notes.md", b"x");
+        let cross = Request::post("/logs/import")
+            .header(header::HOST, HOST.unwrap())
+            .header(header::COOKIE, COOKIE.unwrap())
+            .header("origin", "http://evil.example")
+            .header("sec-fetch-site", "cross-site")
+            .header(header::CONTENT_TYPE, &content_type);
+        let res = router(state.clone())
+            .oneshot(cross.body(Body::from(body_bytes)).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn import_upload_rejects_bad_files() {
+        let home = tempfile::tempdir().unwrap();
+        let paths = Paths::at(home.path().to_path_buf());
+        disable_ai(&paths);
+        let state = Arc::new(AppState::new(4747, TOKEN.into(), paths));
+        let post = |path: &str| {
+            Request::post(path)
+                .header("origin", "http://127.0.0.1:4747")
+                .header("sec-fetch-site", "same-origin")
+        };
+
+        // Wrong extension.
+        let (content_type, body_bytes) = multipart_body("file", "notes.pdf", b"x");
+        let bad_type = send(
+            &state,
+            post("/logs/import").header(header::CONTENT_TYPE, &content_type),
+            &String::from_utf8(body_bytes).unwrap(),
+        )
+        .await;
+        assert_eq!(bad_type.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let page = body(bad_type).await;
+        assert!(
+            page.contains("txt, md, csv or xlsx") || page.contains("is not a txt"),
+            "{page}"
+        );
+
+        // Too large.
+        let (content_type, body_bytes) =
+            multipart_body("file", "big.md", &[b'x'; UPLOAD_MAX_BYTES + 1]);
+        let too_big = send(
+            &state,
+            post("/logs/import").header(header::CONTENT_TYPE, &content_type),
+            &String::from_utf8(body_bytes).unwrap(),
+        )
+        .await;
+        assert_eq!(too_big.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let page = body(too_big).await;
+        assert!(page.contains("10 MB"), "{page}");
     }
 
     #[tokio::test]
@@ -2243,6 +2963,118 @@ mod tests {
         assert!(
             person.contains("1:1 preparations") && person.contains("1:1 prep"),
             "{person}"
+        );
+    }
+
+    fn test_ladder() -> crate::ladder::Ladder {
+        crate::ladder::Ladder::from_yaml(
+            "levels:\n  - id: L2\n    title: Engineer\n    expectations: []\n  - id: L3\n    title: Senior Engineer\n    expectations: []\n",
+        )
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn setting_levels_from_the_browser() {
+        let home = tempfile::tempdir().unwrap();
+        let paths = Paths::at(home.path().to_path_buf());
+        let mut session = Session::at(paths.clone()).unwrap();
+        session.save_ladder(&test_ladder()).unwrap();
+        let state = Arc::new(AppState::new(4747, TOKEN.into(), paths.clone()));
+
+        let saved = send(
+            &state,
+            Request::post("/ladder")
+                .header("origin", "http://127.0.0.1:4747")
+                .header("sec-fetch-site", "same-origin"),
+            "current=L2&target=L3",
+        )
+        .await;
+        assert_eq!(saved.status(), StatusCode::SEE_OTHER);
+        assert_eq!(saved.headers()[header::LOCATION], "/ladder?saved=levels");
+        let cfg = crate::config::Config::load(&paths).unwrap();
+        assert_eq!(
+            (cfg.current_level.as_deref(), cfg.target_level.as_deref()),
+            (Some("L2"), Some("L3"))
+        );
+
+        let page = body(send(&state, Request::get("/ladder?saved=levels"), "").await).await;
+        assert!(page.contains("Levels saved."), "{page}");
+
+        let bad = send(
+            &state,
+            Request::post("/ladder")
+                .header("origin", "http://127.0.0.1:4747")
+                .header("sec-fetch-site", "same-origin"),
+            "current=L9&target=L3",
+        )
+        .await;
+        assert_eq!(bad.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let page = body(bad).await;
+        assert!(page.contains("no level L9"), "{page}");
+
+        let cross = Request::post("/ladder")
+            .header("origin", "http://evil.example")
+            .header("sec-fetch-site", "cross-site");
+        assert_eq!(
+            send(&state, cross, "current=L2&target=L3").await.status(),
+            StatusCode::FORBIDDEN
+        );
+    }
+
+    #[tokio::test]
+    async fn exporting_logs_from_the_browser() {
+        let home = tempfile::tempdir().unwrap();
+        let paths = Paths::at(home.path().to_path_buf());
+        let session = Session::at(paths.clone()).unwrap();
+        let day = chrono::NaiveDate::from_ymd_opt(2026, 10, 2).unwrap();
+        session
+            .add_log("Shipped the ledger export", day, vec!["billing".into()])
+            .unwrap();
+        session
+            .add_log(
+                "Reviewed two pull requests",
+                day - chrono::Duration::days(10),
+                vec![],
+            )
+            .unwrap();
+        let state = Arc::new(AppState::new(4747, TOKEN.into(), paths));
+
+        let md = send(&state, Request::get("/export?format=md&period=2026-10"), "").await;
+        assert_eq!(md.status(), StatusCode::OK);
+        assert_eq!(
+            md.headers()[header::CONTENT_TYPE],
+            "text/markdown; charset=utf-8"
+        );
+        assert!(md.headers()[header::CONTENT_DISPOSITION]
+            .to_str()
+            .unwrap()
+            .contains("attachment"));
+        assert!(md.headers()[header::CONTENT_DISPOSITION]
+            .to_str()
+            .unwrap()
+            .contains("upleveler-export.md"));
+        let body_md = body(md).await;
+        assert!(body_md.contains("Shipped the ledger export"), "{body_md}");
+        assert!(!body_md.contains("Reviewed two pull requests"), "{body_md}");
+
+        let csv = send(&state, Request::get("/export?format=csv&period="), "").await;
+        assert_eq!(
+            csv.headers()[header::CONTENT_TYPE],
+            "text/csv; charset=utf-8"
+        );
+        let body_csv = body(csv).await;
+        assert!(
+            body_csv.contains("Shipped the ledger export")
+                && body_csv.contains("Reviewed two pull requests"),
+            "{body_csv}"
+        );
+
+        let bad = send(&state, Request::get("/export?format=md&period=nope"), "").await;
+        assert_eq!(bad.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let page = body(bad).await;
+        assert!(
+            page.contains("Unknown period") && page.contains("value=\"nope\""),
+            "{page}"
         );
     }
 

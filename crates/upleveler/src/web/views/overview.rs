@@ -8,12 +8,25 @@ use crate::web::illustrations;
 use crate::web::ui::{self, Button, Card, Chip};
 use maud::{html, Markup};
 
+fn ladder_import_action() -> Markup {
+    html! {
+        div.empty-action-stack {
+            (ui::code_block("upleveler ladder import <file>"))
+            p.hint { "Or run this in the terminal app: " span.mono { "/ladder import @file" } }
+        }
+    }
+}
+
 fn readiness_card(data: &DashboardData) -> Markup {
     let target = data.target.as_deref();
     let body = match (&data.gap, &data.ladder) {
         (Some(gap), _) => html! {
             h2.card-title { "Readiness for " (gap.target) }
-            p.muted.card-lead { "From the gap analysis on " span.mono { (gap.date) } "." }
+            @if gap.counted {
+                p.muted.card-lead { "Counted on " span.mono { (gap.date) } " from the entries you tied to each expectation, not assessed." }
+            } @else {
+                p.muted.card-lead { "From the gap analysis on " span.mono { (gap.date) } "." }
+            }
             (ui::readiness(gap))
             @if !gap.priorities.is_empty() {
                 h3.card-subtitle { "Next" }
@@ -22,7 +35,7 @@ fn readiness_card(data: &DashboardData) -> Markup {
         },
         (None, Some(_)) if !data.ai => html! {
             h2.card-title { "Readiness" @if let Some(t) = target { " for " (t) } }
-            (ui::empty_state(None, "Rating your work against the ladder needs AI. Without it, the promotion document lists your entries by expectation.", Some(ui::button(Button::Primary, "Write a promotion document", Some("/reports")))))
+            (ui::empty_state(None, "No coverage yet. Tie entries to expectations by writing an id in them, like #L3.mentoring.1, then count them on Reports.", Some(ui::button(Button::Primary, "Count coverage", Some("/reports")))))
         },
         (None, Some(_)) => html! {
             h2.card-title { "Readiness" @if let Some(t) = target { " for " (t) } }
@@ -30,7 +43,7 @@ fn readiness_card(data: &DashboardData) -> Markup {
         },
         (None, None) => html! {
             h2.card-title { "Readiness" }
-            (ui::empty_state(Some(illustrations::no_ladder()), "No ladder imported yet. Import your company's levels to measure against them.", Some(ui::code_block("upleveler ladder import <file>"))))
+            (ui::empty_state(Some(illustrations::no_ladder()), "No ladder imported yet. Import your company's levels to measure against them.", Some(ladder_import_action())))
         },
     };
     ui::card(Card::Raised, body)
@@ -42,7 +55,7 @@ fn reports_card(data: &DashboardData) -> Markup {
         html! {
             h2.card-title { "Latest reports" }
             @if data.reports.is_empty() {
-                (ui::empty_state(None, "No reports yet.", Some(ui::code_block("upleveler brag"))))
+                (ui::empty_state(None, "No reports yet.", Some(ui::button(Button::Ghost, "Run a promotion document", Some(Tab::Reports.path())))))
             } @else {
                 div.report-list {
                     @for r in data.reports.iter().take(3) {
@@ -129,7 +142,7 @@ pub fn overview_body(data: &DashboardData) -> Markup {
             (ui::card(Card::Dashed, ui::empty_state(
                 Some(illustrations::no_logs()),
                 "Nothing logged yet. Write down what you did today, in any language.",
-                Some(ui::code_block("upleveler log \"What you did today\"")),
+                Some(ui::button(Button::Primary, "Add an entry", Some(Tab::Logs.path()))),
             )))
         }
     } else {
@@ -140,7 +153,6 @@ pub fn overview_body(data: &DashboardData) -> Markup {
                 (ui::stat(&streak.to_string(), "Day streak", Some(&plural(streak, "working day in a row", "working days in a row"))))
                 @match strong {
                     Some((strong, total)) => (ui::stat(&format!("{strong} of {total}"), "Strong evidence", Some("expectations for your target level"))),
-                    None if !data.ai => (ui::stat("–", "Strong evidence", Some("needs AI"))),
                     None => (ui::stat("–", "Strong evidence", Some("run a gap analysis to see it"))),
                 }
             }

@@ -158,7 +158,7 @@ pub fn welcome(status: &Status, width: u16) -> Lines {
                     spans.push(Span::styled(label, theme::dim()));
                 }
                 _ if !status.ai => spans.push(Span::styled(
-                    "/brag lists your work by expectation",
+                    "tie entries with #L3.mentoring.1, then /gap",
                     theme::dim(),
                 )),
                 _ => spans.push(Span::styled(
@@ -225,7 +225,12 @@ pub fn gap(summary: &GapSummary, path: &std::path::Path, width: u16) -> Lines {
         Span::styled("● ", theme::accent()),
         Span::styled(
             format!(
-                "Gap analysis {} → {}",
+                "{} {} → {}",
+                if summary.counted {
+                    "Coverage (counted without AI)"
+                } else {
+                    "Gap analysis"
+                },
                 summary.current.as_deref().unwrap_or("?"),
                 summary.target
             ),
@@ -619,6 +624,7 @@ mod tests {
             last: None,
         };
         GapSummary {
+            counted: false,
             date: chrono::NaiveDate::from_ymd_opt(2026, 10, 5).unwrap(),
             current: Some("L2".into()),
             target: "L3".into(),

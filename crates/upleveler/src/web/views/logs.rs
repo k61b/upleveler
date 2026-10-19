@@ -2,7 +2,8 @@
 //! The filter is a plain GET form; `assets/app.js` refreshes `#log-results` as
 //! you type.
 
-use super::{layout, view_header, Tab};
+use super::{import_upload_form, layout, view_header, Tab};
+use crate::export::Format;
 use crate::import::ImportedFile;
 use crate::store::Entry;
 use crate::web::data::DashboardData;
@@ -36,7 +37,7 @@ pub fn log_results(data: &DashboardData, query: &str, edit: Option<&EditForm>) -
             }
             @if matched.is_empty() {
                 @if query.is_empty() {
-                    (ui::empty_state(Some(illustrations::no_logs()), "Nothing logged yet.", Some(ui::code_block("upleveler log \"What you did today\""))))
+                    (ui::empty_state(Some(illustrations::no_logs()), "Nothing logged yet.", Some(ui::button(Button::Primary, "Add an entry", Some(Tab::Logs.path())))))
                 } @else {
                     (ui::empty_state(Some(illustrations::nothing_matches()), "Nothing matches this filter.", Some(ui::button(Button::Ghost, "Clear the filter", Some(Tab::Logs.path())))))
                 }
@@ -96,8 +97,66 @@ impl EditForm {
             id: entry.id.clone(),
             text: entry.text.clone(),
             date: entry.date.to_string(),
-            tags: entry.tags.join(", "),
+            // Ties to expectations are edited with the tags, so saving keeps them.
+            tags: entry
+                .tags
+                .iter()
+                .chain(&entry.linked)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(", "),
             notice: None,
+        }
+    }
+}
+
+/// The "export logs" control: format and an optional period.
+pub struct ExportForm {
+    pub format: Format,
+    pub period: String,
+    pub notice: Option<(Alert, String)>,
+}
+
+impl Default for ExportForm {
+    fn default() -> Self {
+        Self {
+            format: Format::Md,
+            period: String::new(),
+            notice: None,
+        }
+    }
+}
+
+fn format_label(format: Format) -> &'static str {
+    match format {
+        Format::Md => "Markdown",
+        Format::Csv => "CSV",
+        Format::Xlsx => "Excel",
+        Format::Jsonl => "JSON Lines",
+    }
+}
+
+fn export_form(form: &ExportForm) -> Markup {
+    html! {
+        form.export-form method="get" action="/export" {
+            h3.card-subtitle { "Export your log" }
+            @if let Some((kind, text)) = &form.notice { (ui::alert(*kind, text)) }
+            div.add-entry-row {
+                div.field {
+                    label.field-label for="export-format" { "Format" }
+                    select #export-format.input name="format" {
+                        @for fmt in [Format::Md, Format::Csv, Format::Xlsx, Format::Jsonl] {
+                            option value=(fmt.extension()) selected[form.format == fmt] { (format_label(fmt)) }
+                        }
+                    }
+                }
+                div.field.field--grow {
+                    label.field-label for="export-period" { "Period " span.muted { "(optional)" } }
+                    input #export-period.input type="text" name="period" value=(form.period)
+                        placeholder="2026-Q3, H2 or 90d" autocomplete="off";
+                }
+                button.btn.btn--outline type="submit" { "Export" }
+            }
         }
     }
 }
@@ -156,10 +215,13 @@ fn link_host(url: &str) -> &str {
 fn log_entry_content(entry: &Entry) -> Markup {
     html! {
         p.log-text { (entry.text) }
-        @if !entry.tags.is_empty() || !entry.links.is_empty() {
+        @if !entry.tags.is_empty() || !entry.links.is_empty() || !entry.linked.is_empty() {
             div.log-meta {
                 @for tag in &entry.tags {
                     a.chip.chip--mono href=(format!("/logs?q={}", ui::query_escape(tag))) { "#" (tag) }
+                }
+                @for id in &entry.linked {
+                    a.chip.chip--mono href="/ladder" title="Evidence for this expectation" { "→ " (id) }
                 }
                 @for link in &entry.links {
                     a.log-link href=(link) target="_blank" rel="noreferrer noopener" { (link_host(link)) " ↗" }
@@ -201,9 +263,13 @@ fn import_meta(f: &ImportedFile) -> Markup {
 }
 
 /// The files entries were imported from, each with a way to take its entries out again.
-fn imports(data: &DashboardData) -> Markup {
+fn imports(data: &DashboardData, import_notice: Option<&(Alert, String)>) -> Markup {
     let files = data.imported();
     html! {
+        div.imports {
+            h3.card-subtitle { "Bring in old notes" }
+            (import_upload_form(import_notice))
+        }
         @if !files.is_empty() {
             details.imports {
                 summary { "Imported files " span.muted { "(" (files.len()) ")" } }
@@ -251,11 +317,27 @@ pub fn remove_import(data: &DashboardData, file: &str) -> Option<Markup> {
 }
 
 pub fn logs(data: &DashboardData, query: &str) -> Markup {
-    logs_with(data, query, &AddForm::empty(data.today))
+    logs_with(
+        data,
+        query,
+        &AddForm::empty(data.today),
+        &ExportForm::default(),
+    )
 }
 
-/// The Logs page with the add form in a given state.
-pub fn logs_with(data: &DashboardData, query: &str, form: &AddForm) -> Markup {
+/// The Logs page with the add and export forms in a given state.
+pub fn logs_with(data: &DashboardData, query: &str, form: &AddForm, export: &ExportForm) -> Markup {
+    logs_with_import(data, query, form, export, None)
+}
+
+/// The Logs page with an optional message on the import form.
+pub fn logs_with_import(
+    data: &DashboardData,
+    query: &str,
+    form: &AddForm,
+    export: &ExportForm,
+    import_notice: Option<&(Alert, String)>,
+) -> Markup {
     layout(
         Tab::Logs.title(),
         Some(Tab::Logs),
@@ -264,7 +346,8 @@ pub fn logs_with(data: &DashboardData, query: &str, form: &AddForm) -> Markup {
                 (view_header(Tab::Logs.title(), html! { "Everything you have logged, newest first. Add an entry here or in the terminal app." }, None))
                 div.paper.panel {
                     (add_form(form))
-                    (imports(data))
+                    (export_form(export))
+                    (imports(data, import_notice))
                     form.filter role="search" method="get" action=(Tab::Logs.path()) data-live="#log-results" {
                         label.visually-hidden for="q" { "Filter logs" }
                         input #q.input type="search" name="q" value=(query) placeholder="Filter by text, tag or date" autocomplete="off";

@@ -204,7 +204,8 @@ impl Session {
     }
 
     /// Adds an entry; `None` means the same text was already logged that day.
-    /// `#tags` in the text become tags.
+    /// `#tags` in the text become tags; a tag that is an expectation id of
+    /// the ladder (`#L3.mentoring.1`) ties the entry to that expectation.
     pub fn add_log(
         &self,
         text: &str,
@@ -215,8 +216,35 @@ impl Session {
         let (text, found) = crate::intent::hashtags(text);
         let text = crate::limits::text(&text, TEXT, LOG_EMPTY, LOG_LONG)?;
         tags.extend(found);
-        let entry = Entry::new(date, text, tags, "manual");
+        let (tags, linked) = self.split_links(tags);
+        let mut entry = Entry::new(date, text, tags, "manual");
+        entry.expectations = linked.clone();
+        entry.linked = linked;
         Ok(self.store.add_new(vec![entry])?.into_iter().next())
+    }
+
+    /// Tags that name an expectation of the ladder (any case) as its id; the
+    /// rest stay tags.
+    fn split_links(&self, tags: Vec<String>) -> (Vec<String>, Vec<String>) {
+        let Some(ladder) = self.ladder().ok().flatten() else {
+            return (tags, Vec::new());
+        };
+        let mut links = Vec::new();
+        let mut rest = Vec::new();
+        for tag in tags {
+            let id = tag.trim().trim_start_matches('#');
+            let found = ladder
+                .levels
+                .iter()
+                .flat_map(|l| &l.expectations)
+                .find(|x| x.id.eq_ignore_ascii_case(id));
+            match found {
+                Some(x) if !links.contains(&x.id) => links.push(x.id.clone()),
+                Some(_) => {}
+                None => rest.push(tag),
+            }
+        }
+        (rest, links)
     }
 
     pub fn remove_entry(&self, id: &str) -> Result<Option<Entry>> {
@@ -258,8 +286,24 @@ impl Session {
                 }
             }
         }
+        // Expectation ids among the tags tie the entry to them: given tags
+        // replace the ties, ids written in the text add to them.
+        let (tags, links) = match tags {
+            Some(tags) => {
+                let (tags, links) = self.split_links(tags);
+                (Some(tags), Some(links))
+            }
+            None => (None, None),
+        };
+        let (found, found_links) = self.split_links(found);
         let tags_given = tags.is_some();
         self.store.update_entry(id, |entry| {
+            let old_links = entry.linked.clone();
+            if let Some(links) = links {
+                entry.linked = links;
+            }
+            entry.linked.extend(found_links);
+            entry.linked.dedup();
             if let Some(text) = &text {
                 if !same_words(&entry.text, text) {
                     entry.expectations.clear();
@@ -278,12 +322,35 @@ impl Session {
                 all.extend(found);
                 entry.tags = crate::store::normalize_tags(all);
             }
+            entry.expectations.retain(|x| !old_links.contains(x));
+            entry.expectations.extend(entry.linked.iter().cloned());
+            entry.expectations.sort();
+            entry.expectations.dedup();
             if text.is_some() || date.is_some() {
                 entry.id = crate::store::make_id(entry.date, &entry.text);
                 entry.links = crate::store::extract_links(&entry.text);
                 entry.links.dedup();
             }
         })
+    }
+
+    /// The log entry a full id or a short hash (at least 4 characters of it) picks.
+    pub fn find_entry(&self, key: &str) -> Result<Entry> {
+        let key = key.trim().to_lowercase();
+        let hash = key.rsplit('-').next().unwrap_or(&key).to_string();
+        if !key.contains('-') && hash.chars().count() < 4 {
+            bail!("give at least 4 characters of the entry's hash (see `upleveler list --ids`)");
+        }
+        let entries = self.entries()?;
+        let matches: Vec<&Entry> = entries
+            .iter()
+            .filter(|e| e.id == key || e.id.rsplit('-').next().is_some_and(|h| h.starts_with(&key)))
+            .collect();
+        match matches.as_slice() {
+            [one] => Ok((*one).clone()),
+            [] => bail!("no entry {hash}; see ids with `upleveler list --ids`"),
+            more => bail!("{hash} matches {} entries; type more of it", more.len()),
+        }
     }
 
     pub fn people(&self) -> Result<People> {
@@ -956,7 +1023,15 @@ impl Session {
         progress: Progress,
     ) -> Result<Analysis<GapReport>> {
         let Some(llm) = llm else {
-            bail!("the gap analysis rates your work against the ladder, which needs AI. {AI_OFF} Without AI, the promotion document lists your entries by expectation.");
+            // Without AI: count the entries tied to each expectation.
+            let ladder = Ladder::require(&self.paths.ladder)?;
+            let levels = Levels::resolve(&self.cfg, &ladder)?;
+            let entries = self.store.load()?;
+            if entries.is_empty() {
+                bail!("{NO_ENTRIES}");
+            }
+            let report = analyze::gap_plain(&self.cfg, &levels, &entries, range)?;
+            return self.save_gap(report, Vec::new());
         };
         let (ladder, entries, warnings) = self.prepare(llm, range, progress)?;
         let levels = Levels::resolve(&self.cfg, &ladder)?;
@@ -976,6 +1051,11 @@ impl Session {
         if !rows.is_empty() && report.summary.count("unknown") == rows.len() {
             bail!("the model could not rate any expectation, so no gap report was saved. Check the model with /model and try again.");
         }
+        self.save_gap(report, warnings)
+    }
+
+    /// Saves a gap report and its summary, which becomes the latest gap.
+    fn save_gap(&self, report: GapReport, warnings: Vec<String>) -> Result<Analysis<GapReport>> {
         let name = format!("gap-{}", today());
         let path = self.save_report(&name, &report.markdown)?;
         fs::write(
@@ -1360,6 +1440,7 @@ mod tests {
         assert!(s.latest_gap().is_none());
         fs::create_dir_all(&s.paths.reports).unwrap();
         let summary = GapSummary {
+            counted: false,
             date: d(10, 5),
             current: Some("L2".into()),
             target: "L3".into(),
@@ -1574,11 +1655,38 @@ mod tests {
         let ladder = Ladder::from_yaml(include_str!("../ladder.example.yaml")).unwrap();
         s.save_ladder(&ladder).unwrap();
         s.set_levels(Some("L2"), Some("L3")).unwrap();
-        let Err(err) = s.gap(None, None, &mut crate::no_progress) else {
-            panic!("a gap analysis without AI");
-        };
-        assert!(format!("{err:#}").contains("needs AI"));
-        assert!(s.latest_gap().is_none());
+        // Without AI the gap analysis counts the entries tied to each
+        // expectation, here with `#L3.mentoring.1`.
+        let tied = s
+            .add_log(
+                "Paired with @ada on retries #l3.mentoring.1 #pairing",
+                d(10, 9),
+                vec![],
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(tied.linked, vec!["L3.mentoring.1"]);
+        assert_eq!(tied.expectations, vec!["L3.mentoring.1"]);
+        assert_eq!(tied.tags, vec!["pairing"]);
+        let gap = s.gap(None, None, &mut crate::no_progress).unwrap();
+        assert!(gap.output.summary.counted);
+        let row = gap
+            .output
+            .summary
+            .rows
+            .iter()
+            .find(|r| r.id == "L3.mentoring.1")
+            .unwrap();
+        assert_eq!((row.count, row.rating.as_str()), (1, "partial"));
+        assert!(gap.output.markdown.contains("not an assessment"));
+        assert!(s.latest_gap().unwrap().counted);
+
+        // Editing the tags can untie it.
+        let untied = s
+            .edit_entry(&tied.id, None, None, Some(vec!["pairing".into()]))
+            .unwrap()
+            .unwrap();
+        assert!(untied.linked.is_empty() && untied.expectations.is_empty());
     }
 
     /// A gap analysis the model could not rate at all is not saved, so the
@@ -1791,6 +1899,53 @@ mod tests {
             )
             .unwrap_err();
         assert!(format!("{err:#}").contains("longer than 4000 characters"));
+    }
+
+    #[test]
+    fn find_entry_by_full_id_or_hash_suffix() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = Session::at(Paths::at(dir.path().to_path_buf())).unwrap();
+        let a = s
+            .add_log("Fixed the flaky deploy check", d(10, 5), vec!["ci".into()])
+            .unwrap()
+            .unwrap();
+        let b = s
+            .add_log("Reviewed the auth refactor", d(10, 6), vec![])
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(s.find_entry(&a.id).unwrap().id, a.id);
+        let hash = a.id.rsplit('-').next().unwrap();
+        assert_eq!(s.find_entry(hash).unwrap().id, a.id);
+        assert_eq!(s.find_entry(&hash[..4]).unwrap().id, a.id);
+        assert_eq!(s.find_entry(&b.id).unwrap().id, b.id);
+
+        let err = s.find_entry("abcd").unwrap_err().to_string();
+        assert!(err.contains("no entry abcd"), "{err}");
+        assert!(err.contains("upleveler list --ids"), "{err}");
+
+        let err = s.find_entry("abc").unwrap_err().to_string();
+        assert!(err.contains("at least 4 characters"), "{err}");
+    }
+
+    #[test]
+    fn find_entry_rejects_ambiguous_prefix() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = Session::at(Paths::at(dir.path().to_path_buf())).unwrap();
+        s.store
+            .append(&[
+                Entry::new(d(10, 5), "First entry", vec![], "manual"),
+                Entry::new(d(10, 6), "Second entry", vec![], "manual"),
+            ])
+            .unwrap();
+        let mut entries = s.entries().unwrap();
+        entries[0].id = "2026-10-05-00000000".into();
+        entries[1].id = "2026-10-06-00001111".into();
+        s.store.rewrite(&entries).unwrap();
+
+        let err = s.find_entry("0000").unwrap_err().to_string();
+        assert!(err.contains("matches 2 entries"), "{err}");
+        assert!(err.contains("type more of it"), "{err}");
     }
 
     /// Editing a note keeps its id; writing the old text again the same day is

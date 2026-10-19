@@ -115,13 +115,45 @@ enum Command {
         #[arg(long = "tag", short)]
         tags: Vec<String>,
     },
+    /// Edit a log entry
+    #[command(
+        after_help = "Examples:\n  upleveler edit 35c0f6d3 --text \"Fixed the flaky deploy check\"\n  upleveler edit 35c0 --date yesterday\n  upleveler edit 35c0 --tag incident --tag oncall\n  upleveler edit 35c0 --no-tags"
+    )]
+    Edit {
+        /// Entry id or at least 4 characters of its hash (see `upleveler list --ids`)
+        id: String,
+        /// New text; `#tags` in it become tags
+        #[arg(long)]
+        text: Option<String>,
+        /// New date
+        #[arg(long)]
+        date: Option<String>,
+        /// Replace the tags, repeatable
+        #[arg(long = "tag", short)]
+        tags: Vec<String>,
+        /// Clear all tags
+        #[arg(long, conflicts_with = "tags")]
+        no_tags: bool,
+    },
+    /// Remove a log entry
+    #[command(after_help = "Examples:\n  upleveler remove 35c0f6d3\n  upleveler remove 35c0 -y")]
+    Remove {
+        /// Entry id or at least 4 characters of its hash (see `upleveler list --ids`)
+        id: String,
+        /// Do not ask for confirmation
+        #[arg(long, short)]
+        yes: bool,
+    },
     /// List log entries
     #[command(
-        after_help = "Examples:\n  upleveler list\n  upleveler list --period this-week\n  upleveler list --period 2026-Q3 --tag incident\n  upleveler list --grep \"refactor\" -n 10"
+        after_help = "Examples:\n  upleveler list\n  upleveler list --ids\n  upleveler list --period this-week\n  upleveler list --period 2026-Q3 --tag incident\n  upleveler list --grep \"refactor\" -n 10"
     )]
     List {
         #[command(flatten)]
         range: RangeArgs,
+        /// Show the 8-character entry hash before each line
+        #[arg(long)]
+        ids: bool,
         /// Only entries with this tag
         #[arg(long)]
         tag: Option<String>,
@@ -565,8 +597,17 @@ fn run(cli: Cli) -> Result<()> {
         }
         Some(Command::Goal { action }) => goal_cmd(&session, action),
         Some(Command::Log { text, date, tags }) => log(&session, text, date, tags),
+        Some(Command::Edit {
+            id,
+            text,
+            date,
+            tags,
+            no_tags,
+        }) => edit(&session, id, text, date, tags, no_tags),
+        Some(Command::Remove { id, yes }) => remove(&session, id, yes),
         Some(Command::List {
             range,
+            ids,
             tag,
             grep,
             limit,
@@ -582,7 +623,11 @@ fn run(cli: Cli) -> Result<()> {
             let matched = filter.apply(&entries);
             let skip = limit.map_or(0, |n| matched.len().saturating_sub(n));
             for e in &matched[skip..] {
-                println!("{}", e.line());
+                if ids {
+                    println!("{}  {}", entry_hash(e), e.line());
+                } else {
+                    println!("{}", e.line());
+                }
             }
             eprintln!("{}", plural(matched.len(), "entry", "entries"));
             Ok(())
@@ -996,7 +1041,12 @@ fn log(
         };
     }
     match session.add_log(&text, date, tags)? {
-        Some(e) => println!("Logged: {}", e.line()),
+        Some(e) if e.linked.is_empty() => println!("Logged: {}", e.line()),
+        Some(e) => println!(
+            "Logged: {}\n  evidence for {}",
+            e.line(),
+            e.linked.join(", ")
+        ),
         None => println!(
             "Already logged: {}",
             Entry::new(date, &text, vec![], "manual").line()
@@ -1008,6 +1058,77 @@ fn log(
         );
     }
     Ok(())
+}
+
+/// The 8-character hash at the end of an entry id.
+fn entry_hash(e: &Entry) -> &str {
+    e.id.rsplit('-').next().unwrap_or(&e.id)
+}
+
+fn edit(
+    session: &Session,
+    id: String,
+    text: Option<String>,
+    date: Option<String>,
+    tags: Vec<String>,
+    no_tags: bool,
+) -> Result<()> {
+    let entry = session.find_entry(&id)?;
+    let date = date
+        .as_deref()
+        .map(|d| parse_date(d, today()).with_context(|| format!("unrecognized date {d:?}")))
+        .transpose()?;
+    let (text, tags) = if text.is_none() && date.is_none() && tags.is_empty() && !no_tags {
+        let current = entry.text.clone();
+        let edited = if io::stdin().is_terminal() {
+            upleveler::tui::edit_in_editor(&current)?
+        } else {
+            let mut buf = String::new();
+            io::stdin().read_to_string(&mut buf)?;
+            buf
+        };
+        (Some(edited), None)
+    } else {
+        let tags = if no_tags {
+            Some(Vec::new())
+        } else if !tags.is_empty() {
+            Some(tags)
+        } else {
+            None
+        };
+        (text, tags)
+    };
+    match session.edit_entry(&entry.id, text.as_deref(), date, tags)? {
+        Some(e) => {
+            println!("Updated: {}  (id {})", e.line(), entry_hash(&e));
+            for handle in session.unknown_mentions(&e.text) {
+                eprintln!(
+                    "note: @{handle} is not in your people yet: upleveler person add {handle} --name \"…\""
+                );
+            }
+            Ok(())
+        }
+        None => {
+            bail!("no entry with id {} (it may have been removed)", entry.id);
+        }
+    }
+}
+
+fn remove(session: &Session, id: String, yes: bool) -> Result<()> {
+    let entry = session.find_entry(&id)?;
+    if !confirm(&format!("Remove the log entry: {}?", entry.line()), yes)? {
+        println!("Nothing removed.");
+        return Ok(());
+    }
+    match session.remove_entry(&entry.id)? {
+        Some(e) => {
+            println!("Removed: {}", e.line());
+            Ok(())
+        }
+        None => {
+            bail!("no entry with id {} (it may have been removed)", entry.id);
+        }
+    }
 }
 
 /// "1 note", "2 notes".
@@ -1737,5 +1858,54 @@ mod cli_tests {
         assert!(bad.is_err(), "--month and --from must conflict");
         let bad = Cli::try_parse_from(["upleveler", "summary", "--week", "--month"]);
         assert!(bad.is_err(), "--week and --month must conflict");
+    }
+
+    #[test]
+    fn edit_and_remove_commands_parse() {
+        let edit = Cli::try_parse_from([
+            "upleveler",
+            "edit",
+            "35c0f6d3",
+            "--text",
+            "Fixed the flaky deploy check",
+            "--date",
+            "yesterday",
+            "--tag",
+            "incident",
+            "--tag",
+            "oncall",
+        ])
+        .unwrap();
+        assert!(matches!(
+            edit.command,
+            Some(Command::Edit {
+                text: Some(_),
+                date: Some(_),
+                tags,
+                ..
+            }) if tags.len() == 2
+        ));
+
+        let edit_no_tags = Cli::try_parse_from(["upleveler", "edit", "35c0", "--no-tags"]).unwrap();
+        assert!(matches!(
+            edit_no_tags.command,
+            Some(Command::Edit { no_tags: true, .. })
+        ));
+
+        let remove = Cli::try_parse_from(["upleveler", "remove", "35c0f6d3", "-y"]).unwrap();
+        assert!(matches!(
+            remove.command,
+            Some(Command::Remove { yes: true, .. })
+        ));
+
+        let list_ids = Cli::try_parse_from(["upleveler", "list", "--ids"]).unwrap();
+        assert!(matches!(
+            list_ids.command,
+            Some(Command::List { ids: true, .. })
+        ));
+
+        // --tag and --no-tags cannot be used together.
+        let bad = Cli::try_parse_from(["upleveler", "edit", "35c0", "--tag", "x", "--no-tags"]);
+        assert!(bad.is_err(), "--tag and --no-tags must conflict");
     }
 }

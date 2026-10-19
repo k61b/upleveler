@@ -25,7 +25,7 @@ pub const COMMANDS: &[Command] = &[
     Command {
         name: "gap",
         args: "[period]",
-        help: "compare your logs with your target level (needs AI)",
+        help: "compare your logs with your target level (a count without AI)",
         runs_bare: true,
     },
     Command {
@@ -77,6 +77,18 @@ pub const COMMANDS: &[Command] = &[
         runs_bare: true,
     },
     Command {
+        name: "edit",
+        args: "<id> <new text>",
+        help: "edit a log entry",
+        runs_bare: false,
+    },
+    Command {
+        name: "delete",
+        args: "<id>",
+        help: "delete a log entry",
+        runs_bare: false,
+    },
+    Command {
         name: "undo",
         args: "",
         help: "remove the last entry you logged here",
@@ -121,7 +133,7 @@ pub const COMMANDS: &[Command] = &[
     Command {
         name: "dashboard",
         args: "",
-        help: "progress, activity heatmap, logs and reports",
+        help: "progress, logs, ladder, reports, people and goals",
         runs_bare: true,
     },
     Command {

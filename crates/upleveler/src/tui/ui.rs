@@ -21,16 +21,34 @@ fn panel_lines(app: &App, width: u16) -> Vec<Line<'static>> {
         match panel {
             Panel::Help => {
                 lines.push(Line::styled("Commands", theme::accent_bold()));
+                // Commands without arguments or much to say share one line.
+                let short = ["init", "clear", "help", "quit"];
                 for c in super::commands::COMMANDS {
+                    if short.contains(&c.name) {
+                        continue;
+                    }
                     lines.push(Line::from(fit(
                         vec![
                             Span::styled(format!("  /{:<10}", c.name), theme::accent()),
-                            Span::styled(format!("{:<28}", c.args), theme::dim()),
+                            Span::styled(format!("{:<24} ", c.args), theme::dim()),
                             Span::raw(c.help),
                         ],
                         w,
                     )));
                 }
+                lines.push(Line::from(fit(
+                    vec![
+                        Span::styled("  /init", theme::accent()),
+                        Span::raw(" setup again   "),
+                        Span::styled("/clear", theme::accent()),
+                        Span::raw(" the screen   "),
+                        Span::styled("/help", theme::accent()),
+                        Span::raw(" this list   "),
+                        Span::styled("/quit", theme::accent()),
+                        Span::raw(" exit"),
+                    ],
+                    w,
+                )));
                 lines.push(Line::styled("Keys", theme::accent_bold()));
                 let rows: [&[(&str, &str)]; 5] = [
                     &[
@@ -45,11 +63,15 @@ fn panel_lines(app: &App, width: u16) -> Vec<Line<'static>> {
                         ("ctrl+l", "clear"),
                     ],
                     &[("yesterday …, dün …, 2026-10-01 …", "log it for that day")],
-                    &[("#tag", "adds a tag"), ("#goal-2", "counts toward goal 2")],
                     &[
-                        ("in /dashboard: 1-6 ← →", "tabs"),
-                        ("j k", "move"),
-                        ("/", "filter logs"),
+                        ("#tag", "adds a tag"),
+                        ("#goal-2", "counts toward goal 2"),
+                        ("#L3.mentoring.1", "evidence"),
+                    ],
+                    &[
+                        ("in /dashboard: 1-6", "tabs"),
+                        ("e", "edit"),
+                        ("d", "delete"),
                         ("q", "back"),
                     ],
                 ];
