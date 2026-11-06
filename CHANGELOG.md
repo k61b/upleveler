@@ -1,8 +1,8 @@
 # Changelog
 
-## Unreleased
+## 2.7.0
 
-When the model is not on this computer, Upleveler records every request it sends there, and keeps notes about people here unless you allow them.
+Upleveler can be used with your company's own AI endpoint without your notes becoming its data: it records what it sends, hides who an entry is about, keeps private and sensitive text on this computer, and follows an AI policy your security team installs, which can be written with the model's help.
 
 - Every request to an endpoint that is not on this computer is recorded in `~/.upleveler/audit.jsonl`: when, where and how many characters, never the text. `/audit` in the app and `upleveler audit` (with `--limit N`) show the last records; the browser Overview shows a summary when the endpoint is remote or anything has been sent.
 - Notes about people, and the `about` text of their profiles, go to such an endpoint only when `share_notes = true`, which the setup asks about. A 1:1 prep still lists them in the saved report, with a line saying they were kept on this computer. A model on this computer always gets them, as before.
