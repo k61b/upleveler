@@ -99,7 +99,7 @@ fn import_map_gap_export() {
         &mut upleveler::no_progress,
     )
     .unwrap();
-    let plan = import::plan(&collected.drafts, &HashSet::new(), None);
+    let plan = import::plan(&collected.drafts, &HashSet::new(), None, false);
     assert_eq!(plan.undated.len(), 0);
     let dates: Vec<String> = plan.new.iter().map(|e| e.date.to_string()).collect();
     assert_eq!(
@@ -127,7 +127,12 @@ fn import_map_gap_export() {
     )
     .unwrap();
     let existing: HashSet<String> = store.load().unwrap().into_iter().map(|e| e.id).collect();
-    assert_eq!(import::plan(&again.drafts, &existing, None).new.len(), 0);
+    assert_eq!(
+        import::plan(&again.drafts, &existing, None, false)
+            .new
+            .len(),
+        0
+    );
 
     // A spreadsheet log, one row of which repeats a text entry.
     let xlsx = dir.path().join("old.xlsx");
@@ -165,7 +170,7 @@ fn import_map_gap_export() {
     )
     .unwrap();
     let existing: HashSet<String> = store.load().unwrap().into_iter().map(|e| e.id).collect();
-    let plan = import::plan(&collected.drafts, &existing, None);
+    let plan = import::plan(&collected.drafts, &existing, None, false);
     assert_eq!(plan.duplicates, 1);
     assert_eq!(plan.new.len(), 2);
     assert!(plan

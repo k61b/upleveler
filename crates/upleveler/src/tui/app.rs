@@ -13,6 +13,7 @@ use crate::intent::{self, Intent};
 use crate::ladder::Ladder;
 use crate::llm::Message;
 use crate::people::NoteKind;
+use crate::policy::AiMode;
 use crate::session::{today, Applied, ImportPreview, RemovedImport, Session, Status};
 use crate::store::Filter;
 use chrono::NaiveDate;
@@ -67,9 +68,13 @@ pub enum Purpose {
     ModelsFailed,
     ModelName,
     OpenaiUrl,
+    /// Choosing one of the policy's approved endpoints (prefilled).
+    ApprovedEndpoint,
     OpenaiModel,
     OpenaiKeyEnv,
     ConfirmRemote,
+    /// After a remote endpoint is approved: whether to send notes about people.
+    ShareNotes,
     Language,
     LadderSource,
     LadderPath,
@@ -78,6 +83,14 @@ pub enum Purpose {
     Model,
     /// `/import remove`: the imported file whose entries to remove.
     RemoveImport,
+    /// A choice for text that looks sensitive at a model that is not on this
+    /// computer: keep it here, send it anyway, or edit it. Holds the text.
+    Sensitive(String),
+    /// Where a finished policy goes: (its text, whether it is only the
+    /// example to edit, which must not become the person's own policy).
+    PolicySave(String, bool),
+    /// The file to save a policy to, holding its text.
+    PolicyPath(String),
 
     /// Whose notes the notes sheets of this workbook hold.
     ImportPerson(PathBuf, Vec<(String, SheetKind)>),
@@ -148,6 +161,11 @@ enum Undo {
     },
     /// A deleted log entry, to put back.
     DeletedEntry(crate::store::Entry),
+    /// A private flag changed with `/private` or `/share`: (id, what it was).
+    Private {
+        id: String,
+        was: bool,
+    },
     Note(String),
     Checkin {
         goal: u32,
@@ -200,6 +218,14 @@ pub enum Popup {
     People(Vec<(String, String)>),
 }
 
+/// A policy being written question by question: what is settled so far, the
+/// questions answered, and the one waiting for an answer.
+struct PolicyChat {
+    draft: crate::policy_draft::Draft,
+    turns: Vec<crate::policy_draft::Turn>,
+    question: Option<String>,
+}
+
 /// `people.yaml` as last read, and the (modified time, size) it had then.
 type PeopleCache = Option<((Option<std::time::SystemTime>, u64), crate::people::People)>;
 
@@ -236,6 +262,8 @@ pub struct App {
     /// $EDITOR; see `Output::Import`.
     carried: Option<Carried>,
     wizard: bool,
+    /// A company AI policy being written with `/policy new`.
+    policy_chat: Option<PolicyChat>,
     /// The link of the dashboard `/web` started, so a second `/web` reuses it.
     #[cfg(feature = "server")]
     web_url: Option<String>,
@@ -259,6 +287,61 @@ fn select(title: &str, hint: &str, items: Vec<Item>, purpose: Purpose) -> Panel 
         selected: 0,
         purpose,
     }
+}
+
+/// Where to save a finished policy. `example` is the commented example, which
+/// is only offered as a file to edit, never as the person's own policy.
+fn policy_save_panel(title: &str, text: String, example: bool) -> Panel {
+    let mut items = Vec::new();
+    if !example {
+        items.push(Item::new(
+            "Use it on this computer",
+            "saves ~/.upleveler/policy.toml · a company file still applies",
+            "mine",
+        ));
+    }
+    items.push(Item::new(
+        "Save it to a file",
+        "to check, share and put on every computer",
+        "file",
+    ));
+    items.push(Item::new("Discard it", "", "discard"));
+    select(
+        title,
+        "↑↓ choose · enter select · esc discard",
+        items,
+        Purpose::PolicySave(text, example),
+    )
+}
+
+/// What `text` looks like it contains, when a model that is not on this
+/// computer would otherwise see it. Empty for a local model or with AI off.
+/// The company policy's extra sensitive words are included.
+fn findings(session: &Session, text: &str) -> Vec<crate::sensitive::Finding> {
+    if session.ai_enabled() && session.cfg.llm.is_remote() {
+        session.scan(text)
+    } else {
+        Vec::new()
+    }
+}
+
+/// How to send an entry kept on this computer after all, or the reason it
+/// cannot be sent when the company policy keeps sensitive text here.
+const SHARE_HINT: &str = "/share <id> sends it to the model anyway (ids: /list).";
+
+fn share_hint(session: &Session) -> String {
+    if session.policy.keeps_sensitive() {
+        session.policy.keep_message()
+    } else {
+        SHARE_HINT.to_string()
+    }
+}
+
+/// The plain-English line explaining that sensitive text is kept on this
+/// computer instead of being sent to the remote model.
+fn sensitive_info(session: &Session, found: &[crate::sensitive::Finding]) -> String {
+    let host = crate::audit::host_of(&session.cfg.llm.base_url);
+    crate::sensitive::warn(found, &host)
 }
 
 /// What to type as a model's name.
@@ -336,6 +419,7 @@ impl App {
             logged: Vec::new(),
             carried: None,
             wizard: false,
+            policy_chat: None,
             #[cfg(feature = "server")]
             web_url: None,
         };
@@ -605,20 +689,98 @@ impl App {
         if let Some((name, args)) = commands::split(text) {
             return self.command(name, args);
         }
+        // While a policy is being written, what is typed answers its question.
+        if let Some(chat) = &mut self.policy_chat {
+            if let Some(question) = chat.question.take() {
+                chat.turns.push(crate::policy_draft::Turn {
+                    question,
+                    answer: text.to_string(),
+                });
+                let job = Job::PolicyStep {
+                    draft: chat.draft.clone(),
+                    turns: chat.turns.clone(),
+                };
+                return self.start(job);
+            }
+        }
         if !self.session.configured() {
             self.info("Finish the setup first (/init).");
             return;
         }
+        let remote = self.session.ai_enabled() && self.session.cfg.llm.is_remote();
+        let found = findings(&self.session, text);
+
+        // `#private` / `#özel` (and the policy's private tags) means "keep on
+        // this computer": at a remote model it is logged directly, never routed
+        // to the model. A local model keeps routing as before, but the flag is
+        // still saved.
+        if remote && self.session.marks_private(text) {
+            self.log(text, Vec::new(), true);
+            return;
+        }
+
+        if !found.is_empty() {
+            if intent::looks_like_question(text) {
+                self.answer_sensitive(text.to_string(), found);
+                return;
+            }
+            let keeps = self.session.policy.keeps_sensitive();
+            let mut title = sensitive_info(&self.session, &found);
+            if keeps {
+                title.push_str(" Your company's policy keeps this on this computer.");
+            }
+            let mut items = vec![Item::new(
+                "Keep it on this computer",
+                "the default · save as private",
+                "keep",
+            )];
+            // A policy that keeps sensitive text here never offers to send it.
+            if !keeps {
+                items.push(Item::new(
+                    "Send it to the model anyway",
+                    "route it as usual",
+                    "send",
+                ));
+            }
+            items.push(Item::new(
+                "Edit it",
+                "put the text back in the composer",
+                "edit",
+            ));
+            self.panel = Some(select(
+                &title,
+                "↑↓ choose · enter select · esc keep it here",
+                items,
+                Purpose::Sensitive(text.to_string()),
+            ));
+            return;
+        }
+
         if intent::looks_like_question(text) {
             self.ask(text.to_string());
         } else if !self.session.ai_enabled() {
             // Without AI there is nothing to route with: typed text is a log entry.
-            self.log(text, Vec::new());
+            self.log(text, Vec::new(), false);
         } else if self.job.is_some() {
             self.panel = Some(Panel::Choice(text.to_string()));
         } else {
             self.start(Job::Route(text.to_string()));
         }
+    }
+
+    /// A question that looks sensitive is answered locally, with an info line
+    /// saying why it was not sent to the model.
+    fn answer_sensitive(&mut self, text: String, found: Vec<crate::sensitive::Finding>) {
+        let host = crate::audit::host_of(&self.session.cfg.llm.base_url);
+        self.info(&format!(
+            "Not sent to {host}: this looks like it contains {}. Answered by searching your log on this computer.",
+            crate::sensitive::describe_all(&found, "en")
+        ));
+        // Nothing is sent, so private entries can be searched too.
+        let entries = self.session.entries().unwrap_or_default();
+        let answer = crate::analyze::plain_answer(&entries, &text, today());
+        let lines = history::answer(&answer, self.width);
+        self.print(lines);
     }
 
     /// Reads a staging file again after the user edited it.
@@ -632,9 +794,14 @@ impl App {
         self.start(Job::Ask { question, history });
     }
 
-    fn log(&mut self, text: &str, tags: Vec<String>) {
+    fn log(&mut self, text: &str, tags: Vec<String>, private: bool) {
         let (date, text) = intent::split_date(text, today());
-        match self.session.add_log(&text, date, tags) {
+        let added = if private {
+            self.session.add_log_private(&text, date, tags)
+        } else {
+            self.session.add_log(&text, date, tags)
+        };
+        match added {
             Ok(Some(e)) => {
                 self.logged.push(Undo::Entry(e.id.clone()));
                 let when = if e.date == today() {
@@ -685,16 +852,34 @@ impl App {
             ));
             return;
         };
-        let needs_setup = !matches!(cmd.name, "init" | "help" | "quit" | "clear" | "model");
+        let needs_setup = !matches!(
+            cmd.name,
+            "init" | "help" | "quit" | "clear" | "model" | "policy"
+        );
         if needs_setup && !self.session.configured() {
             self.info("Finish the setup first (/init).");
             return;
         }
         match cmd.name {
             "log" if args.is_empty() => self.info("Usage: /log <what you did>"),
-            "log" => self.log(args, Vec::new()),
+            "log" => {
+                let found = findings(&self.session, args);
+                let private = !found.is_empty();
+                self.log(args, Vec::new(), private);
+                if !found.is_empty() {
+                    let msg = sensitive_info(&self.session, &found);
+                    self.info(&format!("{} {}", msg, share_hint(&self.session)));
+                }
+            }
             "ask" if args.is_empty() => self.info("Usage: /ask <question>"),
-            "ask" => self.ask(args.to_string()),
+            "ask" => {
+                let found = findings(&self.session, args);
+                if found.is_empty() {
+                    self.ask(args.to_string());
+                } else {
+                    self.answer_sensitive(args.to_string(), found);
+                }
+            }
             "gap" => match self.period(args) {
                 Ok(range) => self.start(Job::Gap(range)),
                 Err(e) => self.error(&e),
@@ -771,6 +956,8 @@ impl App {
             "list" => self.list(args),
             "edit" => self.edit_command(args),
             "delete" => self.delete_command(args),
+            "private" => self.private_command(args, true),
+            "share" => self.private_command(args, false),
             "undo" => self.undo(),
             "note" => self.note_command(args),
             "notes" => self.notes_command(args),
@@ -808,12 +995,22 @@ impl App {
             }
             "dashboard" => self.request = Some(Request::Dashboard(Tab::Overview)),
             "reports" => self.request = Some(Request::Dashboard(Tab::Reports)),
+            "audit" => self.audit_command(),
+            "policy" => self.policy_command(args),
             "web" => self.web(),
-            "model" if !self.session.ai_enabled() => {
-                self.info("AI is off. Choose a model to turn it on.");
-                self.start_wizard();
+            "model" => {
+                if !self.session.policy.is_empty() {
+                    self.info(&self.session.policy.summary());
+                }
+                if !self.session.policy.ai_allowed() {
+                    self.info("Your company's AI policy does not allow a model on this computer.");
+                } else if !self.session.ai_enabled() {
+                    self.info("AI is off. Choose a model to turn it on.");
+                    self.start_wizard();
+                } else {
+                    self.start(Job::Models(self.session.cfg.llm.clone()));
+                }
             }
-            "model" => self.start(Job::Models(self.session.cfg.llm.clone())),
             "init" => self.start_wizard(),
             "clear" => self.request = Some(Request::ClearScreen),
             "help" => self.panel = Some(Panel::Help),
@@ -914,6 +1111,7 @@ impl App {
     }
 
     /// `/edit <id> <new text>` keeps the date and adds `#tags` from the text.
+    /// At a remote model, text that looks sensitive is saved as private.
     fn edit_command(&mut self, args: &str) {
         let usage = "Usage: /edit <id> <new text>  (the id is shown in /dashboard or /list)";
         let (key, rest) = args
@@ -928,8 +1126,17 @@ impl App {
             Err(e) => return self.error(&format!("{e:#}")),
         };
         let before = entry.clone();
+        let found = findings(&self.session, rest);
+        let private = !found.is_empty();
         match self.session.edit_entry(&entry.id, Some(rest), None, None) {
-            Ok(Some(updated)) => {
+            Ok(Some(mut updated)) => {
+                if private {
+                    match self.session.set_private(&updated.id, true) {
+                        Ok(Some(e)) => updated = e,
+                        Ok(None) => {}
+                        Err(e) => return self.error(&format!("{e:#}")),
+                    }
+                }
                 self.logged.push(Undo::EntryEdit {
                     before,
                     after_id: updated.id.clone(),
@@ -938,6 +1145,154 @@ impl App {
                     "Updated: {}  (/undo to take it back)",
                     updated.text
                 ));
+                self.refresh_status();
+            }
+            Ok(None) => self.info("That entry was already gone."),
+            Err(e) => self.error(&format!("{e:#}")),
+        }
+        if !found.is_empty() {
+            let msg = sensitive_info(&self.session, &found);
+            self.info(&format!("{} {}", msg, share_hint(&self.session)));
+        }
+    }
+
+    /// `/policy`: the policy in force; `/policy new` writes one with the
+    /// model's questions, `/policy draft @file` from the company's written
+    /// rules, and `/policy stop` stops writing one.
+    fn policy_command(&mut self, args: &str) {
+        let (sub, rest) = args
+            .trim()
+            .split_once(char::is_whitespace)
+            .unwrap_or((args.trim(), ""));
+        match sub {
+            "" => self.info(&self.session.policy.display(&self.session.paths)),
+            "stop" => {
+                if self.policy_chat.take().is_some() {
+                    self.info("Stopped writing the policy. Nothing was saved.");
+                } else {
+                    self.info("No policy is being written.");
+                }
+            }
+            "new" | "draft" if !self.session.ai_enabled() || self.session.llm().is_err() => {
+                // No model to ask: offer the commented example instead.
+                self.panel = Some(policy_save_panel(
+                    "Without a model there is nobody to ask, so start from the commented example.",
+                    crate::policy_draft::TEMPLATE.to_string(),
+                    true,
+                ));
+            }
+            "new" | "draft" if self.job.is_some() => {
+                self.error("Still busy. Wait for it, or press Esc to stop it.")
+            }
+            "new" => {
+                self.policy_chat = Some(PolicyChat {
+                    draft: Default::default(),
+                    turns: Vec::new(),
+                    question: None,
+                });
+                self.info(
+                    "The model asks about your company's rules one at a time. Answer in your own words; \
+                     say \"done\" when you have nothing to add, or /policy stop to stop.",
+                );
+                self.start(Job::PolicyStep {
+                    draft: Default::default(),
+                    turns: Vec::new(),
+                });
+            }
+            "draft" if rest.trim().is_empty() => {
+                self.info("Usage: /policy draft @file  (your company's rules, as .md or .txt)")
+            }
+            "draft" => self.start(Job::PolicyDocument(path_arg(rest))),
+            _ => self.info("Usage: /policy, /policy new, /policy draft @file or /policy stop"),
+        }
+    }
+
+    /// After a policy question failed or was stopped: the last answer can be
+    /// typed again, so nothing said so far is lost. Before the first question
+    /// there is nothing to keep.
+    fn policy_resume(&mut self) {
+        let Some(chat) = &mut self.policy_chat else {
+            return;
+        };
+        if chat.question.is_some() {
+            return;
+        }
+        match chat.turns.pop() {
+            Some(turn) => {
+                chat.question = Some(turn.question);
+                self.info("Type your answer again, or /policy stop to stop.");
+            }
+            None => self.policy_chat = None,
+        }
+    }
+
+    /// A finished policy: shown in full, then where to save it.
+    fn policy_ready(&mut self, draft: &crate::policy_draft::Draft) {
+        self.policy_chat = None;
+        let text = crate::policy_draft::render(draft, &today().to_string());
+        let lines = history::answer(&format!("```toml\n{text}```"), self.width);
+        self.print(lines);
+        match crate::policy::Policy::parse(&text) {
+            Ok(policy) => self.info(&policy.summary()),
+            Err(e) => return self.error(&format!("The draft is not a valid policy: {e:#}")),
+        }
+        self.panel = Some(policy_save_panel("Save this policy?", text, false));
+    }
+
+    fn save_policy(&mut self, text: &str, path: &std::path::Path) {
+        if let Err(e) = crate::policy_draft::save(text, path) {
+            return self.error(&format!("{e:#}"));
+        }
+        if path == self.session.paths.policy {
+            // It applies here right away; the stricter rule still wins.
+            match crate::policy::Policy::load(&self.session.paths) {
+                Ok(policy) => self.session.policy = policy,
+                Err(e) => return self.error(&format!("{e:#}")),
+            }
+            self.success(&format!(
+                "Saved {}. It applies to Upleveler on this computer now.",
+                path.display()
+            ));
+        } else {
+            self.success(&format!(
+                "Saved {}. To enforce it, put it in /Library/Application Support/Upleveler/ (macOS) \
+                 or /etc/upleveler/ (Linux) on each computer.",
+                path.display()
+            ));
+        }
+        self.refresh_status();
+    }
+
+    /// `/private <id>` and `/share <id>` set or clear the flag on an entry.
+    fn private_command(&mut self, args: &str, value: bool) {
+        let key = args.trim();
+        if key.is_empty() {
+            return self.info("Usage: /private <id>  or  /share <id>  (see /dashboard or /list)");
+        }
+        let entry = match find_entry(&self.session, key) {
+            Ok(e) => e,
+            Err(e) => return self.error(&format!("{e:#}")),
+        };
+        // `sensitive = "keep"`: /share is refused for an entry whose text scans
+        // sensitive. Clearing the flag on a non-sensitive entry still works.
+        if !value
+            && self.session.policy.keeps_sensitive()
+            && !self.session.scan(&entry.text).is_empty()
+        {
+            return self.error(&self.session.policy.keep_message());
+        }
+        let was = entry.private;
+        match self.session.set_private(&entry.id, value) {
+            Ok(Some(_)) => {
+                self.logged.push(Undo::Private {
+                    id: entry.id.clone(),
+                    was,
+                });
+                self.success(if value {
+                    "Kept on this computer.  (/undo to take it back)"
+                } else {
+                    "Shared with the model.  (/undo to take it back)"
+                });
                 self.refresh_status();
             }
             Ok(None) => self.info("That entry was already gone."),
@@ -994,6 +1349,18 @@ impl App {
                     .add_new(vec![entry])
                     .map(|added| (!added.is_empty()).then(|| format!("Restored: {text}")))
             }
+            Undo::Private { id, was } => self.session.set_private(&id, was).map(|found| {
+                found.map(|_| {
+                    format!(
+                        "{} again.",
+                        if was {
+                            "Kept on this computer"
+                        } else {
+                            "Shared with the model"
+                        }
+                    )
+                })
+            }),
             Undo::Note(id) => self
                 .session
                 .remove_note(&id)
@@ -1497,6 +1864,24 @@ impl App {
         self.print(lines);
     }
 
+    /// `/audit`: what was sent to a model that is not on this computer, printed
+    /// in the transcript the same way `upleveler audit` prints it.
+    fn audit_command(&mut self) {
+        match crate::audit::load(&self.session.paths.audit) {
+            Ok(sends) => {
+                let text = crate::audit::report_with_policy(
+                    &self.session.cfg,
+                    &sends,
+                    20,
+                    self.session.kept_count(),
+                    self.session.policy.name.as_deref(),
+                );
+                self.info(&text);
+            }
+            Err(e) => self.error(&format!("{e:#}")),
+        }
+    }
+
     /// `/goal <text>` adds a goal; `/goal done 2` and `/goal drop 2` change one.
     fn goal_command(&mut self, args: &str) {
         let (first, rest) = args.split_once(char::is_whitespace).unwrap_or((args, ""));
@@ -1692,26 +2077,56 @@ impl App {
     fn start_wizard(&mut self) {
         self.wizard = true;
         self.info("Let's set up Upleveler. Everything stays on this computer.");
+        let (present, summary, mode, has_endpoints) = {
+            let policy = &self.session.policy;
+            (
+                !policy.is_empty(),
+                policy.summary(),
+                policy.ai.mode,
+                !policy.ai.endpoints.is_empty(),
+            )
+        };
+        if present {
+            self.info(&summary);
+        }
+        // "off": no model at all, so skip straight to "No AI" and carry on with
+        // the rest of the setup (language, ladder, notes).
+        if mode == AiMode::Off {
+            let cfg = &mut self.session.cfg;
+            cfg.llm.enabled = false;
+            cfg.llm.allow_remote = false;
+            cfg.llm.share_notes = false;
+            return self.wizard_language();
+        }
+        let mut items = vec![Item::new(
+            "llama.cpp on this computer",
+            "recommended · private · open source",
+            "llamacpp",
+        )];
+        // A remote endpoint is offered only when the policy allows one: "any"
+        // freely, "approved" through its approved list. "local" and "off"
+        // offer none.
+        let remote_choice = match mode {
+            AiMode::Any => true,
+            AiMode::Approved => has_endpoints,
+            AiMode::Local | AiMode::Off => false,
+        };
+        if remote_choice {
+            items.push(Item::new(
+                "OpenAI-compatible endpoint",
+                "your company's approved LLM, or a model server you run",
+                "openai",
+            ));
+        }
+        items.push(Item::new(
+            "No AI",
+            "logs, notes, goals and plain reports · turn AI on later with /model",
+            "off",
+        ));
         self.panel = Some(select(
             "Which AI model should read your logs?",
             "↑↓ choose · enter select · esc skip setup",
-            vec![
-                Item::new(
-                    "llama.cpp on this computer",
-                    "recommended · private · open source",
-                    "llamacpp",
-                ),
-                Item::new(
-                    "OpenAI-compatible endpoint",
-                    "your company's approved LLM, or a model server you run",
-                    "openai",
-                ),
-                Item::new(
-                    "No AI",
-                    "logs, notes, goals and plain reports · turn AI on later with /model",
-                    "off",
-                ),
-            ],
+            items,
             Purpose::Provider,
         ));
     }
@@ -1795,7 +2210,7 @@ impl App {
         match panel {
             Panel::Help => {}
             Panel::Choice(text) => match key.code {
-                KeyCode::Char('l') | KeyCode::Char('L') => self.log(&text, Vec::new()),
+                KeyCode::Char('l') | KeyCode::Char('L') => self.log(&text, Vec::new(), false),
                 KeyCode::Char('a') | KeyCode::Char('A') => self.ask(text),
                 KeyCode::Char('n') | KeyCode::Char('N') => match self.mentioned_person(&text) {
                     Some(person) => {
@@ -2110,6 +2525,11 @@ impl App {
     }
 
     fn on_panel_cancel(&mut self, purpose: &Purpose) {
+        // Closing the "this looks sensitive" panel keeps the text here rather
+        // than dropping what was typed.
+        if let Purpose::Sensitive(text) = purpose {
+            return self.log(&text.clone(), Vec::new(), true);
+        }
         if self.wizard && matches!(purpose, Purpose::NotesSource | Purpose::NotesPath) {
             return self.finish_wizard();
         }
@@ -2138,9 +2558,50 @@ impl App {
         }
     }
 
+    /// What the "this looks sensitive" panel chose.
+    fn on_sensitive_choice(&mut self, text: String, value: &str) {
+        match value {
+            "keep" => self.log(&text, Vec::new(), true),
+            "send" => {
+                // The panel does not offer this when the policy keeps sensitive
+                // text here; the guard keeps it true even so (code, not a prompt).
+                if self.session.policy.keeps_sensitive() {
+                    return self.log(&text, Vec::new(), true);
+                }
+                if self.job.is_some() {
+                    self.panel = Some(Panel::Choice(text));
+                } else {
+                    self.start(Job::Route(text));
+                }
+            }
+            "edit" => self.set_composer(&text),
+            _ => {}
+        }
+    }
+
     fn on_select(&mut self, purpose: Purpose, value: String) {
         if purpose == Purpose::RemoveImport {
             return self.remove_import(&value);
+        }
+        if let Purpose::Sensitive(ref text) = purpose {
+            return self.on_sensitive_choice(text.clone(), &value);
+        }
+        if let Purpose::PolicySave(text, _) = purpose {
+            return match value.as_str() {
+                "mine" => {
+                    let path = self.session.paths.policy.clone();
+                    self.save_policy(&text, &path);
+                }
+                "file" => {
+                    self.panel = Some(input(
+                        "Save the policy to",
+                        "a file name or path · enter to save · esc to discard",
+                        "policy.toml",
+                        Purpose::PolicyPath(text),
+                    ));
+                }
+                _ => self.info("Not saved."),
+            };
         }
 
         if purpose == Purpose::NotesSource {
@@ -2159,6 +2620,8 @@ impl App {
         match purpose {
             Purpose::Provider if value == "off" => {
                 cfg.llm.enabled = false;
+                cfg.llm.allow_remote = false;
+                cfg.llm.share_notes = false;
                 self.wizard_language();
             }
             Purpose::Provider => {
@@ -2171,6 +2634,7 @@ impl App {
                     }
                     cfg.llm.provider = Provider::Llamacpp;
                     cfg.llm.allow_remote = false;
+                    cfg.llm.share_notes = false;
                     if crate::llama::server_binary().is_none() {
                         self.panel = Some(select(
                             "llama.cpp is not installed yet",
@@ -2185,6 +2649,41 @@ impl App {
                     }
                     let llm = cfg.llm.clone();
                     self.start(Job::Models(llm));
+                } else if self.session.policy.ai.mode == AiMode::Approved
+                    && !self.session.policy.ai.endpoints.is_empty()
+                {
+                    // The policy approves specific endpoints: offer only those,
+                    // prefilled with the first (or the one already configured).
+                    cfg.llm.provider = Provider::Openai;
+                    let items: Vec<Item> = self
+                        .session
+                        .policy
+                        .ai
+                        .endpoints
+                        .iter()
+                        .map(|url| {
+                            Item::new(
+                                url.clone(),
+                                "approved by your company's AI policy",
+                                url.clone(),
+                            )
+                        })
+                        .collect();
+                    let selected = self
+                        .session
+                        .policy
+                        .ai
+                        .endpoints
+                        .iter()
+                        .position(|url| url == &cfg.llm.base_url)
+                        .unwrap_or(0);
+                    self.panel = Some(Panel::Select {
+                        title: "Your company's approved endpoint".into(),
+                        hint: "↑↓ choose · enter select · esc skip setup".into(),
+                        items,
+                        selected,
+                        purpose: Purpose::ApprovedEndpoint,
+                    });
                 } else {
                     let url = if cfg.llm.provider == Provider::Openai {
                         cfg.llm.base_url.clone()
@@ -2199,6 +2698,17 @@ impl App {
                         Purpose::OpenaiUrl,
                     ));
                 }
+            }
+            Purpose::ApprovedEndpoint => {
+                cfg.llm.base_url = value.clone();
+                cfg.llm.provider = Provider::Openai;
+                let model = cfg.llm.model.clone();
+                self.panel = Some(input(
+                    "Model name",
+                    "as the endpoint calls it · enter to continue",
+                    &model,
+                    Purpose::OpenaiModel,
+                ));
             }
             Purpose::Model if value == "__off" => self.turn_ai_off(),
             Purpose::ModelsFailed if value == "off" => self.turn_ai_off(),
@@ -2255,10 +2765,28 @@ impl App {
             Purpose::ConfirmRemote => {
                 if value == "yes" {
                     cfg.llm.allow_remote = true;
-                    self.wizard_language();
+                    if self.session.policy.notes_allowed() {
+                        self.panel = Some(select(
+                            "Send your notes about people to this endpoint for 1:1 preps and questions about them?",
+                            "↑↓ choose · enter select",
+                            vec![
+                                Item::new("No, keep them on this computer", "the default", "no"),
+                                Item::new("Yes, send them", "", "yes"),
+                            ],
+                            Purpose::ShareNotes,
+                        ));
+                    } else {
+                        // The policy forbids sharing notes: do not even ask.
+                        cfg.llm.share_notes = false;
+                        self.wizard_language();
+                    }
                 } else {
                     self.start_wizard();
                 }
+            }
+            Purpose::ShareNotes => {
+                cfg.llm.share_notes = value == "yes";
+                self.wizard_language();
             }
             Purpose::Language => {
                 cfg.language = value;
@@ -2343,6 +2871,26 @@ impl App {
     }
 
     fn on_input(&mut self, purpose: Purpose, value: String) {
+        if let Purpose::PolicyPath(text) = purpose {
+            let path = path_arg(&value);
+            if value.trim().is_empty() {
+                return self.info("Not saved.");
+            }
+            if path.exists() {
+                self.error(&format!(
+                    "{} already exists; choose another name.",
+                    path.display()
+                ));
+                self.panel = Some(input(
+                    "Save the policy to",
+                    "a file name or path · enter to save · esc to discard",
+                    &value,
+                    Purpose::PolicyPath(text),
+                ));
+                return;
+            }
+            return self.save_policy(&text, &path);
+        }
         if let Purpose::ImportPerson(file, kinds) = purpose {
             let Some(handle) = crate::people::normalize_handle(&value) else {
                 self.info("Type their @handle, e.g. @lead.");
@@ -2413,12 +2961,21 @@ impl App {
                 cfg.llm.api_key_env = Some(value).filter(|v| !v.is_empty());
                 if is_local_url(&cfg.llm.base_url) {
                     cfg.llm.allow_remote = false;
+                    cfg.llm.share_notes = false;
                     self.wizard_language();
                 } else {
                     let host = cfg.llm.base_url.clone();
+                    let hint = match self.session.policy.terms_line() {
+                        Some(terms) => format!(
+                            "Your company says: {terms}. Only continue if this is an endpoint your company approved."
+                        ),
+                        None => {
+                            "Only continue if this is an endpoint your company approved.".into()
+                        }
+                    };
                     self.panel = Some(select(
                         &format!("Your log text will be sent to {host}"),
-                        "Only continue if this is an endpoint your company approved.",
+                        &hint,
                         vec![
                             Item::new("Yes, this endpoint is approved", "", "yes"),
                             Item::new("No, choose again", "", "no"),
@@ -2503,6 +3060,7 @@ impl App {
                 Event::Failed(msg) => {
                     self.job = None;
                     self.error(&msg);
+                    self.policy_resume();
                     if self.wizard && self.panel.is_none() {
                         self.wizard_ladder();
                     }
@@ -2515,6 +3073,7 @@ impl App {
                         self.print(lines);
                     }
                     self.info("Stopped.");
+                    self.policy_resume();
                 }
             }
         }
@@ -2528,7 +3087,7 @@ impl App {
                 } else {
                     format!("{date}: {text}")
                 };
-                self.log(&dated, tags);
+                self.log(&dated, tags, false);
             }
             Output::Routed(Intent::Note {
                 person,
@@ -2622,6 +3181,29 @@ impl App {
                 });
             }
             Output::Models(result) => self.on_models(result),
+            Output::PolicyStep(step) => match step.question {
+                Some(question) if self.policy_chat.is_some() => {
+                    let lines = history::answer(&question, self.width);
+                    self.print(lines);
+                    if let Some(chat) = &mut self.policy_chat {
+                        chat.draft = step.draft;
+                        chat.question = Some(question);
+                    }
+                }
+                // Stopped with /policy stop while the model was thinking.
+                Some(_) => {}
+                None => self.policy_ready(&step.draft),
+            },
+            Output::PolicyDocument { draft, notes } => {
+                if !notes.is_empty() {
+                    let list: Vec<String> = notes.iter().map(|n| format!("- {n}")).collect();
+                    self.info(&format!(
+                        "What the document leaves open:\n{}",
+                        list.join("\n")
+                    ));
+                }
+                self.policy_ready(&draft);
+            }
             Output::Pulled(model) => {
                 self.success(&format!("Downloaded {model}."));
                 self.use_model(model);
@@ -2713,7 +3295,11 @@ impl App {
     /// otherwise it is saved. Either way it is loaded and tried in the background.
     fn use_model(&mut self, model: String) {
         self.session.cfg.llm.model = model.clone();
-        jobs::check_model(self.session.cfg.llm.clone(), self.tx.clone());
+        jobs::check_model(
+            self.session.cfg.llm.clone(),
+            self.session.paths.audit.clone(),
+            self.tx.clone(),
+        );
         if self.wizard {
             self.wizard_language();
             return;
@@ -2759,6 +3345,8 @@ impl App {
 
     fn turn_ai_off(&mut self) {
         self.session.cfg.llm.enabled = false;
+        self.session.cfg.llm.allow_remote = false;
+        self.session.cfg.llm.share_notes = false;
         if self.wizard {
             return self.wizard_language();
         }
@@ -3200,5 +3788,211 @@ mod setup_tests {
             out.contains("did not answer a test question: connection refused"),
             "{out}"
         );
+    }
+
+    /// At a model that is not on this computer, typed text that looks
+    /// sensitive is never routed to it: a panel offers to keep it here (the
+    /// default, and what esc does), send it anyway or edit it. Questions and
+    /// `/ask` are answered on this computer, `#private` logs at once, and
+    /// `/private` / `/share` change the flag with `/undo` taking it back.
+    #[test]
+    fn sensitive_text_stays_on_this_computer() {
+        let (mut app, _home) = app();
+        app.session.cfg.llm.provider = Provider::Openai;
+        app.session.cfg.llm.base_url = "https://llm.example.invalid/v1".into();
+        app.session.cfg.llm.allow_remote = true;
+        assert!(app.session.ai_enabled() && app.session.cfg.llm.is_remote());
+        let is_sensitive_panel = |app: &App| {
+            matches!(
+                app.panel,
+                Some(Panel::Select {
+                    purpose: Purpose::Sensitive(_),
+                    ..
+                })
+            )
+        };
+
+        // An invented but checksum-valid ID number.
+        app.submit("Updated my TCKN 12345678950 in the HR form");
+        assert!(app.job.is_none(), "nothing was sent to the model");
+        assert!(is_sensitive_panel(&app));
+        key(&mut app, KeyCode::Enter); // keep it on this computer
+        let entries = app.session.entries().unwrap();
+        assert_eq!(entries.len(), 1);
+        assert!(entries[0].private);
+
+        // Esc keeps it too, rather than dropping what was typed.
+        app.submit("Called +90 532 123 45 67 about the outage");
+        assert!(is_sensitive_panel(&app));
+        key(&mut app, KeyCode::Esc);
+        assert!(app.panel.is_none());
+        assert_eq!(app.session.entries().unwrap().len(), 2);
+        assert!(app.session.entries().unwrap().iter().all(|e| e.private));
+
+        // "Edit it" puts the text back in the composer.
+        app.submit("Maaş bordrosu servisini düzelttim");
+        key(&mut app, KeyCode::Down);
+        key(&mut app, KeyCode::Down);
+        key(&mut app, KeyCode::Enter);
+        assert_eq!(app.composer_text(), "Maaş bordrosu servisini düzelttim");
+        assert_eq!(app.session.entries().unwrap().len(), 2);
+        app.set_composer("");
+
+        // A question is answered by searching here; so is /ask.
+        app.submit("what did I do about 12345678950?");
+        assert!(app.job.is_none() && app.panel.is_none());
+        app.submit("/ask what about 12345678950");
+        assert!(app.job.is_none() && app.panel.is_none());
+        let out = printed(&app)
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(
+            out.contains("Answered by searching your log on this computer"),
+            "{out}"
+        );
+        assert!(
+            app.chat.is_empty(),
+            "a local answer never joins the chat sent to the model"
+        );
+
+        // #private logs at once, without routing.
+        app.submit("Planned the offsite #private");
+        assert!(app.job.is_none() && app.panel.is_none());
+        let planned = app
+            .session
+            .entries()
+            .unwrap()
+            .into_iter()
+            .find(|e| e.text == "Planned the offsite")
+            .unwrap();
+        assert!(planned.private && planned.tags.is_empty());
+
+        // /share and /private, and /undo.
+        let hash = planned.id.rsplit('-').next().unwrap().to_string();
+        app.submit(&format!("/share {hash}"));
+        let flag = |app: &App| {
+            app.session
+                .entries()
+                .unwrap()
+                .iter()
+                .find(|e| e.id == planned.id)
+                .unwrap()
+                .private
+        };
+        assert!(!flag(&app));
+        app.submit("/undo");
+        assert!(flag(&app));
+        app.submit(&format!("/share {hash}"));
+        app.submit(&format!("/private {hash}"));
+        assert!(flag(&app));
+
+        // /log with sensitive text is saved as private, with a line saying so.
+        app.submit("/log Kimlik 10000000146 güncellendi");
+        let out = printed(&app)
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(
+            out.contains("will not be sent to llm.example.invalid"),
+            "{out}"
+        );
+        assert!(app
+            .session
+            .entries()
+            .unwrap()
+            .iter()
+            .any(|e| e.text.contains("10000000146") && e.private));
+    }
+
+    /// `/policy new`: the model's questions are answered in the composer, the
+    /// finished policy is shown and saved where the person chooses, and a
+    /// failed step lets the last answer be typed again. Without a model only
+    /// the commented example is offered, and never as the person's own policy.
+    #[test]
+    fn a_policy_is_written_question_by_question() {
+        use crate::policy_draft::{Draft, Step};
+        let (mut app, _home) = app();
+        assert!(app.session.ai_enabled());
+
+        app.submit("/policy new");
+        assert!(app.policy_chat.is_some() && app.job.is_some());
+        app.job = None; // the model is not running here; answer for it
+        app.on_output(Output::PolicyStep(Box::new(Step {
+            draft: Draft::default(),
+            question: Some("Which AI models may Upleveler use?".into()),
+        })));
+        assert!(printed(&app).contains("Which AI models may Upleveler use?"));
+
+        app.submit("Only our approved endpoint");
+        assert!(app.job.is_some(), "the answer goes to the model");
+        let chat = app.policy_chat.as_ref().unwrap();
+        assert_eq!(chat.turns.len(), 1);
+        assert_eq!(chat.turns[0].answer, "Only our approved endpoint");
+        assert!(
+            app.session.entries().unwrap().is_empty(),
+            "an answer is not a log entry"
+        );
+
+        // A failed step: the question comes back, nothing is lost.
+        app.job = None;
+        app.policy_resume();
+        let chat = app.policy_chat.as_ref().unwrap();
+        assert!(chat.turns.is_empty());
+        assert_eq!(
+            chat.question.as_deref(),
+            Some("Which AI models may Upleveler use?")
+        );
+        app.submit("Only our approved endpoint");
+        app.job = None;
+
+        app.on_output(Output::PolicyStep(Box::new(Step {
+            draft: Draft {
+                name: "Acme engineering: AI use".into(),
+                mode: "approved".into(),
+                endpoints: vec!["https://llm.acme.example/v1".into()],
+                share_notes: Some(false),
+                ..Draft::default()
+            },
+            question: None,
+        })));
+        assert!(app.policy_chat.is_none());
+        let out = printed(&app);
+        assert!(out.contains("mode = \"approved\""), "{out}");
+        assert!(matches!(
+            app.panel,
+            Some(Panel::Select {
+                purpose: Purpose::PolicySave(_, false),
+                ..
+            })
+        ));
+        key(&mut app, KeyCode::Enter); // use it on this computer
+        assert!(app.session.paths.policy.exists());
+        assert_eq!(app.session.policy.ai.mode, crate::policy::AiMode::Approved);
+        assert_eq!(
+            app.session.policy.name.as_deref(),
+            Some("Acme engineering: AI use")
+        );
+
+        app.submit("/policy stop");
+        assert!(printed(&app).contains("No policy is being written."));
+
+        // Without a model: the example, only as a file.
+        app.session.cfg.llm.enabled = false;
+        app.submit("/policy new");
+        match &app.panel {
+            Some(Panel::Select {
+                items,
+                purpose: Purpose::PolicySave(text, true),
+                ..
+            }) => {
+                assert_eq!(text, crate::policy_draft::TEMPLATE);
+                assert!(
+                    items.iter().all(|i| i.value != "mine"),
+                    "never the person's own"
+                );
+            }
+            _ => panic!("expected the example's save panel"),
+        }
     }
 }

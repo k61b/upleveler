@@ -9,6 +9,7 @@ mod ladder;
 mod logs;
 mod overview;
 mod people;
+pub mod policy;
 mod reports;
 
 pub use gallery::gallery;
@@ -301,6 +302,8 @@ mod tests {
             ai: true,
             model: "m".into(),
             model_local: true,
+            audit: None,
+            policy: None,
             people: crate::people::People::default(),
             notes: Vec::new(),
             goals: crate::goals::Goals::default(),

@@ -114,6 +114,9 @@ enum Command {
         /// Tag, repeatable: -t incident -t oncall
         #[arg(long = "tag", short)]
         tags: Vec<String>,
+        /// Keep this entry on this computer (never sent to a model that is not on this computer)
+        #[arg(long)]
+        private: bool,
     },
     /// Edit a log entry
     #[command(
@@ -134,6 +137,12 @@ enum Command {
         /// Clear all tags
         #[arg(long, conflicts_with = "tags")]
         no_tags: bool,
+        /// Keep this entry on this computer (never sent to a model that is not on this computer)
+        #[arg(long, conflicts_with = "share")]
+        private: bool,
+        /// Let this entry be sent to the model again
+        #[arg(long, conflicts_with = "private")]
+        share: bool,
     },
     /// Remove a log entry
     #[command(after_help = "Examples:\n  upleveler remove 35c0f6d3\n  upleveler remove 35c0 -y")]
@@ -261,6 +270,21 @@ enum Command {
         /// Question to ask about your logs
         question: Vec<String>,
     },
+    /// What was sent to a model that is not on this computer
+    #[command(after_help = "Examples:\n  upleveler audit\n  upleveler audit --limit 5")]
+    Audit {
+        /// Show only the last N records (default 20)
+        #[arg(long, short = 'n', default_value_t = 20)]
+        limit: usize,
+    },
+    /// Show your company's AI policy, or check a policy file you are writing
+    #[command(
+        after_help = "Examples:\n  upleveler policy\n  upleveler policy new\n  upleveler policy draft ai-rules.md -o policy.toml\n  upleveler policy check policy.toml"
+    )]
+    Policy {
+        #[command(subcommand)]
+        action: Option<PolicyCmd>,
+    },
     /// Print a shell completion script for bash, zsh, fish, powershell or elvish
     #[command(after_help = concat!("Install the script:\n",
         "  bash:  upleveler completions bash > ~/.local/share/bash-completion/completions/upleveler\n",
@@ -281,6 +305,36 @@ enum Command {
         /// Print the link without opening a browser
         #[arg(long)]
         no_open: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum PolicyCmd {
+    /// Parse a policy file and print its summary, or the exact error (for the
+    /// security team writing one)
+    Check {
+        /// The policy.toml to check
+        file: PathBuf,
+    },
+    /// Write a policy step by step: the model asks, you answer in your own words
+    New {
+        /// Where to save it (default: policy.toml in this folder)
+        #[arg(short, long, default_value = "policy.toml")]
+        output: PathBuf,
+        /// Save it without asking at the end
+        #[arg(short, long)]
+        yes: bool,
+    },
+    /// Turn your company's written rules about AI use (.md or .txt) into a policy
+    Draft {
+        /// The document with the rules
+        file: PathBuf,
+        /// Where to save it (default: policy.toml in this folder)
+        #[arg(short, long, default_value = "policy.toml")]
+        output: PathBuf,
+        /// Save it without asking
+        #[arg(short, long)]
+        yes: bool,
     },
 }
 
@@ -596,14 +650,21 @@ fn run(cli: Cli) -> Result<()> {
             Ok(())
         }
         Some(Command::Goal { action }) => goal_cmd(&session, action),
-        Some(Command::Log { text, date, tags }) => log(&session, text, date, tags),
+        Some(Command::Log {
+            text,
+            date,
+            tags,
+            private,
+        }) => log(&session, text, date, tags, private),
         Some(Command::Edit {
             id,
             text,
             date,
             tags,
             no_tags,
-        }) => edit(&session, id, text, date, tags, no_tags),
+            private,
+            share,
+        }) => edit(&session, id, text, date, tags, no_tags, private, share),
         Some(Command::Remove { id, yes }) => remove(&session, id, yes),
         Some(Command::List {
             range,
@@ -623,10 +684,15 @@ fn run(cli: Cli) -> Result<()> {
             let matched = filter.apply(&entries);
             let skip = limit.map_or(0, |n| matched.len().saturating_sub(n));
             for e in &matched[skip..] {
-                if ids {
-                    println!("{}  {}", entry_hash(e), e.line());
+                let line = if e.private {
+                    format!("{}  [kept on this computer]", e.line())
                 } else {
-                    println!("{}", e.line());
+                    e.line()
+                };
+                if ids {
+                    println!("{}  {}", entry_hash(e), line);
+                } else {
+                    println!("{line}");
                 }
             }
             eprintln!("{}", plural(matched.len(), "entry", "entries"));
@@ -738,7 +804,8 @@ fn run(cli: Cli) -> Result<()> {
                 bail!("ask what? e.g. upleveler ask \"which incidents did I handle last month?\"");
             }
             let llm = session.llm_if_on()?;
-            let entries = session.entries()?;
+            // A model that is not on this computer never sees private entries.
+            let entries = session.model_entries()?;
             answer(
                 llm.as_ref().map(|l| l as &dyn Llm),
                 &session,
@@ -747,6 +814,8 @@ fn run(cli: Cli) -> Result<()> {
                 &mut Vec::new(),
             )
         }
+        Some(Command::Audit { limit }) => audit_cmd(&session, limit),
+        Some(Command::Policy { action }) => policy_cmd(&session, action),
         Some(Command::Completions { shell }) => {
             generate(shell, &mut Cli::command(), "upleveler", &mut io::stdout());
             Ok(())
@@ -847,6 +916,147 @@ fn print_report(md: &str, path: &std::path::Path, warnings: &[String]) {
     eprintln!("Saved {}", path.display());
 }
 
+fn audit_cmd(session: &Session, limit: usize) -> Result<()> {
+    let sends = upleveler::audit::load(&session.paths.audit)?;
+    println!(
+        "{}",
+        upleveler::audit::report_with_policy(
+            &session.cfg,
+            &sends,
+            limit,
+            session.kept_count(),
+            session.policy.name.as_deref(),
+        )
+    );
+    Ok(())
+}
+
+/// `upleveler policy` shows the policy in force; `upleveler policy check <file>`
+/// parses exactly that file so a security team can see the summary or the exact
+/// error before putting it on every computer.
+fn policy_cmd(session: &Session, action: Option<PolicyCmd>) -> Result<()> {
+    match action {
+        None => println!("{}", session.policy.display(&session.paths)),
+        Some(PolicyCmd::Check { file }) => {
+            // An error exits non-zero, so a script can check a file too.
+            let policy = upleveler::policy::Policy::load_from(&[file])?;
+            println!("{}", policy.summary());
+        }
+        Some(PolicyCmd::New { output, yes }) => policy_new(session, &output, yes)?,
+        Some(PolicyCmd::Draft { file, output, yes }) => policy_draft(session, &file, &output, yes)?,
+    }
+    Ok(())
+}
+
+/// The model that helps write a policy, or `None` (with a line saying what to
+/// do instead) when AI is off or the policy in force does not allow one.
+fn policy_writer(session: &Session) -> Result<Option<upleveler::llm::HttpLlm>> {
+    match session.llm_if_on() {
+        Ok(Some(llm)) => Ok(Some(llm)),
+        Ok(None) => Ok(None),
+        Err(err) => {
+            eprintln!("note: {err:#}");
+            Ok(None)
+        }
+    }
+}
+
+/// Without a model: the commented example, to edit by hand.
+fn policy_template(output: &std::path::Path) -> Result<()> {
+    if output.exists() {
+        bail!(
+            "{} already exists; edit it, or pass -o for a new file",
+            output.display()
+        );
+    }
+    upleveler::policy_draft::save(upleveler::policy_draft::TEMPLATE, output)?;
+    println!(
+        "Without AI there is nobody to ask, so {} is the commented example to edit.\n\
+         Check it with: upleveler policy check {}",
+        output.display(),
+        output.display()
+    );
+    Ok(())
+}
+
+/// Shows the finished draft, then saves it where the person agrees to.
+fn policy_finish(text: &str, output: &std::path::Path, yes: bool) -> Result<()> {
+    println!("\n{text}");
+    let policy = upleveler::policy::Policy::parse(text)?;
+    println!("{}\n", policy.summary());
+    let question = if output.exists() {
+        format!("Replace {} with this policy?", output.display())
+    } else {
+        format!("Save it to {}?", output.display())
+    };
+    if !confirm(&question, yes)? {
+        println!("Not saved.");
+        return Ok(());
+    }
+    upleveler::policy_draft::save(text, output)?;
+    println!(
+        "Saved {}. To enforce it, put it in /Library/Application Support/Upleveler/ (macOS) \
+         or /etc/upleveler/ (Linux) on each computer.",
+        output.display()
+    );
+    Ok(())
+}
+
+/// `upleveler policy new`: question by question, in the person's own words.
+fn policy_new(session: &Session, output: &std::path::Path, yes: bool) -> Result<()> {
+    let Some(llm) = policy_writer(session)? else {
+        return policy_template(output);
+    };
+    if !interactive() {
+        bail!("upleveler policy new asks questions; run it in a terminal");
+    }
+    println!(
+        "The model asks about your company's rules one at a time. Answer in your own words; \
+         say \"done\" when you have nothing to add."
+    );
+    let budget = session.cfg.llm.input_budget_chars();
+    let mut draft = upleveler::policy_draft::Draft::default();
+    let mut turns: Vec<upleveler::policy_draft::Turn> = Vec::new();
+    // A model that never stops asking still ends.
+    for _ in 0..30 {
+        let step = upleveler::policy_draft::interview(&llm, &draft, &turns, budget)?;
+        draft = step.draft;
+        let Some(question) = step.question else {
+            break;
+        };
+        let answer: String = dialoguer::Input::new()
+            .with_prompt(&question)
+            .interact_text()?;
+        turns.push(upleveler::policy_draft::Turn { question, answer });
+    }
+    let text = upleveler::policy_draft::render(&draft, &today().to_string());
+    policy_finish(&text, output, yes)
+}
+
+/// `upleveler policy draft <file>`: the company's written rules, as a policy.
+fn policy_draft(
+    session: &Session,
+    file: &std::path::Path,
+    output: &std::path::Path,
+    yes: bool,
+) -> Result<()> {
+    let document = upleveler::policy_draft::read_document(file)?;
+    let Some(llm) = policy_writer(session)? else {
+        return policy_template(output);
+    };
+    eprintln!("Reading {} with {}…", file.display(), session.cfg.llm.model);
+    let budget = session.cfg.llm.input_budget_chars();
+    let (draft, notes) = upleveler::policy_draft::from_document(&llm, &document, budget)?;
+    let text = upleveler::policy_draft::render(&draft, &today().to_string());
+    if !notes.is_empty() {
+        println!("What the document leaves open:");
+        for n in &notes {
+            println!("  - {n}");
+        }
+    }
+    policy_finish(&text, output, yes)
+}
+
 fn status(session: &Session) -> Result<()> {
     let s = session.status()?;
     println!("upleveler {}", env!("CARGO_PKG_VERSION"));
@@ -875,6 +1085,9 @@ fn status(session: &Session) -> Result<()> {
         );
     } else {
         println!("  llm:    off (Upleveler runs without AI)");
+    }
+    if let Some(name) = &session.policy.name {
+        println!("  policy: {name}");
     }
     if !s.configured {
         println!("\nRun `upleveler` in a terminal to get started, or `upleveler init --no-ai` to use it without AI.");
@@ -1025,6 +1238,7 @@ fn log(
     text: Vec<String>,
     date: Option<String>,
     tags: Vec<String>,
+    private_flag: bool,
 ) -> Result<()> {
     let date = match date {
         Some(d) => parse_date(&d, today()).with_context(|| format!("unrecognized date {d:?}"))?,
@@ -1040,7 +1254,16 @@ fn log(
             buf
         };
     }
-    match session.add_log(&text, date, tags)? {
+    // When the model is not on this computer, text that looks sensitive is
+    // kept on this computer unless the entry is explicitly marked private too.
+    let findings = sensitive_findings(session, &text);
+    let private = private_flag || !findings.is_empty();
+    let added = if private {
+        session.add_log_private(&text, date, tags)?
+    } else {
+        session.add_log(&text, date, tags)?
+    };
+    match added {
         Some(e) if e.linked.is_empty() => println!("Logged: {}", e.line()),
         Some(e) => println!(
             "Logged: {}\n  evidence for {}",
@@ -1052,6 +1275,9 @@ fn log(
             Entry::new(date, &text, vec![], "manual").line()
         ),
     }
+    if !findings.is_empty() {
+        print_sensitive_warning(session, &findings);
+    }
     for handle in session.unknown_mentions(&text) {
         eprintln!(
             "note: @{handle} is not in your people yet: upleveler person add {handle} --name \"…\""
@@ -1060,11 +1286,33 @@ fn log(
     Ok(())
 }
 
+/// What a piece of text looks like it contains, when a model that is not on
+/// this computer would otherwise see it. Empty otherwise.
+fn sensitive_findings(session: &Session, text: &str) -> Vec<upleveler::sensitive::Finding> {
+    if session.ai_enabled() && session.cfg.llm.is_remote() {
+        session.scan(text)
+    } else {
+        Vec::new()
+    }
+}
+
+fn print_sensitive_warning(session: &Session, findings: &[upleveler::sensitive::Finding]) {
+    let host = upleveler::audit::host_of(&session.cfg.llm.base_url);
+    let hint = if session.policy.keeps_sensitive() {
+        session.policy.keep_message()
+    } else {
+        "To send it anyway: upleveler edit <id> --share (ids: upleveler list --ids).".to_string()
+    };
+    eprintln!("{} {hint}", upleveler::sensitive::warn(findings, &host));
+}
+
 /// The 8-character hash at the end of an entry id.
 fn entry_hash(e: &Entry) -> &str {
     e.id.rsplit('-').next().unwrap_or(&e.id)
 }
 
+// Each argument is one independent field of the edit command.
+#[allow(clippy::too_many_arguments)]
 fn edit(
     session: &Session,
     id: String,
@@ -1072,12 +1320,46 @@ fn edit(
     date: Option<String>,
     tags: Vec<String>,
     no_tags: bool,
+    private_flag: bool,
+    share: bool,
 ) -> Result<()> {
     let entry = session.find_entry(&id)?;
+    // `sensitive = "keep"`: --share is refused for an entry whose text scans
+    // sensitive. Clearing the flag on a non-sensitive entry still works.
+    if share && session.policy.keeps_sensitive() {
+        let looks_sensitive = |t: &str| !session.scan(t).is_empty();
+        if looks_sensitive(&entry.text) || text.as_deref().is_some_and(looks_sensitive) {
+            bail!("{}", session.policy.keep_message());
+        }
+    }
     let date = date
         .as_deref()
         .map(|d| parse_date(d, today()).with_context(|| format!("unrecognized date {d:?}")))
         .transpose()?;
+    let choice = if private_flag {
+        Some(true)
+    } else if share {
+        Some(false)
+    } else {
+        None
+    };
+    // Only changing the private flag: no editor, no text to check.
+    if let Some(value) = choice {
+        if text.is_none() && date.is_none() && tags.is_empty() && !no_tags {
+            match session.set_private(&entry.id, value)? {
+                Some(e) => {
+                    let state = if value {
+                        "kept on this computer"
+                    } else {
+                        "shared with the model"
+                    };
+                    println!("Updated: {}  ({state}, id {})", e.line(), entry_hash(&e));
+                }
+                None => bail!("no entry with id {} (it may have been removed)", entry.id),
+            }
+            return Ok(());
+        }
+    }
     let (text, tags) = if text.is_none() && date.is_none() && tags.is_empty() && !no_tags {
         let current = entry.text.clone();
         let edited = if io::stdin().is_terminal() {
@@ -1098,8 +1380,23 @@ fn edit(
         };
         (text, tags)
     };
+    // When the model is not on this computer, new text that looks sensitive is
+    // kept on this computer unless it was explicitly shared.
+    let mut private = choice;
+    if let Some(t) = text.as_deref() {
+        let findings = sensitive_findings(session, t);
+        if !findings.is_empty() && private != Some(false) {
+            private = Some(true);
+            print_sensitive_warning(session, &findings);
+        }
+    }
     match session.edit_entry(&entry.id, text.as_deref(), date, tags)? {
-        Some(e) => {
+        Some(mut e) => {
+            if let Some(value) = private {
+                if let Some(updated) = session.set_private(&e.id, value)? {
+                    e = updated;
+                }
+            }
             println!("Updated: {}  (id {})", e.line(), entry_hash(&e));
             for handle in session.unknown_mentions(&e.text) {
                 eprintln!(
@@ -1438,7 +1735,10 @@ fn import_cmd(
     let default_date = default_date
         .map(|d| parse_date(&d, today()).with_context(|| format!("unrecognized date {d:?}")))
         .transpose()?;
-    let llm = if no_ai || !session.ai_enabled() || import::is_staging(file) {
+    // A file that looks sensitive is read without the model (the preview says
+    // why), so no client is made and nothing claims to be sending it.
+    let stays_here = !session.import_findings(file).is_empty();
+    let llm = if no_ai || stays_here || !session.ai_enabled() || import::is_staging(file) {
         None
     } else {
         let llm = session.llm()?;
@@ -1710,7 +2010,8 @@ fn answer(
 
 fn chat(session: &Session) -> Result<()> {
     let llm = session.llm_if_on()?;
-    let entries = session.entries()?;
+    // A model that is not on this computer never sees private entries.
+    let entries = session.model_entries()?;
     let mut history = Vec::new();
     eprintln!("Ask about your logs. Empty line or Ctrl-D to quit.");
     let stdin = io::stdin();
@@ -1808,6 +2109,30 @@ mod cli_tests {
         let mut seen = 0;
         check(&Cli::command(), &mut seen);
         assert!(seen > 20, "only {seen} examples found");
+    }
+
+    #[test]
+    fn private_and_share_flags_parse() {
+        let log = Cli::try_parse_from(["upleveler", "log", "shipped it", "--private"]).unwrap();
+        assert!(matches!(
+            log.command,
+            Some(Command::Log { private: true, .. })
+        ));
+        let edit = Cli::try_parse_from(["upleveler", "edit", "abcd", "--share"]).unwrap();
+        assert!(matches!(
+            edit.command,
+            Some(Command::Edit { share: true, .. })
+        ));
+        assert!(
+            Cli::try_parse_from(["upleveler", "edit", "abcd", "--private", "--share"]).is_err(),
+            "--private and --share conflict"
+        );
+        // A plain log without the flag still parses (the flag defaults to false).
+        let plain = Cli::try_parse_from(["upleveler", "log", "shipped it"]).unwrap();
+        assert!(matches!(
+            plain.command,
+            Some(Command::Log { private: false, .. })
+        ));
     }
 
     #[test]

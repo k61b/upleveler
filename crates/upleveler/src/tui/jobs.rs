@@ -7,6 +7,7 @@ use crate::dates::Range;
 use crate::intent::{self, Intent};
 use crate::ladder::Ladder;
 use crate::llm::{HttpLlm, Llm, Message};
+use crate::mask::Masks;
 use crate::session::{today, Analysis, ImportPreview, Session};
 use anyhow::{anyhow, Result};
 use std::path::PathBuf;
@@ -32,6 +33,13 @@ pub enum Job {
     Models(LlmConfig),
     /// Downloads the model named in the config (llama.cpp).
     Pull(LlmConfig),
+    /// The next question while writing a company AI policy.
+    PolicyStep {
+        draft: crate::policy_draft::Draft,
+        turns: Vec<crate::policy_draft::Turn>,
+    },
+    /// A company's written rules about AI use, read into a policy.
+    PolicyDocument(PathBuf),
 }
 
 impl Job {
@@ -48,6 +56,8 @@ impl Job {
             Job::LadderImport(p, _) => format!("Reading {}", file_name(p)),
             Job::Models(_) => "Looking for models".into(),
             Job::Pull(cfg) => format!("Downloading {}", cfg.model),
+            Job::PolicyStep { .. } => "Thinking".into(),
+            Job::PolicyDocument(p) => format!("Reading {}", file_name(p)),
         }
     }
 }
@@ -78,6 +88,13 @@ pub enum Output {
     Models(Result<Vec<String>, String>),
     /// This model was downloaded.
     Pulled(String),
+    /// The policy being written, and the next question (none when finished).
+    PolicyStep(Box<crate::policy_draft::Step>),
+    /// A policy read from a document, with notes on what it leaves open.
+    PolicyDocument {
+        draft: Box<crate::policy_draft::Draft>,
+        notes: Vec<String>,
+    },
 }
 
 pub enum Event {
@@ -95,10 +112,11 @@ pub enum Event {
 }
 
 /// Loads the model and asks it a test question on its own thread; the answer
-/// arrives as `Event::ModelReady`.
-pub fn check_model(cfg: LlmConfig, tx: Sender<Event>) {
+/// arrives as `Event::ModelReady`. `audit` is where a remote request is recorded.
+pub fn check_model(cfg: LlmConfig, audit: PathBuf, tx: Sender<Event>) {
     std::thread::spawn(move || {
         let result = HttpLlm::new(&cfg)
+            .map(|llm| llm.audited(audit).masked(Masks::default()))
             .and_then(|llm| llm.check())
             .map_err(|e| format!("{e:#}"));
         let _ = tx.send(Event::ModelReady {
@@ -109,10 +127,13 @@ pub fn check_model(cfg: LlmConfig, tx: Sender<Event>) {
 }
 
 /// Loads the model in the background so the first request is quick; a
-/// failure here shows up on that request instead.
-pub fn preload(cfg: LlmConfig) {
+/// failure here shows up on that request instead. `audit` is where a remote
+/// request is recorded.
+pub fn preload(cfg: LlmConfig, audit: PathBuf) {
     std::thread::spawn(move || {
-        let _ = HttpLlm::new(&cfg).and_then(|llm| llm.preload());
+        let _ = HttpLlm::new(&cfg)
+            .map(|llm| llm.audited(audit).masked(Masks::default()))
+            .and_then(|llm| llm.preload());
     });
 }
 
@@ -186,7 +207,8 @@ fn run(session: &Session, job: Job, tx: &Sender<Event>, cancel: &Cancel) -> Resu
             )))
         }
         Job::Ask { question, history } => {
-            let entries = session.entries()?;
+            // A model that is not on this computer never sees private entries.
+            let entries = session.model_entries()?;
             let Some(llm) = session.llm_if_on()? else {
                 let answer = analyze::plain_answer(&entries, &question, today());
                 return Ok(Output::Answer { question, answer });
@@ -271,22 +293,45 @@ fn run(session: &Session, job: Job, tx: &Sender<Event>, cancel: &Cancel) -> Resu
         }
         Job::Models(cfg) => {
             let models = HttpLlm::new(&cfg)
+                .map(|llm| {
+                    llm.audited(session.paths.audit.clone())
+                        .masked(Masks::default())
+                })
                 .and_then(|llm| llm.list_models())
                 .map_err(|e| format!("{e:#}"));
             Ok(Output::Models(models))
         }
+        Job::PolicyStep { draft, turns } => {
+            let llm = session.llm()?.with_cancel(cancel.flag());
+            let budget = session.cfg.llm.input_budget_chars();
+            let step = crate::policy_draft::interview(&llm, &draft, &turns, budget)?;
+            Ok(Output::PolicyStep(Box::new(step)))
+        }
+        Job::PolicyDocument(file) => {
+            let text = crate::policy_draft::read_document(&file)?;
+            let llm = session.llm()?.with_cancel(cancel.flag());
+            let budget = session.cfg.llm.input_budget_chars();
+            let (draft, notes) = crate::policy_draft::from_document(&llm, &text, budget)?;
+            Ok(Output::PolicyDocument {
+                draft: Box::new(draft),
+                notes,
+            })
+        }
         Job::Pull(cfg) => {
             let label = format!("{} MB", cfg.model);
-            HttpLlm::new(&cfg)?.pull(&mut |_, done, total| {
-                if total == 0 {
-                    return progress("Preparing", 0, 1);
-                }
-                progress(
-                    &label,
-                    (done / 1_000_000) as usize,
-                    (total / 1_000_000) as usize,
-                )
-            })?;
+            HttpLlm::new(&cfg)?
+                .audited(session.paths.audit.clone())
+                .masked(Masks::default())
+                .pull(&mut |_, done, total| {
+                    if total == 0 {
+                        return progress("Preparing", 0, 1);
+                    }
+                    progress(
+                        &label,
+                        (done / 1_000_000) as usize,
+                        (total / 1_000_000) as usize,
+                    )
+                })?;
             Ok(Output::Pulled(cfg.model))
         }
     }

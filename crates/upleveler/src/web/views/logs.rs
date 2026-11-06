@@ -48,7 +48,7 @@ pub fn log_results(data: &DashboardData, query: &str, edit: Option<&EditForm>) -
                         span.mono { (day) }
                         span.muted { (day.format("%A")) }
                     }
-                    ul.log-list { @for e in entries { (log_entry_with_actions(e, edit)) } }
+                    ul.log-list { @for e in entries { (log_entry_with_actions(data, e, edit)) } }
                 }
             }
             @if matched.len() > LIMIT {
@@ -68,6 +68,12 @@ pub struct AddForm {
     pub notice: Option<(Alert, String)>,
     /// The "edit entry" form currently open with a problem, if any.
     pub edit: Option<EditForm>,
+    /// Whether "keep on this computer" is ticked.
+    pub private: bool,
+    /// Set after a sensitive entry was kept: (notice message, optional entry
+    /// id for the "Send it to the model anyway" button). The id is `None` when
+    /// the company policy keeps sensitive text here, so no button is shown.
+    pub kept: Option<(String, Option<String>)>,
 }
 
 impl AddForm {
@@ -78,6 +84,8 @@ impl AddForm {
             tags: String::new(),
             notice: None,
             edit: None,
+            private: false,
+            kept: None,
         }
     }
 }
@@ -89,6 +97,8 @@ pub struct EditForm {
     pub date: String,
     pub tags: String,
     pub notice: Option<(Alert, String)>,
+    /// Whether "keep on this computer" is ticked (the entry's current flag).
+    pub private: bool,
 }
 
 impl EditForm {
@@ -106,6 +116,7 @@ impl EditForm {
                 .collect::<Vec<_>>()
                 .join(", "),
             notice: None,
+            private: entry.private,
         }
     }
 }
@@ -170,6 +181,10 @@ fn add_form(form: &AddForm) -> Markup {
                 placeholder="Shipped the circuit breaker for the payments gateway" data-submit-shortcut {
                 (form.text)
             }
+            label {
+                input type="checkbox" name="private" value="on" checked[form.private];
+                " Keep on this computer (never sent to the model)"
+            }
             div.add-entry-row {
                 div.field {
                     label.field-label for="entry-date" { "Date" }
@@ -192,6 +207,10 @@ fn edit_form(entry: &Entry, form: &EditForm) -> Markup {
             @if let Some((kind, text)) = &form.notice { (ui::alert(*kind, text)) }
             label.visually-hidden for=(field("text")) { "What did you do?" }
             textarea.input.textarea id=(field("text")) name="text" rows="2" maxlength="4000" required data-submit-shortcut { (form.text) }
+            label {
+                input type="checkbox" name="private" value="on" checked[form.private];
+                " Keep on this computer (never sent to the model)"
+            }
             div.add-entry-row {
                 div.field {
                     label.field-label for=(field("date")) { "Date" }
@@ -214,7 +233,10 @@ fn link_host(url: &str) -> &str {
 
 fn log_entry_content(entry: &Entry) -> Markup {
     html! {
-        p.log-text { (entry.text) }
+        p.log-text {
+            (entry.text)
+            @if entry.private { " " span.muted { "(kept on this computer)" } }
+        }
         @if !entry.tags.is_empty() || !entry.links.is_empty() || !entry.linked.is_empty() {
             div.log-meta {
                 @for tag in &entry.tags {
@@ -231,10 +253,11 @@ fn log_entry_content(entry: &Entry) -> Markup {
     }
 }
 
-fn log_entry_with_actions(entry: &Entry, edit: Option<&EditForm>) -> Markup {
+fn log_entry_with_actions(data: &DashboardData, entry: &Entry, edit: Option<&EditForm>) -> Markup {
     let is_editing = edit.is_some_and(|e| e.id == entry.id);
     let default = EditForm::from_entry(entry);
     let form = edit.filter(|e| e.id == entry.id).unwrap_or(&default);
+    let kept_by_policy = data.policy_keeps(&entry.text);
     html! {
         li.log-entry {
             (log_entry_content(entry))
@@ -245,6 +268,20 @@ fn log_entry_with_actions(entry: &Entry, edit: Option<&EditForm>) -> Markup {
                 }
                 form method="post" action=(format!("/logs/{}/delete", entry.id)) data-confirm="Delete this entry? This cannot be undone." {
                     button.btn.btn--outline type="submit" { "Delete" }
+                }
+                @if entry.private {
+                    // The company policy keeps sensitive text here: no button.
+                    @if kept_by_policy {
+                        span.muted { "Your company's policy keeps this on this computer." }
+                    } @else {
+                        form method="post" action=(format!("/logs/{}/share", entry.id)) {
+                            button.btn.btn--outline type="submit" { "Send to the model" }
+                        }
+                    }
+                } @else {
+                    form method="post" action=(format!("/logs/{}/private", entry.id)) {
+                        button.btn.btn--outline type="submit" { "Keep on this computer" }
+                    }
                 }
             }
         }
@@ -345,6 +382,16 @@ pub fn logs_with_import(
             section.view.container {
                 (view_header(Tab::Logs.title(), html! { "Everything you have logged, newest first. Add an entry here or in the terminal app." }, None))
                 div.paper.panel {
+                    // Above the add form (a form cannot hold another form), so
+                    // it is the first thing seen after logging.
+                    @if let Some((message, share)) = &form.kept {
+                        (ui::alert(Alert::Info, message))
+                        @if let Some(id) = share {
+                            form method="post" action=(format!("/logs/{}/share", id)) {
+                                button.btn.btn--outline type="submit" { "Send it to the model anyway" }
+                            }
+                        }
+                    }
                     (add_form(form))
                     (export_form(export))
                     (imports(data, import_notice))

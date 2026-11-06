@@ -1548,10 +1548,27 @@ select.input {
   margin-bottom: 16px;
 }
 
-.import-form .form-hint {
+.import-form .form-hint,
+.policy-form .form-hint {
   margin-top: 4px;
   color: var(--fg-muted);
   font-size: var(--text-sm);
+}
+
+/* The policy page: the policy in force, line by line as it is printed. */
+.policy-in-force {
+  white-space: pre-line;
+}
+
+.policy-form {
+  display: grid;
+  gap: 8px;
+  justify-items: start;
+}
+
+.policy-form .textarea,
+.policy-form .add-entry-row {
+  justify-self: stretch;
 }
 
 .import-form input[type="file"] {

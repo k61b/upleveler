@@ -1,0 +1,15 @@
+# Strict example: AI may only use a model on this computer, and text that looks
+# sensitive is always kept here. Invented "Acme" data.
+name = "Acme: local models only"
+contact = "security@acme.example"
+updated = "2026-10-01"
+
+[ai]
+mode = "local"
+
+[data]
+share_notes = false
+sensitive = "keep"
+mask_words = ["Acme", "Project Falcon"]
+private_tags = ["confidential"]
+sensitive_words = ["Project Falcon", "layoff"]

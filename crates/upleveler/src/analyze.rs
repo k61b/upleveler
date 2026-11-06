@@ -572,6 +572,12 @@ fn label(cfg: &Config, en: &'static str) -> &'static str {
         "Tags" => "Etiketler",
         "Open follow-ups" => "Açık takipler",
         "Notes" => "Notlar",
+        "Notes below were kept on this computer, not sent to the model." => {
+            "Aşağıdaki notlar bu bilgisayarda kaldı, modele gönderilmedi."
+        }
+        "{n} entries kept on this computer were not sent to the model." => {
+            "Bu bilgisayarda tutulan {n} kayıt modele gönderilmedi."
+        }
         "In your log" => "Logunda geçtiği yerler",
         "Other notable work not tied to a specific expectation" => {
             "Belirli bir beklentiye bağlı olmayan diğer önemli işler"
@@ -581,6 +587,17 @@ fn label(cfg: &Config, en: &'static str) -> &'static str {
         "none" => "kanıt yok",
         other => other,
     }
+}
+
+/// The line an AI report shows when private entries were left out of what
+/// was sent to a model that is not on this computer. Localized like the other
+/// report labels; `{n}` is filled in here.
+pub fn kept_entries_note(cfg: &Config, kept: usize) -> String {
+    label(
+        cfg,
+        "{n} entries kept on this computer were not sent to the model.",
+    )
+    .replace("{n}", &kept.to_string())
 }
 
 fn header(title: &str, entries: &[&Entry], cfg: &Config) -> String {
@@ -1310,26 +1327,11 @@ pub fn summary_plain(cfg: &Config, entries: &[Entry], range: Range) -> Result<St
     Ok(md)
 }
 
-/// A 1:1 preparation without a model: open follow-ups, your notes and the
-/// entries that mention `person`, newest first.
-pub fn prep_plain(
-    cfg: &Config,
-    person: &Person,
-    notes: &[&Note],
-    entries: &[&Entry],
-) -> Result<String> {
-    if notes.is_empty() && entries.is_empty() {
-        bail!(
-            "nothing to prepare from yet: add a note (upleveler note {} \"…\") or mention @{} in your logs",
-            person.handle,
-            person.handle
-        );
-    }
-    let mut md = header(
-        &format!("{}: {}", label(cfg, "1:1 prep"), person.name),
-        entries,
-        cfg,
-    );
+/// A person's notes as a local-only Markdown block: open follow-ups first,
+/// then the rest, in the report language. Shared by the plain 1:1 prep and a
+/// prep whose notes were kept on this computer.
+fn notes_block(cfg: &Config, notes: &[&Note]) -> String {
+    let mut md = String::new();
     let open: Vec<String> = notes
         .iter()
         .rev()
@@ -1355,10 +1357,70 @@ pub fn prep_plain(
             note_lines(&rest, 6000)
         ));
     }
+    md
+}
+
+/// A 1:1 preparation without a model: open follow-ups, your notes and the
+/// entries that mention `person`, newest first.
+pub fn prep_plain(
+    cfg: &Config,
+    person: &Person,
+    notes: &[&Note],
+    entries: &[&Entry],
+) -> Result<String> {
+    if notes.is_empty() && entries.is_empty() {
+        bail!(
+            "nothing to prepare from yet: add a note (upleveler note {} \"…\") or mention @{} in your logs",
+            person.handle,
+            person.handle
+        );
+    }
+    let mut md = header(
+        &format!("{}: {}", label(cfg, "1:1 prep"), person.name),
+        entries,
+        cfg,
+    );
+    md.push_str(&notes_block(cfg, notes));
     if !entries.is_empty() {
         let (lines, _) = evidence_lines(entries, 6000);
         md.push_str(&format!("\n## {}\n\n{lines}", label(cfg, "In your log")));
     }
+    Ok(md)
+}
+
+/// A 1:1 prep whose notes about the person never left this computer. `base` is
+/// what the model wrote from the entries (or `None` when it was not asked at
+/// all); the notes are appended under a heading that says they were kept here,
+/// listed the way `prep_plain` does.
+pub fn prep_kept(
+    cfg: &Config,
+    person: &Person,
+    base: Option<String>,
+    notes: &[&Note],
+    entries: &[&Entry],
+) -> Result<String> {
+    if notes.is_empty() && entries.is_empty() {
+        bail!(
+            "nothing to prepare from yet: add a note (upleveler note {} \"…\") or mention @{} in your logs",
+            person.handle,
+            person.handle
+        );
+    }
+    let mut md = base.unwrap_or_else(|| {
+        header(
+            &format!("{}: {}", label(cfg, "1:1 prep"), person.name),
+            entries,
+            cfg,
+        )
+    });
+    md.push_str(&format!(
+        "\n_{}_\n",
+        label(
+            cfg,
+            "Notes below were kept on this computer, not sent to the model."
+        )
+    ));
+    md.push_str(&notes_block(cfg, notes));
     Ok(md)
 }
 

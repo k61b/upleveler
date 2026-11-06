@@ -31,6 +31,9 @@ pub struct Entry {
     /// Always part of `expectations`, and kept when the model maps entries again.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub linked: Vec<String>,
+    /// Kept on this computer: never sent to a model that is not on this computer.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub private: bool,
     pub created_at: DateTime<Utc>,
 }
 
@@ -43,16 +46,18 @@ impl Entry {
         let text = text.trim().to_string();
         let mut links = extract_links(&text);
         links.dedup();
+        let (tags, private) = normalize_tags(tags);
         Self {
             id: make_id(date, &text),
             date,
             text,
-            tags: normalize_tags(tags),
+            tags,
             links,
             source: source.to_string(),
             expectations: Vec::new(),
             tagged_with: None,
             linked: Vec::new(),
+            private,
             created_at: Utc::now(),
         }
     }
@@ -84,17 +89,76 @@ pub fn make_id(date: NaiveDate, text: &str) -> String {
     format!("{date}-{hex}")
 }
 
-pub fn normalize_tags(tags: Vec<String>) -> Vec<String> {
+/// Tags written in an entry's text that mean "keep this on this computer":
+/// they are removed from the tag list and turned into the `private` flag.
+const PRIVATE_TAGS: &[&str] = &["private", "özel", "ozel"];
+
+/// True for a tag that marks an entry as private (`#private`, `#özel`, `#ozel`).
+pub fn is_private_tag(tag: &str) -> bool {
+    PRIVATE_TAGS.contains(&tag)
+}
+
+/// True when the text contains a private `#tag`, as the composer, the browser
+/// form and `upleveler log` all read. `extra_private` are the extra tags the
+/// company's AI policy lists.
+pub fn text_marks_private_with(text: &str, extra_private: &[String]) -> bool {
+    let extra: HashSet<String> = extra_private
+        .iter()
+        .map(|t| normalize_tag(t))
+        .filter(|t| !t.is_empty())
+        .collect();
+    crate::intent::hashtags(text)
+        .1
+        .iter()
+        .map(|t| normalize_tag(t))
+        .any(|t| is_private_tag(&t) || extra.contains(&t))
+}
+
+/// True when the text contains a private `#tag` (`#private`, `#özel`, `#ozel`).
+pub fn text_marks_private(text: &str) -> bool {
+    text_marks_private_with(text, &[])
+}
+
+/// One tag as it is stored: trimmed, without `#`, lowercase, spaces as dashes.
+fn normalize_tag(tag: &str) -> String {
+    tag.trim()
+        .trim_start_matches('#')
+        .to_lowercase()
+        .replace(' ', "-")
+}
+
+/// Trims, lowercases and de-duplicates tags. Private tags are taken out and
+/// reported as the `private` flag, so they appear neither in the text nor in
+/// the tags. Returns the cleaned tags and whether a private tag was found.
+pub fn normalize_tags(tags: Vec<String>) -> (Vec<String>, bool) {
+    normalize_tags_with(tags, &[])
+}
+
+/// The same, but the company's `extra_private` tags also mark the entry private
+/// and are removed from the tags like `#private` is.
+pub fn normalize_tags_with(tags: Vec<String>, extra_private: &[String]) -> (Vec<String>, bool) {
+    let extra: HashSet<String> = extra_private
+        .iter()
+        .map(|t| normalize_tag(t))
+        .filter(|t| !t.is_empty())
+        .collect();
     let mut seen = HashSet::new();
-    tags.into_iter()
-        .map(|t| {
-            t.trim()
-                .trim_start_matches('#')
-                .to_lowercase()
-                .replace(' ', "-")
+    let mut private = false;
+    let cleaned: Vec<String> = tags
+        .into_iter()
+        .map(|t| normalize_tag(&t))
+        .filter(|t| {
+            if t.is_empty() {
+                return false;
+            }
+            if is_private_tag(t) || extra.contains(t) {
+                private = true;
+                return false;
+            }
+            seen.insert(t.clone())
         })
-        .filter(|t| !t.is_empty() && seen.insert(t.clone()))
-        .collect()
+        .collect();
+    (cleaned, private)
 }
 
 pub fn extract_links(text: &str) -> Vec<String> {
@@ -400,5 +464,67 @@ mod tests {
         };
         assert!(f.matches(&e));
         assert!(!Filter::range(Some(d(2025, 4, 1)), None).matches(&e));
+    }
+
+    #[test]
+    fn private_flag_defaults_and_never_changes_the_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("logs.jsonl");
+        // A line written before the flag existed has no `private` field.
+        let mut old = Entry::new(d(2025, 1, 1), "an old line", vec![], "manual");
+        old.private = true;
+        let json = serde_json::to_string(&old).unwrap();
+        assert!(json.contains("\"private\":true"));
+        let without_flag = json.replace(",\"private\":true", "");
+        fs::write(&path, format!("{without_flag}\n")).unwrap();
+
+        let loaded = Store::new(&path).load().unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert!(!loaded[0].private, "an old line loads with private = false");
+        assert_eq!(loaded[0].text, "an old line");
+
+        // The id is the date and text only, so flipping the flag changes nothing.
+        let mut flipped = loaded[0].clone();
+        flipped.private = true;
+        assert_eq!(flipped.id, loaded[0].id);
+    }
+
+    #[test]
+    fn normalize_tags_takes_out_private_tags() {
+        assert_eq!(
+            normalize_tags(vec!["Bug".into(), "private".into(), "bug".into()]),
+            (vec!["bug".to_string()], true)
+        );
+        assert_eq!(
+            normalize_tags(vec!["#özel".into(), "ops".into()]),
+            (vec!["ops".to_string()], true)
+        );
+        let (clean, private) = normalize_tags(vec!["ops".into(), "#OZEL".into()]);
+        assert_eq!(clean, vec!["ops".to_string()]);
+        assert!(private);
+        assert_eq!(
+            normalize_tags(vec!["ci".into()]),
+            (vec!["ci".to_string()], false)
+        );
+        assert!(text_marks_private("Met with the team #private"));
+        assert!(text_marks_private("Notlar #özel"));
+        assert!(!text_marks_private("Fixed the /health endpoint"));
+
+        // The company's extra private tags behave exactly like #private.
+        let extra = vec!["confidential".to_string(), "gizli".to_string()];
+        assert_eq!(
+            normalize_tags_with(
+                vec!["ops".into(), "#Confidential".into(), "team".into()],
+                &extra
+            ),
+            (vec!["ops".to_string(), "team".to_string()], true)
+        );
+        assert_eq!(
+            normalize_tags_with(vec!["ops".into()], &extra),
+            (vec!["ops".to_string()], false)
+        );
+        assert!(text_marks_private_with("Roadmap #confidential", &extra));
+        assert!(text_marks_private_with("Notlar #gizli", &extra));
+        assert!(!text_marks_private_with("Roadmap #ops", &extra));
     }
 }

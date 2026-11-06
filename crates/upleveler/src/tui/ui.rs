@@ -21,8 +21,11 @@ fn panel_lines(app: &App, width: u16) -> Vec<Line<'static>> {
         match panel {
             Panel::Help => {
                 lines.push(Line::styled("Commands", theme::accent_bold()));
-                // Commands without arguments or much to say share one line.
-                let short = ["init", "clear", "help", "quit"];
+                // Commands without arguments or much to say share one line, so
+                // the list keeps its height and the "Commands" header stays put.
+                let short = [
+                    "init", "clear", "help", "quit", "private", "share", "audit", "policy",
+                ];
                 for c in super::commands::COMMANDS {
                     if short.contains(&c.name) {
                         continue;
@@ -38,14 +41,27 @@ fn panel_lines(app: &App, width: u16) -> Vec<Line<'static>> {
                 }
                 lines.push(Line::from(fit(
                     vec![
+                        Span::styled("  /private", theme::accent()),
+                        Span::raw(" <id> keep   "),
+                        Span::styled("/share", theme::accent()),
+                        Span::raw(" <id> send   "),
+                        Span::styled("/audit", theme::accent()),
+                        Span::raw(" what was sent   "),
+                        Span::styled("/policy", theme::accent()),
+                        Span::raw(" company rules"),
+                    ],
+                    w,
+                )));
+                lines.push(Line::from(fit(
+                    vec![
                         Span::styled("  /init", theme::accent()),
-                        Span::raw(" setup again   "),
+                        Span::raw("   "),
                         Span::styled("/clear", theme::accent()),
-                        Span::raw(" the screen   "),
+                        Span::raw("   "),
                         Span::styled("/help", theme::accent()),
-                        Span::raw(" this list   "),
+                        Span::raw("   "),
                         Span::styled("/quit", theme::accent()),
-                        Span::raw(" exit"),
+                        Span::raw(""),
                     ],
                     w,
                 )));
@@ -548,6 +564,10 @@ fn status_line(app: &App, width: u16) -> Line<'static> {
         if at.elapsed().as_secs() < 3 {
             return Line::styled(text.clone(), theme::warn());
         }
+    }
+    // A compact "policy: <name>" marker on the otherwise idle status line.
+    if let Some(name) = &app.session.policy.name {
+        return Line::styled(format!("policy: {name}"), theme::dim());
     }
     Line::default()
 }

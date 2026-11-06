@@ -1,12 +1,14 @@
 //! Minimal chat client for llama.cpp and other OpenAI-compatible endpoints.
 
 use crate::config::{is_local_url, LlmConfig, Provider};
+use crate::mask::{Mapping, Masks};
 use anyhow::{anyhow, bail, Context, Result};
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use serde_json::{json, Value};
 use std::cell::Cell;
 use std::io::{BufRead, BufReader};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -205,13 +207,33 @@ pub struct HttpLlm {
     no_reasoning: Cell<bool>,
     /// llama.cpp: the server was found running our model with our context.
     ready: Cell<bool>,
+    /// True when the endpoint is not on this computer: every request is
+    /// recorded before it is sent.
+    remote: bool,
+    /// Where to record requests, set by the caller with `audited`.
+    audit: Option<PathBuf>,
+    /// What to hide from a model that is not on this computer, set with
+    /// `masked`. Every caller must set this for such an endpoint (see `post`).
+    masks: Option<Masks>,
     /// Set by the caller to stop a reply mid-way (see `with_cancel`).
     cancel: Option<Arc<AtomicBool>>,
 }
 
 impl HttpLlm {
-    /// Builds a client, refusing non-local endpoints unless `allow_remote` is set.
+    /// Builds a client for the policy in force on this computer. Every caller
+    /// goes through here (the session, the TUI's model check/list/pull and the
+    /// web), so the policy is enforced before anything is sent and nothing a
+    /// model returns can change it.
     pub fn new(cfg: &LlmConfig) -> Result<Self> {
+        let paths = crate::config::Paths::resolve()?;
+        let policy = crate::policy::Policy::load(&paths)?;
+        Self::new_with_policy(cfg, &policy)
+    }
+
+    /// Builds a client with an already-loaded policy (used by `Session` and by
+    /// tests). Refuses with the policy's message before anything is sent.
+    pub fn new_with_policy(cfg: &LlmConfig, policy: &crate::policy::Policy) -> Result<Self> {
+        policy.check_endpoint(cfg)?;
         let local = is_local_url(&cfg.base_url);
         if !local && !cfg.allow_remote {
             bail!(
@@ -245,8 +267,28 @@ impl HttpLlm {
             json_mode: Cell::new(2),
             no_reasoning: Cell::new(cfg.provider == Provider::Llamacpp),
             ready: Cell::new(false),
+            remote: !local,
+            audit: None,
+            masks: None,
             cancel: None,
         })
+    }
+
+    /// Records every chat request to `path` before sending it to a model that
+    /// is not on this computer. Every caller must set this for such an endpoint;
+    /// otherwise the request is refused (see `post`).
+    pub fn audited(mut self, path: PathBuf) -> Self {
+        self.audit = Some(path);
+        self
+    }
+
+    /// What to hide from a model that is not on this computer. Every caller
+    /// must set this for such an endpoint too (see `post`); callers that send
+    /// nothing personal pass `Masks::default()`. A model on this computer is
+    /// unchanged even when this is set.
+    pub fn masked(mut self, masks: Masks) -> Self {
+        self.masks = Some(masks);
+        self
     }
 
     /// The models there are: for llama.cpp the ones downloaded, otherwise
@@ -502,7 +544,35 @@ impl HttpLlm {
         body
     }
 
-    fn post(&self, body: &Value) -> Result<ureq::Response> {
+    fn post(
+        &self,
+        body: &Value,
+        messages: &[Message],
+        format: &Format,
+        masked: usize,
+    ) -> Result<ureq::Response> {
+        if self.remote {
+            let host = crate::audit::host_of(&self.cfg.base_url);
+            let Some(path) = &self.audit else {
+                bail!("requests to {host} must be recorded; this is a bug in Upleveler");
+            };
+            if self.masks.is_none() {
+                bail!("requests to {host} must be masked; this is a bug in Upleveler");
+            }
+            // The audit records the masked request, so the counts are of what
+            // was actually sent, not of the original text.
+            let contents: Vec<&str> = messages.iter().map(|m| m.content.as_str()).collect();
+            let mut send = crate::audit::Send::for_messages(
+                &host,
+                &self.cfg.model,
+                &contents,
+                matches!(format, Format::Json { .. }),
+            );
+            send.masked = masked;
+            crate::audit::record(path, &send).with_context(|| {
+                format!("could not record what is sent to {host}, so nothing was sent")
+            })?;
+        }
         self.post_to("chat/completions")
             .send_json(body)
             .map_err(|err| self.describe(err))
@@ -555,17 +625,67 @@ impl HttpLlm {
             .is_some_and(|c| c.load(Ordering::Relaxed))
     }
 
+    /// Masks a copy of the messages' contents and every string in the JSON
+    /// schema (enum values, not object keys) in one `apply` call, so numbers
+    /// match, and returns the masked request with the mapping for its reply.
+    /// A local client is unchanged; a remote one without masks is left
+    /// unchanged here but refused before sending by `post`.
+    fn prepare(&self, messages: &[Message], format: &Format) -> (Vec<Message>, Format, Mapping) {
+        if !self.remote || self.masks.is_none() {
+            return (messages.to_vec(), format.clone(), Mapping::default());
+        }
+        let masks = self.masks.as_ref().expect("checked above");
+        let mut texts: Vec<String> = messages.iter().map(|m| m.content.clone()).collect();
+        let n_messages = texts.len();
+        let mut schema = match format {
+            Format::Json { schema, .. } => Some(schema.clone()),
+            Format::Text => None,
+        };
+        if let Some(s) = &schema {
+            collect_schema_strings(s, &mut texts);
+        }
+        let mapping = {
+            let mut refs: Vec<&mut String> = texts.iter_mut().collect();
+            masks.apply(refs.as_mut_slice())
+        };
+
+        let mut masked_messages = messages.to_vec();
+        for (message, content) in masked_messages.iter_mut().zip(&texts[..n_messages]) {
+            message.content = content.clone();
+        }
+        let masked_format = match (format, schema.as_mut()) {
+            (Format::Json { max_tokens, .. }, Some(s)) => {
+                let mut index = 0;
+                replace_schema_strings(s, &texts[n_messages..], &mut index);
+                Format::Json {
+                    schema: s.clone(),
+                    max_tokens: *max_tokens,
+                }
+            }
+            _ => format.clone(),
+        };
+        (masked_messages, masked_format, mapping)
+    }
+
     /// Posts. A server that rejects a JSON schema is asked for any JSON
-    /// object instead, and then for plain text.
+    /// object instead, and then for plain text. Retries re-send the same
+    /// masked request.
     fn post_chat(
         &self,
         messages: &[Message],
         format: &Format,
         stream: bool,
-    ) -> Result<ureq::Response> {
+    ) -> Result<(ureq::Response, Mapping)> {
         self.preload()?;
+        let (masked_messages, masked_format, mapping) = self.prepare(messages, format);
+        let masked = mapping.len();
         loop {
-            match self.post(&self.body(messages, format, stream)) {
+            match self.post(
+                &self.body(&masked_messages, &masked_format, stream),
+                &masked_messages,
+                &masked_format,
+                masked,
+            ) {
                 Err(err)
                     if self.no_reasoning.get()
                         && err.to_string().contains("HTTP 400")
@@ -580,7 +700,8 @@ impl HttpLlm {
                 {
                     self.json_mode.set(self.json_mode.get() - 1);
                 }
-                other => return other,
+                Ok(resp) => return Ok((resp, mapping)),
+                Err(err) => return Err(err),
             }
         }
     }
@@ -624,25 +745,24 @@ impl Llm for HttpLlm {
             if self.cancelled() {
                 bail!("cancelled");
             }
-            let resp = self.post_chat(messages, format, true)?;
-            let out = self.read_stream(resp, &mut |_| !self.cancelled())?;
+            let (resp, mapping) = self.post_chat(messages, format, true)?;
+            let raw = self.read_stream(resp, &mut |_| !self.cancelled())?;
             if self.cancelled() {
                 bail!("cancelled");
             }
-            return Ok(out);
+            return Ok(restore_reply(&mapping, format, &raw));
         }
-        let value: Value = self
-            .post_chat(messages, format, false)?
-            .into_json()
-            .context(
-                "the server's reply was not in the OpenAI chat format; check base_url and model",
-            )?;
-        value["choices"][0]["message"]["content"]
+        let (resp, mapping) = self.post_chat(messages, format, false)?;
+        let value: Value = resp.into_json().context(
+            "the server's reply was not in the OpenAI chat format; check base_url and model",
+        )?;
+        let content = value["choices"][0]["message"]["content"]
             .as_str()
             .map(str::to_string)
             .context(
                 "the server's reply was not in the OpenAI chat format; check base_url and model",
-            )
+            )?;
+        Ok(restore_reply(&mapping, format, &content))
     }
 
     fn stream(
@@ -650,8 +770,88 @@ impl Llm for HttpLlm {
         messages: &[Message],
         on_token: &mut dyn FnMut(&str) -> bool,
     ) -> Result<String> {
-        let resp = self.post_chat(messages, &Format::Text, true)?;
-        self.read_stream(resp, &mut |token| on_token(token) && !self.cancelled())
+        let (resp, mapping) = self.post_chat(messages, &Format::Text, true)?;
+        let mut streamer = mapping.streamer();
+        let mut shown = String::new();
+        self.read_stream(resp, &mut |token| {
+            let safe = streamer.push(token);
+            if safe.is_empty() {
+                return !self.cancelled();
+            }
+            shown.push_str(&safe);
+            on_token(&safe) && !self.cancelled()
+        })?;
+        let rest = streamer.finish();
+        if !rest.is_empty() {
+            shown.push_str(&rest);
+            on_token(&rest);
+        }
+        Ok(shown)
+    }
+}
+
+/// Puts the originals back in a reply: free text as it is, a raw JSON reply
+/// with the originals JSON-escaped.
+fn restore_reply(mapping: &Mapping, format: &Format, text: &str) -> String {
+    match format {
+        Format::Text => mapping.restore(text),
+        Format::Json { .. } => mapping.restore_json(text),
+    }
+}
+
+/// Collects the values a JSON schema lets the answer take (the strings under
+/// `enum` and `const`, such as the routing schema's handles), in a fixed
+/// order, so they can be masked together with the messages. Keywords like
+/// `"type": "string"` are left alone, so the schema stays valid.
+fn collect_schema_strings(value: &Value, out: &mut Vec<String>) {
+    walk_schema_values(value, false, &mut |s| out.push(s.clone()));
+}
+
+/// Writes masked strings back into the same places, in the same order.
+fn replace_schema_strings(value: &mut Value, strings: &[String], index: &mut usize) {
+    walk_schema_values_mut(value, false, &mut |s| {
+        if let Some(next) = strings.get(*index) {
+            *s = next.clone();
+            *index += 1;
+        }
+    });
+}
+
+fn is_value_key(key: &str) -> bool {
+    key == "enum" || key == "const"
+}
+
+fn walk_schema_values(value: &Value, values: bool, f: &mut dyn FnMut(&String)) {
+    match value {
+        Value::String(s) if values => f(s),
+        Value::Array(items) => {
+            for item in items {
+                walk_schema_values(item, values, f);
+            }
+        }
+        Value::Object(map) => {
+            for (key, item) in map {
+                walk_schema_values(item, is_value_key(key), f);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn walk_schema_values_mut(value: &mut Value, values: bool, f: &mut dyn FnMut(&mut String)) {
+    match value {
+        Value::String(s) if values => f(s),
+        Value::Array(items) => {
+            for item in items {
+                walk_schema_values_mut(item, values, f);
+            }
+        }
+        Value::Object(map) => {
+            for (key, item) in map {
+                walk_schema_values_mut(item, is_value_key(key), f);
+            }
+        }
+        _ => {}
     }
 }
 
@@ -685,6 +885,7 @@ impl<F: Fn(&[Message], bool) -> String> Llm for FakeLlm<F> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::policy::Policy;
     use serde::Deserialize;
     use std::cell::RefCell;
 
@@ -777,12 +978,15 @@ mod tests {
     }
 
     fn client(base_url: String) -> HttpLlm {
-        HttpLlm::new(&LlmConfig {
-            provider: Provider::Openai,
-            base_url,
-            model: "m".into(),
-            ..LlmConfig::default()
-        })
+        HttpLlm::new_with_policy(
+            &LlmConfig {
+                provider: Provider::Openai,
+                base_url,
+                model: "m".into(),
+                ..LlmConfig::default()
+            },
+            &Policy::default(),
+        )
         .unwrap()
     }
 
@@ -792,7 +996,7 @@ mod tests {
 
     #[test]
     fn requests_carry_the_schema_a_cap_and_no_thinking_for_llama_cpp() {
-        let llama = HttpLlm::new(&LlmConfig::default()).unwrap();
+        let llama = HttpLlm::new_with_policy(&LlmConfig::default(), &Policy::default()).unwrap();
         let body = llama.body(&[Message::user("x")], &Format::json(ok_schema(), 20), false);
         assert_eq!(body["reasoning_effort"], json!("none"));
         assert_eq!(
@@ -941,12 +1145,15 @@ mod tests {
 
     fn llama(url: String, model: &str) -> HttpLlm {
         llama_dir();
-        HttpLlm::new(&LlmConfig {
-            provider: Provider::Llamacpp,
-            base_url: url,
-            model: model.into(),
-            ..LlmConfig::default()
-        })
+        HttpLlm::new_with_policy(
+            &LlmConfig {
+                provider: Provider::Llamacpp,
+                base_url: url,
+                model: model.into(),
+                ..LlmConfig::default()
+            },
+            &Policy::default(),
+        )
         .unwrap()
     }
 
@@ -1020,13 +1227,16 @@ mod tests {
         );
         let (url, seen) = recording_server(vec![stream]);
         std::env::set_var("UPLEVELER_TEST_SERVER_KEY", "test-key"); // gitleaks:allow
-        let llm = HttpLlm::new(&LlmConfig {
-            provider: Provider::Openai,
-            base_url: format!("{url}/v1"),
-            model: "m".into(),
-            api_key_env: Some("UPLEVELER_TEST_SERVER_KEY".into()),
-            ..LlmConfig::default()
-        })
+        let llm = HttpLlm::new_with_policy(
+            &LlmConfig {
+                provider: Provider::Openai,
+                base_url: format!("{url}/v1"),
+                model: "m".into(),
+                api_key_env: Some("UPLEVELER_TEST_SERVER_KEY".into()),
+                ..LlmConfig::default()
+            },
+            &Policy::default(),
+        )
         .unwrap();
         let out = llm.stream(&[Message::user("x")], &mut |_| true).unwrap();
         assert_eq!(out, "Merhaba");
@@ -1059,12 +1269,244 @@ mod tests {
             base_url: "https://llm.example.com/v1".into(),
             ..LlmConfig::default()
         };
-        let err = HttpLlm::new(&cfg).err().unwrap().to_string();
+        let err = HttpLlm::new_with_policy(&cfg, &Policy::default())
+            .err()
+            .unwrap()
+            .to_string();
         assert!(err.contains("allow_remote"), "{err}");
         let allowed = LlmConfig {
             allow_remote: true,
             ..cfg
         };
-        assert!(HttpLlm::new(&allowed).is_ok());
+        assert!(HttpLlm::new_with_policy(&allowed, &Policy::default()).is_ok());
+    }
+
+    /// A "local" policy refuses a remote endpoint in `new_with_policy` before
+    /// a single byte is sent, and still allows a model on this computer.
+    #[test]
+    fn a_local_policy_refuses_a_remote_endpoint_before_anything_is_sent() {
+        let answer = json!({ "choices": [{ "message": { "content": "ok" } }] });
+        // A recording server stands by to prove that nothing is sent anywhere.
+        let (url, seen) = recording_server(vec![answer]);
+        let mut policy = Policy::default();
+        policy.ai.mode = crate::policy::AiMode::Local;
+        policy.name = Some("Acme engineering: AI use".into());
+        let remote = LlmConfig {
+            provider: Provider::Openai,
+            base_url: "https://llm.example.com/v1".into(),
+            model: "m".into(),
+            allow_remote: true,
+            ..LlmConfig::default()
+        };
+        let err = HttpLlm::new_with_policy(&remote, &policy)
+            .err()
+            .unwrap()
+            .to_string();
+        assert!(err.contains("Acme engineering: AI use"), "{err}");
+        assert!(err.contains("only a model on this computer"), "{err}");
+        assert!(seen.lock().unwrap().is_empty(), "the server got nothing");
+        // A model on this computer is always allowed unless the mode is "off".
+        let on_this_computer = LlmConfig {
+            base_url: format!("{url}/v1"),
+            ..remote
+        };
+        assert!(HttpLlm::new_with_policy(&on_this_computer, &policy).is_ok());
+        assert!(seen.lock().unwrap().is_empty(), "still nothing was sent");
+    }
+
+    #[test]
+    fn remote_without_an_audit_path_sends_nothing() {
+        let answer = json!({ "choices": [{ "message": { "content": "ok" } }] });
+        let (url, seen) = recording_server(vec![answer]);
+        let mut llm = client(format!("{url}/v1"));
+        // The test server is local; pretend it is not, and forget `audited`.
+        llm.remote = true;
+        let err = llm
+            .complete(&[Message::user("x")], &Format::Text)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("must be recorded"), "{err}");
+        assert!(seen.lock().unwrap().is_empty(), "the server got nothing");
+    }
+
+    #[test]
+    fn a_remote_client_records_what_it_sends() {
+        let answer = json!({ "choices": [{ "message": { "content": "ok" } }] });
+        let (url, seen) = recording_server(vec![answer]);
+        let dir = tempfile::tempdir().unwrap();
+        let audit_path = dir.path().join("audit.jsonl");
+        let mut llm = client(format!("{url}/v1"))
+            .audited(audit_path.clone())
+            .masked(Masks::default());
+        llm.remote = true;
+        let messages = vec![Message::system("sys"), Message::user("hello")];
+        let out = llm
+            .complete(&messages, &Format::json(ok_schema(), 20))
+            .unwrap();
+        assert_eq!(out, "ok");
+        assert_eq!(seen.lock().unwrap().len(), 1, "the server got the request");
+        let sends = crate::audit::load(&audit_path).unwrap();
+        assert_eq!(sends.len(), 1);
+        assert_eq!(sends[0].messages, 2);
+        assert_eq!(sends[0].chars, "sys".len() + "hello".len());
+        assert!(sends[0].json);
+        assert_eq!(sends[0].host, crate::audit::host_of(&format!("{url}/v1")));
+    }
+
+    /// One person, one invented company word and an email, all hidden at a
+    /// remote endpoint and put back in the reply.
+    fn masks() -> Masks {
+        Masks::new(
+            &[("ada".to_string(), "Ada Lovelace".to_string())],
+            &["Acme".to_string()],
+        )
+    }
+
+    #[test]
+    fn remote_masks_the_request_and_restores_a_text_reply() {
+        let answer = json!({ "choices": [{ "message": { "content": "Person1 did it" } }] });
+        let (url, seen) = recording_server(vec![answer]);
+        let dir = tempfile::tempdir().unwrap();
+        let audit = dir.path().join("audit.jsonl");
+        let mut llm = client(format!("{url}/v1"))
+            .audited(audit.clone())
+            .masked(masks());
+        llm.remote = true;
+        let messages = vec![
+            Message::system("You help with logs"),
+            Message::user(
+                "Paired with @ada (Ada Lovelace) on the Acme build; mail ada@example.com",
+            ),
+        ];
+        let out = llm.complete(&messages, &Format::Text).unwrap();
+        assert_eq!(out, "Ada Lovelace did it");
+        let seen = seen.lock().unwrap();
+        let body = &seen[0];
+        assert!(body.contains("@person1"), "{body}");
+        assert!(body.contains("Person1"), "{body}");
+        assert!(body.contains("Term1"), "{body}");
+        assert!(body.contains("email1@example.invalid"), "{body}");
+        assert!(!body.contains("@ada"), "{body}");
+        assert!(!body.contains("Ada"), "{body}");
+        assert!(!body.contains("Acme"), "{body}");
+        assert!(!body.contains("ada@example.com"), "{body}");
+        let sends = crate::audit::load(&audit).unwrap();
+        assert_eq!(sends[0].masked, 3, "one person, one word, one email");
+        assert!(crate::audit::record_line(&sends[0]).ends_with("· 3 masked"));
+    }
+
+    #[test]
+    fn remote_masks_the_schema_and_restores_a_json_reply() {
+        let reply =
+            json!({ "choices": [{ "message": { "content": "{\"person\":\"person1\"}" } }] });
+        let (url, seen) = recording_server(vec![reply]);
+        let dir = tempfile::tempdir().unwrap();
+        let mut llm = client(format!("{url}/v1"))
+            .audited(dir.path().join("audit.jsonl"))
+            .masked(masks());
+        llm.remote = true;
+        let schema = json!({
+            "type": "object",
+            "properties": { "person": { "type": "string", "enum": ["", "ada"] } },
+            "required": ["person"]
+        });
+        let out = llm
+            .complete(&[Message::user("route this")], &Format::json(schema, 50))
+            .unwrap();
+        assert_eq!(out, r#"{"person":"ada"}"#);
+        let seen = seen.lock().unwrap();
+        let body = &seen[0];
+        // The enum value the server saw was masked; the key was not touched.
+        assert!(body.contains("person1"), "{body}");
+        assert!(!body.contains("ada"), "{body}");
+        assert!(body.contains("\"person\""), "{body}");
+    }
+
+    #[test]
+    fn only_the_values_a_schema_allows_are_masked() {
+        let mut schema = json!({
+            "type": "object",
+            "properties": {
+                "person": { "type": "string", "enum": ["", "ada"] },
+                "kind": { "const": "note" },
+                "tags": { "type": "array", "items": { "enum": ["ci"] } }
+            }
+        });
+        let mut found = Vec::new();
+        collect_schema_strings(&schema, &mut found);
+        let mut sorted = found.clone();
+        sorted.sort();
+        assert_eq!(sorted, ["", "ada", "ci", "note"]);
+        let masked: Vec<String> = found.iter().map(|s| s.to_uppercase()).collect();
+        replace_schema_strings(&mut schema, &masked, &mut 0);
+        assert_eq!(schema["type"], "object");
+        assert_eq!(schema["properties"]["person"]["type"], "string");
+        assert_eq!(schema["properties"]["person"]["enum"][1], "ADA");
+        assert_eq!(schema["properties"]["kind"]["const"], "NOTE");
+        assert_eq!(schema["properties"]["tags"]["items"]["enum"][0], "CI");
+    }
+
+    #[test]
+    fn remote_stream_restores_across_token_boundaries() {
+        let stream = Value::String(
+            "data: {\"choices\":[{\"delta\":{\"content\":\"Per\"}}]}\n\n\
+             data: {\"choices\":[{\"delta\":{\"content\":\"son1\"}}]}\n\n\
+             data: {\"choices\":[{\"delta\":{\"content\":\" did it\"}}]}\n\n\
+             data: [DONE]\n\n"
+                .into(),
+        );
+        let (url, _) = recording_server(vec![stream]);
+        let dir = tempfile::tempdir().unwrap();
+        let mut llm = client(format!("{url}/v1"))
+            .audited(dir.path().join("audit.jsonl"))
+            .masked(masks());
+        llm.remote = true;
+        let tokens = std::sync::Mutex::new(Vec::<String>::new());
+        let out = llm
+            .stream(&[Message::user("About @ada")], &mut |t| {
+                tokens.lock().unwrap().push(t.to_string());
+                true
+            })
+            .unwrap();
+        assert_eq!(out, "Ada Lovelace did it");
+        let toks = tokens.lock().unwrap();
+        // `on_token` never saw a placeholder half.
+        assert!(!toks.iter().any(|t| t == "Per" || t == "son1"), "{toks:?}");
+        assert_eq!(toks.concat(), "Ada Lovelace did it");
+    }
+
+    #[test]
+    fn a_remote_client_without_masks_sends_nothing() {
+        let answer = json!({ "choices": [{ "message": { "content": "ok" } }] });
+        let (url, seen) = recording_server(vec![answer]);
+        let dir = tempfile::tempdir().unwrap();
+        let mut llm = client(format!("{url}/v1")).audited(dir.path().join("audit.jsonl"));
+        llm.remote = true;
+        let err = llm
+            .complete(&[Message::user("x")], &Format::Text)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("must be masked") && err.contains("bug in Upleveler"),
+            "{err}"
+        );
+        assert!(seen.lock().unwrap().is_empty(), "the server got nothing");
+    }
+
+    #[test]
+    fn a_local_client_ignores_masks() {
+        let answer = json!({ "choices": [{ "message": { "content": "Ada did it" } }] });
+        let (url, seen) = recording_server(vec![answer]);
+        // Local: masking is never applied, even when `masked` was called.
+        let llm = client(format!("{url}/v1")).masked(masks());
+        let out = llm
+            .complete(&[Message::user("About @ada and Ada")], &Format::Text)
+            .unwrap();
+        assert_eq!(out, "Ada did it");
+        let seen = seen.lock().unwrap();
+        assert!(
+            seen[0].contains("@ada") && seen[0].contains("Ada"),
+            "{seen:?}"
+        );
     }
 }

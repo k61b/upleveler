@@ -127,7 +127,7 @@ fn event_loop(session: Session, wizard: bool) -> Result<()> {
         && session.cfg.llm.provider != crate::config::Provider::Openai
     {
         // Typed text is routed by the model; load it while the screen draws.
-        jobs::preload(session.cfg.llm.clone());
+        jobs::preload(session.cfg.llm.clone(), session.paths.audit.clone());
     }
     let mut app = App::new(session, width.saturating_sub(1), wizard);
     let mut screen = Screen::new(6)?;

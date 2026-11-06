@@ -141,6 +141,7 @@ impl Dashboard {
                     || e.text.to_lowercase().contains(&f)
                     || e.tags.iter().any(|t| t.contains(&f))
                     || e.date.to_string().contains(&f)
+                    || (f == "private" && e.private)
             })
             .collect()
     }
@@ -208,6 +209,31 @@ impl Dashboard {
             KeyCode::Char('d') if self.tab == Tab::Logs => {
                 if self.selected_entry().is_some() {
                     self.pending_delete = true;
+                }
+            }
+            KeyCode::Char('p') if self.tab == Tab::Logs => {
+                if let Some(e) = self.selected_entry().cloned() {
+                    // `sensitive = "keep"`: clearing the flag on an entry whose
+                    // text scans sensitive is refused, with the policy's reason.
+                    if e.private
+                        && self.session.policy.keeps_sensitive()
+                        && !self.session.scan(&e.text).is_empty()
+                    {
+                        self.set_notice(&self.session.policy.keep_message());
+                        return false;
+                    }
+                    match self.session.set_private(&e.id, !e.private) {
+                        Ok(Some(_)) => {
+                            self.refresh_entries();
+                            self.set_notice(if e.private {
+                                "Shared with the model."
+                            } else {
+                                "Kept on this computer."
+                            });
+                        }
+                        Ok(None) => self.set_notice("That entry was already gone."),
+                        Err(err) => self.set_notice(&format!("Could not change it: {err:#}")),
+                    }
                 }
             }
             KeyCode::Up | KeyCode::Char('k') => self.step(-1),
@@ -340,7 +366,9 @@ impl Dashboard {
     fn default_hint(&self) -> String {
         match (self.tab, self.filtering) {
             (_, true) => "type to filter · enter keep · esc clear".to_string(),
-            (Tab::Logs, _) => "↑↓ move · e edit · d delete · / filter · esc back".to_string(),
+            (Tab::Logs, _) => {
+                "↑↓ move · e edit · d delete · p keep/private · / filter · esc back".to_string()
+            }
             (Tab::Reports, _) => {
                 "↑↓ choose · space/pgdn scroll · tab next tab · esc back".to_string()
             }
@@ -561,16 +589,17 @@ impl Dashboard {
                 } else {
                     Style::default()
                 };
-                Line::from(fit(
-                    vec![
-                        Span::styled(
-                            format!("{} ", e.date),
-                            if i == sel { style } else { theme::accent() },
-                        ),
-                        Span::styled(e.text.replace('\n', " / "), style),
-                    ],
-                    w,
-                ))
+                let mut spans = vec![
+                    Span::styled(
+                        format!("{} ", e.date),
+                        if i == sel { style } else { theme::accent() },
+                    ),
+                    Span::styled(e.text.replace('\n', " / "), style),
+                ];
+                if e.private {
+                    spans.push(Span::styled(" · kept on this computer", theme::dim()));
+                }
+                Line::from(fit(spans, w))
             })
             .collect();
         let title = if self.filter.is_empty() && !self.filtering {

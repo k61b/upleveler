@@ -1,0 +1,12 @@
+# Strict example: no AI at all. Upleveler keeps working with plain reports,
+# logs, notes and goals. Invented "Acme" data.
+name = "Acme: AI off"
+contact = "security@acme.example"
+updated = "2026-10-01"
+
+[ai]
+mode = "off"
+
+[data]
+share_notes = false
+sensitive = "keep"
