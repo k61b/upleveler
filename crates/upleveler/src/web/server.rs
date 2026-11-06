@@ -9,7 +9,7 @@
 
 use super::data::{DashboardData, Report};
 use super::runs::{self, Kind, MakeLlm, Runs, StartError};
-use super::ui::Alert;
+use super::ui::{self, Alert};
 use super::views::{AddForm, ExportForm, GoalForm, LevelForm, NoteForm, PersonForm, RunForm};
 use super::{brand, views, FONTS, SCRIPT};
 use crate::config::Paths;
@@ -22,7 +22,7 @@ use axum::middleware::{self, Next};
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::get;
 use axum::Router;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::net::Ipv4Addr;
 use std::path::PathBuf;
@@ -204,6 +204,19 @@ fn router(state: Arc<AppState>) -> Router {
         .route("/logs/import/cancel", axum::routing::post(import_cancel))
         .route("/logs/{id}/edit", axum::routing::post(edit_log))
         .route("/logs/{id}/delete", axum::routing::post(delete_log))
+        .route("/logs/{id}/private", axum::routing::post(private_log))
+        .route("/logs/{id}/share", axum::routing::post(share_log))
+        .route(views::policy::PAGE, get(policy_page))
+        .route(views::policy::STEP, axum::routing::post(policy_step))
+        .route(
+            views::policy::DOCUMENT,
+            axum::routing::post(policy_document),
+        )
+        .route(views::policy::SAVE, axum::routing::post(policy_save))
+        .route(
+            views::policy::DOWNLOAD,
+            axum::routing::post(policy_download),
+        )
         .route(
             views::REMOVE_IMPORT,
             get(confirm_remove_import).post(remove_import),
@@ -260,11 +273,17 @@ async fn with_data<F>(state: Arc<AppState>, render: F) -> Response
 where
     F: FnOnce(&DashboardData) -> Response + Send + 'static,
 {
+    with_session_data(state, move |_, data| render(data)).await
+}
+
+/// [`with_data`], for a page that also needs the session (its settings).
+async fn with_session_data<F>(state: Arc<AppState>, render: F) -> Response
+where
+    F: FnOnce(&Session, &DashboardData) -> Response + Send + 'static,
+{
     let paths = state.paths.clone();
     let loaded = tokio::task::spawn_blocking(move || {
-        Session::at(paths)
-            .and_then(|s| DashboardData::load(&s))
-            .map(|data| render(&data))
+        Session::at(paths).and_then(|s| DashboardData::load(&s).map(|data| render(&s, &data)))
     })
     .await;
     match loaded {
@@ -297,6 +316,8 @@ struct LogsQuery {
     copy: Option<String>,
     /// Set by the redirect after editing or deleting an entry.
     saved: Option<String>,
+    /// Set after a sensitive entry was kept: its id.
+    kept: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -307,6 +328,9 @@ struct AddLog {
     date: String,
     #[serde(default)]
     tags: String,
+    /// The "keep on this computer" checkbox; "on" when ticked.
+    #[serde(default)]
+    private: String,
 }
 
 #[derive(Deserialize)]
@@ -336,7 +360,7 @@ async fn overview(State(state): State<Arc<AppState>>) -> Response {
 
 async fn logs(State(state): State<Arc<AppState>>, Query(query): Query<LogsQuery>) -> Response {
     let staging = state.paths.staging.clone();
-    with_data(state, move |data| {
+    with_session_data(state, move |session, data| {
         let mut form = AddForm::empty(data.today);
         let saved = Saved { saved: query.saved.clone() }.notice();
         form.notice = match (&query.logged, &query.duplicate, &query.removed, saved) {
@@ -361,6 +385,10 @@ async fn logs(State(state): State<Arc<AppState>>, Query(query): Query<LogsQuery>
             (None, None, None, Some(notice)) => Some(notice),
             _ => None,
         };
+        form.kept = query
+            .kept
+            .as_deref()
+            .and_then(|id| kept_notice(session, data, id));
         page(views::logs_with(data, &query.q, &form, &ExportForm::default()))
     })
     .await
@@ -386,6 +414,9 @@ async fn add_log(
 ) -> Response {
     write(state, &headers, move |session| {
         let today = crate::session::today();
+        let checked = !input.private.is_empty();
+        let found = findings(session, &input.text);
+        let private = checked || !found.is_empty();
         let tags = input
             .tags
             .split([',', ' '])
@@ -396,10 +427,24 @@ async fn add_log(
             .map_err(crate::limits::invalid)
             .and_then(|date| {
                 let date = date.unwrap_or(today);
-                session.add_log(&input.text, date, tags).map(|e| (date, e))
+                let added = if private {
+                    session.add_log_private(&input.text, date, tags)
+                } else {
+                    session.add_log(&input.text, date, tags)
+                };
+                added.map(|e| (date, e))
             });
         match added {
-            Ok((date, Some(_))) => Ok(see_other(format!("/logs?logged={date}"))),
+            Ok((date, Some(e))) => {
+                if !found.is_empty() && !checked {
+                    Ok(see_other(format!(
+                        "/logs?logged={date}&kept={}",
+                        ui::query_escape(&e.id)
+                    )))
+                } else {
+                    Ok(see_other(format!("/logs?logged={date}")))
+                }
+            }
             Ok((date, None)) => Ok(see_other(format!("/logs?duplicate={date}"))),
             Err(err) => {
                 let problem = rule(err)?;
@@ -410,6 +455,8 @@ async fn add_log(
                     tags: input.tags,
                     notice: Some((Alert::Error, problem)),
                     edit: None,
+                    private: checked,
+                    kept: None,
                 };
                 Ok(invalid(views::logs_with(
                     &data,
@@ -423,6 +470,42 @@ async fn add_log(
     .await
 }
 
+/// The notice after an entry that looks sensitive was kept on this computer,
+/// and the entry's id for its "Send it to the model anyway" button. Built from
+/// the entry itself, so a link cannot put other words on the page. When the
+/// company policy keeps sensitive text here, the notice says so and offers no
+/// button (the id is `None`).
+fn kept_notice(
+    session: &Session,
+    data: &DashboardData,
+    id: &str,
+) -> Option<(String, Option<String>)> {
+    let entry = data.entries.iter().find(|e| e.id == id && e.private)?;
+    let found = findings(session, &entry.text);
+    if found.is_empty() {
+        return None;
+    }
+    if session.policy.keeps_sensitive() {
+        return Some((session.policy.keep_message(), None));
+    }
+    let host = crate::audit::host_of(&session.cfg.llm.base_url);
+    Some((
+        crate::sensitive::warn(&found, &host),
+        Some(entry.id.clone()),
+    ))
+}
+
+/// What `text` looks like it contains, when a model that is not on this
+/// computer would otherwise see it. Empty for a local model or with AI off.
+/// The company policy's extra sensitive words are included.
+fn findings(session: &Session, text: &str) -> Vec<crate::sensitive::Finding> {
+    if session.ai_enabled() && session.cfg.llm.is_remote() {
+        session.scan(text)
+    } else {
+        Vec::new()
+    }
+}
+
 async fn edit_log(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -430,6 +513,10 @@ async fn edit_log(
     Form(input): Form<AddLog>,
 ) -> Response {
     write(state, &headers, move |session| {
+        let checked = !input.private.is_empty();
+        let found = findings(session, &input.text);
+        // `#private` / `#özel` in the text also keeps it here.
+        let private = checked || !found.is_empty() || session.marks_private(&input.text);
         let tags = input
             .tags
             .split([',', ' '])
@@ -440,7 +527,17 @@ async fn edit_log(
             .map_err(crate::limits::invalid)
             .and_then(|date| session.edit_entry(&id, Some(&input.text), date, Some(tags)));
         match edited {
-            Ok(Some(_)) => Ok(see_other("/logs?saved=entry".to_string())),
+            Ok(Some(e)) => {
+                session.set_private(&e.id, private)?;
+                if !found.is_empty() && !checked {
+                    Ok(see_other(format!(
+                        "/logs?saved=entry&kept={}",
+                        ui::query_escape(&e.id)
+                    )))
+                } else {
+                    Ok(see_other("/logs?saved=entry".to_string()))
+                }
+            }
             Ok(None) => Ok(missing()),
             Err(err) => {
                 let problem = rule(err)?;
@@ -456,7 +553,10 @@ async fn edit_log(
                         date: input.date,
                         tags: input.tags,
                         notice: Some((Alert::Error, problem)),
+                        private: checked,
                     }),
+                    private: false,
+                    kept: None,
                 };
                 Ok(invalid(views::logs_with(
                     &data,
@@ -478,6 +578,54 @@ async fn delete_log(
     write(state, &headers, move |session| {
         Ok(match session.remove_entry(&id)? {
             Some(_) => see_other("/logs?saved=entrydeleted".to_string()),
+            None => missing(),
+        })
+    })
+    .await
+}
+
+/// `/logs/{id}/private` and `/logs/{id}/share`: set or clear the "kept on this
+/// computer" flag. Same CSRF/`write` pattern as edit and delete.
+async fn private_log(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    write(state, &headers, move |session| {
+        Ok(match session.set_private(&id, true)? {
+            Some(_) => see_other("/logs?saved=private".to_string()),
+            None => missing(),
+        })
+    })
+    .await
+}
+
+async fn share_log(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    write(state, &headers, move |session| {
+        let entry = session.entries()?.into_iter().find(|e| e.id == id);
+        let Some(entry) = entry else {
+            return Ok(missing());
+        };
+        // `sensitive = "keep"`: refuse for an entry whose text scans sensitive,
+        // with a plain message naming the policy. Clearing the flag on a
+        // non-sensitive entry still works.
+        if session.policy.keeps_sensitive() && !session.scan(&entry.text).is_empty() {
+            let data = DashboardData::load(session)?;
+            let mut form = AddForm::empty(data.today);
+            form.notice = Some((Alert::Error, session.policy.keep_message()));
+            return Ok(invalid(views::logs_with(
+                &data,
+                "",
+                &form,
+                &ExportForm::default(),
+            )));
+        }
+        Ok(match session.set_private(&id, false)? {
+            Some(_) => see_other("/logs?saved=shared".to_string()),
             None => missing(),
         })
     })
@@ -527,6 +675,268 @@ where
 /// (`limits::Invalid`); any other error goes on to the error page.
 fn rule(err: anyhow::Error) -> Result<String> {
     crate::limits::problem(&err).ok_or(err)
+}
+
+// ---- the company AI policy page ------------------------------------------
+
+/// What a policy conversation carries from one form to the next: what is
+/// settled, what was asked and answered, and the question waiting.
+#[derive(Default, Serialize, Deserialize)]
+struct PolicyState {
+    draft: crate::policy_draft::Draft,
+    turns: Vec<crate::policy_draft::Turn>,
+    question: String,
+}
+
+/// The longest conversation state and pasted document the page accepts.
+const POLICY_STATE_MAX: usize = 200_000;
+const POLICY_TEXT_MAX: usize = 100_000;
+
+#[derive(Deserialize)]
+struct PolicyStepForm {
+    #[serde(default)]
+    state: String,
+    #[serde(default)]
+    answer: String,
+}
+
+#[derive(Deserialize)]
+struct PolicyTextForm {
+    #[serde(default)]
+    text: String,
+}
+
+#[derive(Deserialize)]
+struct PolicyQuery {
+    saved: Option<String>,
+}
+
+/// Whether a model can help write a policy here (AI on, and allowed).
+fn policy_ai(session: &Session) -> bool {
+    session.ai_enabled() && session.llm().is_ok()
+}
+
+fn policy_overview(session: &Session, notice: Option<(Alert, String)>) -> maud::Markup {
+    views::policy::policy(&views::policy::PolicyPage {
+        in_force: session.policy.display(&session.paths),
+        ai: policy_ai(session),
+        notice,
+    })
+}
+
+/// The finished draft (or a text the person edited), for review.
+fn policy_result(text: &str, notes: &[String], notice: Option<(Alert, String)>) -> maud::Markup {
+    let summary = crate::policy::Policy::parse(text)
+        .map(|p| p.summary())
+        .unwrap_or_default();
+    views::policy::result(&views::policy::PolicyResult {
+        text,
+        summary: &summary,
+        notes,
+        example: false,
+        notice,
+    })
+}
+
+async fn policy_page(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<PolicyQuery>,
+) -> Response {
+    with_session_data(state, move |session, _| {
+        let notice = query.saved.map(|_| {
+            (
+                Alert::Success,
+                "Saved. It applies to Upleveler on this computer now.".to_string(),
+            )
+        });
+        page(policy_overview(session, notice))
+    })
+    .await
+}
+
+/// One step of writing a policy: the answer to the waiting question goes to
+/// the model, which asks the next one or finishes the draft.
+async fn policy_step(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Form(form): Form<PolicyStepForm>,
+) -> Response {
+    let make_llm = state.make_llm.clone();
+    write(state, &headers, move |session| {
+        if form.state.len() > POLICY_STATE_MAX {
+            return Ok(invalid(policy_overview(
+                session,
+                Some((
+                    Alert::Error,
+                    "That conversation is too long; start again.".into(),
+                )),
+            )));
+        }
+        let mut st: PolicyState = if form.state.trim().is_empty() {
+            PolicyState::default()
+        } else {
+            serde_json::from_str(&form.state).context("reading the conversation")?
+        };
+        if !st.question.is_empty() {
+            let answer = form.answer.trim();
+            if answer.is_empty() {
+                let state = serde_json::to_string(&st)?;
+                return Ok(invalid(views::policy::chat(
+                    &views::policy::PolicyChatView {
+                        turns: &st.turns,
+                        question: &st.question,
+                        state: &state,
+                        notice: Some((Alert::Error, "Type an answer, or \"done\".".into())),
+                    },
+                )));
+            }
+            st.turns.push(crate::policy_draft::Turn {
+                question: std::mem::take(&mut st.question),
+                answer: answer.chars().take(4000).collect(),
+            });
+        }
+        let Some(llm) = make_llm(session, Arc::new(AtomicBool::new(false)))? else {
+            return Ok(see_other(views::policy::PAGE.to_string()));
+        };
+        let budget = session.cfg.llm.input_budget_chars();
+        match crate::policy_draft::interview(llm.as_ref(), &st.draft, &st.turns, budget) {
+            Ok(step) => {
+                st.draft = step.draft;
+                match step.question {
+                    Some(question) => {
+                        st.question = question;
+                        let state = serde_json::to_string(&st)?;
+                        Ok(page(views::policy::chat(&views::policy::PolicyChatView {
+                            turns: &st.turns,
+                            question: &st.question,
+                            state: &state,
+                            notice: None,
+                        })))
+                    }
+                    None => {
+                        let text = crate::policy_draft::render(
+                            &st.draft,
+                            &crate::session::today().to_string(),
+                        );
+                        Ok(page(policy_result(&text, &[], None)))
+                    }
+                }
+            }
+            Err(err) => {
+                let notice = Some((
+                    Alert::Error,
+                    format!("The model did not answer ({err:#}). Try again."),
+                ));
+                // The last answer can be sent again; nothing said is lost.
+                let Some(turn) = st.turns.pop() else {
+                    return Ok(page(policy_overview(session, notice)));
+                };
+                st.question = turn.question;
+                let state = serde_json::to_string(&st)?;
+                Ok(page(views::policy::chat(&views::policy::PolicyChatView {
+                    turns: &st.turns,
+                    question: &st.question,
+                    state: &state,
+                    notice,
+                })))
+            }
+        }
+    })
+    .await
+}
+
+/// The company's written rules, pasted, read into a draft.
+async fn policy_document(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Form(form): Form<PolicyTextForm>,
+) -> Response {
+    let make_llm = state.make_llm.clone();
+    write(state, &headers, move |session| {
+        let text = form.text.trim();
+        if text.is_empty() || text.len() > POLICY_TEXT_MAX {
+            let problem = if text.is_empty() {
+                "Paste your company's rules first."
+            } else {
+                "That is too long to read here; save it as a file and run upleveler policy draft <file>."
+            };
+            return Ok(invalid(policy_overview(
+                session,
+                Some((Alert::Error, problem.to_string())),
+            )));
+        }
+        let Some(llm) = make_llm(session, Arc::new(AtomicBool::new(false)))? else {
+            return Ok(see_other(views::policy::PAGE.to_string()));
+        };
+        let budget = session.cfg.llm.input_budget_chars();
+        match crate::policy_draft::from_document(llm.as_ref(), text, budget) {
+            Ok((draft, notes)) => {
+                let text =
+                    crate::policy_draft::render(&draft, &crate::session::today().to_string());
+                Ok(page(policy_result(&text, &notes, None)))
+            }
+            Err(err) => Ok(page(policy_overview(
+                session,
+                Some((
+                    Alert::Error,
+                    format!("The model did not answer ({err:#}). Try again."),
+                )),
+            ))),
+        }
+    })
+    .await
+}
+
+/// Saves the reviewed policy as this computer's own `policy.toml`. A text that
+/// does not parse is shown again with the problem, never saved.
+async fn policy_save(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Form(form): Form<PolicyTextForm>,
+) -> Response {
+    write(
+        state,
+        &headers,
+        move |session| match crate::policy_draft::save(&form.text, &session.paths.policy) {
+            Ok(()) => Ok(see_other(format!("{}?saved=1", views::policy::PAGE))),
+            Err(err) => Ok(invalid(policy_result(
+                &form.text,
+                &[],
+                Some((Alert::Error, format!("{err:#}"))),
+            ))),
+        },
+    )
+    .await
+}
+
+/// The reviewed policy as a `policy.toml` download, once it parses.
+async fn policy_download(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Form(form): Form<PolicyTextForm>,
+) -> Response {
+    write(state, &headers, move |_| {
+        if let Err(err) = crate::policy::Policy::parse(&form.text) {
+            return Ok(invalid(policy_result(
+                &form.text,
+                &[],
+                Some((Alert::Error, format!("This is not a valid policy: {err:#}"))),
+            )));
+        }
+        Ok((
+            StatusCode::OK,
+            [
+                (header::CONTENT_TYPE, "application/toml; charset=utf-8"),
+                (
+                    header::CONTENT_DISPOSITION,
+                    "attachment; filename=\"policy.toml\"",
+                ),
+            ],
+            form.text,
+        )
+            .into_response())
+    })
+    .await
 }
 
 fn see_other(location: String) -> Response {
@@ -590,6 +1000,8 @@ impl Saved {
             "uncheckin" => "Check-in deleted.",
             "entry" => "Entry saved.",
             "entrydeleted" => "Entry deleted.",
+            "private" => "Kept on this computer.",
+            "shared" => "Shared with the model.",
             "levels" => "Levels saved.",
             "imported" => "File imported.",
             _ => return None,
@@ -3108,5 +3520,293 @@ mod tests {
         assert_eq!(a.len(), 48);
         assert_ne!(a, b);
         assert!(same(&a, &a) && !same(&a, &b) && !same("ab", "abc"));
+    }
+
+    #[tokio::test]
+    async fn private_and_share_routes_toggle_the_flag() {
+        let home = tempfile::tempdir().unwrap();
+        let paths = Paths::at(home.path().to_path_buf());
+        let session = Session::at(paths.clone()).unwrap();
+        let day = chrono::NaiveDate::from_ymd_opt(2026, 10, 2).unwrap();
+        let entry = session
+            .add_log("Shipped the ledger export", day, vec![])
+            .unwrap()
+            .unwrap();
+        let state = Arc::new(AppState::new(4747, TOKEN.into(), paths));
+        let post = |path: &str| {
+            Request::post(path)
+                .header("origin", "http://127.0.0.1:4747")
+                .header("sec-fetch-site", "same-origin")
+        };
+
+        let made = send(&state, post(&format!("/logs/{}/private", entry.id)), "").await;
+        assert_eq!(made.status(), StatusCode::SEE_OTHER);
+        assert!(session.entries().unwrap()[0].private);
+        let logs = body(send(&state, Request::get("/logs"), "").await).await;
+        assert!(logs.contains("kept on this computer"));
+        // Filtering by "private" finds it.
+        assert!(
+            body(send(&state, Request::get("/logs?q=private"), "").await)
+                .await
+                .contains("Shipped the ledger export")
+        );
+
+        let shared = send(&state, post(&format!("/logs/{}/share", entry.id)), "").await;
+        assert_eq!(shared.status(), StatusCode::SEE_OTHER);
+        assert!(!session.entries().unwrap()[0].private);
+    }
+
+    #[tokio::test]
+    async fn sensitive_add_is_kept_private_with_a_share_button() {
+        let home = tempfile::tempdir().unwrap();
+        let paths = Paths::at(home.path().to_path_buf());
+        let mut session = Session::at(paths.clone()).unwrap();
+        session.cfg.llm.provider = crate::config::Provider::Openai;
+        session.cfg.llm.base_url = "https://llm.example.com/v1".into();
+        session.cfg.llm.allow_remote = true;
+        session.save_config().unwrap();
+        let state = Arc::new(AppState::new(4747, TOKEN.into(), paths));
+        // An invented but checksum-valid ID number.
+        let form = "text=My+TCKN+is+12345678950&date=2026-10-02&tags="; // gitleaks:allow
+        let req = Request::post("/logs")
+            .header("origin", "http://127.0.0.1:4747")
+            .header("sec-fetch-site", "same-origin");
+        let res = send(&state, req, form).await;
+        assert_eq!(res.status(), StatusCode::SEE_OTHER);
+        let location = res.headers()[header::LOCATION]
+            .to_str()
+            .unwrap()
+            .to_string();
+        assert!(location.contains("kept="), "{location}");
+        assert!(session.entries().unwrap()[0].private);
+        let page = body(get_in(home.path(), &location).await).await;
+        assert!(page.contains("Send it to the model anyway"));
+        assert!(page.contains("will not be sent to llm.example.com"));
+        // The notice is rebuilt from the entry, never taken from the link.
+        let id = &session.entries().unwrap()[0].id;
+        let forged = format!("/logs?kept={id}&keptmsg=Call+this+number");
+        let page = body(get_in(home.path(), &forged).await).await;
+        assert!(!page.contains("Call this number"));
+        let other = body(get_in(home.path(), "/logs?kept=missing").await).await;
+        assert!(!other.contains("Send it to the model anyway"));
+    }
+
+    /// A policy with `sensitive = "keep"` refuses `/logs/{id}/share` for an
+    /// entry whose text scans sensitive, with a message naming the policy.
+    /// Clearing the flag on a non-sensitive entry still works.
+    #[tokio::test]
+    async fn a_keep_policy_refuses_sharing_a_sensitive_entry() {
+        let home = tempfile::tempdir().unwrap();
+        let paths = Paths::at(home.path().to_path_buf());
+        std::fs::write(
+            &paths.policy,
+            "name = \"Acme engineering: AI use\"\n[data]\nsensitive = \"keep\"\n",
+        )
+        .unwrap();
+        let mut session = Session::at(paths.clone()).unwrap();
+        assert!(session.policy.keeps_sensitive());
+        session.cfg.llm.provider = crate::config::Provider::Openai;
+        session.cfg.llm.base_url = "https://llm.example.com/v1".into();
+        session.cfg.llm.allow_remote = true;
+        session.save_config().unwrap();
+        let day = chrono::NaiveDate::from_ymd_opt(2026, 10, 2).unwrap();
+        // An invented but checksum-valid ID number makes the entry sensitive.
+        let entry = session
+            .add_log_private("My TCKN is 12345678950", day, vec![]) // gitleaks:allow
+            .unwrap()
+            .unwrap();
+        assert!(entry.private);
+        let state = Arc::new(AppState::new(4747, TOKEN.into(), paths));
+        let post = |path: &str| {
+            Request::post(path)
+                .header("origin", "http://127.0.0.1:4747")
+                .header("sec-fetch-site", "same-origin")
+        };
+
+        let res = send(&state, post(&format!("/logs/{}/share", entry.id)), "").await;
+        assert_eq!(res.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let page = body(res).await;
+        assert!(page.contains("Acme engineering: AI use"), "{page}");
+        assert!(page.contains("cannot be sent to the model"), "{page}");
+        assert!(
+            Session::at(Paths::at(home.path().to_path_buf()))
+                .unwrap()
+                .entries()
+                .unwrap()
+                .iter()
+                .find(|e| e.id == entry.id)
+                .unwrap()
+                .private,
+            "the flag was not cleared"
+        );
+        // No "Send to the model" button for that entry, but an ordinary private
+        // entry can still be shared.
+        let logs = body(get_in(home.path(), "/logs").await).await;
+        assert!(!logs.contains("Send to the model"), "{logs}");
+        assert!(logs.contains("Your company's policy keeps this on this computer."));
+        let plain = session
+            .add_log_private("Ordinary entry", day, vec![])
+            .unwrap()
+            .unwrap();
+        let res = send(&state, post(&format!("/logs/{}/share", plain.id)), "").await;
+        assert_eq!(res.status(), StatusCode::SEE_OTHER);
+    }
+
+    /// The Overview shows the company AI policy card when one is in force.
+    #[tokio::test]
+    async fn the_overview_shows_the_company_policy() {
+        let home = tempfile::tempdir().unwrap();
+        let paths = Paths::at(home.path().to_path_buf());
+        std::fs::write(
+            &paths.policy,
+            "name = \"Acme engineering: AI use\"\ncontact = \"security@acme.example\"\n\
+             [ai]\nmode = \"local\"\n[endpoint]\nno_training = true\nretention = \"none\"\n",
+        )
+        .unwrap();
+        let overview = body(get_in(home.path(), "/").await).await;
+        assert!(overview.contains("Your company's AI policy"), "{overview}");
+        assert!(overview.contains("Acme engineering: AI use"), "{overview}");
+        assert!(
+            overview.contains("Contact: security@acme.example"),
+            "{overview}"
+        );
+        assert!(overview.contains("not used for training"), "{overview}");
+    }
+
+    /// The policy page: a policy written question by question with a fake
+    /// model, reviewed, saved as this computer's own and downloaded; one read
+    /// from pasted rules; and a text that does not parse is never saved.
+    #[tokio::test]
+    async fn a_policy_is_written_in_the_browser() {
+        let home = tempfile::tempdir().unwrap();
+        let paths = Paths::at(home.path().to_path_buf());
+        let mut state = AppState::new(4747, TOKEN.into(), paths.clone());
+        state.make_llm = Arc::new(|_: &Session, _| {
+            Ok(Some(Box::new(crate::llm::FakeLlm {
+                reply: |messages: &[crate::llm::Message], _| {
+                    let user = &messages[messages.len() - 1].content;
+                    let mut policy =
+                        serde_json::to_value(crate::policy_draft::Draft::default()).unwrap();
+                    if user.starts_with("The company's rules") {
+                        policy["mode"] = "off".into();
+                        return serde_json::json!({ "policy": policy, "unclear": ["No contact is named."] })
+                            .to_string();
+                    }
+                    if user.contains("nothing yet") {
+                        return serde_json::json!({ "policy": policy, "question": "Which models may Upleveler use?", "done": false })
+                            .to_string();
+                    }
+                    assert!(user.contains("Only models on the laptop"), "{user}");
+                    policy["name"] = "Acme: local models only".into();
+                    policy["mode"] = "local".into();
+                    serde_json::json!({ "policy": policy, "question": "", "done": true })
+                        .to_string()
+                },
+            }) as Box<dyn crate::llm::Llm>))
+        });
+        let state = Arc::new(state);
+        let same = |req: axum::http::request::Builder| {
+            req.header("origin", "http://127.0.0.1:4747")
+                .header("sec-fetch-site", "same-origin")
+        };
+        let unescape = |s: &str| {
+            s.replace("&quot;", "\"")
+                .replace("&lt;", "<")
+                .replace("&gt;", ">")
+                .replace("&amp;", "&")
+        };
+
+        let start = body(send(&state, Request::get("/policy"), "").await).await;
+        assert!(start.contains("No company AI policy"), "{start}");
+        assert!(start.contains("Start with questions"));
+
+        let asked = body(send(&state, same(Request::post("/policy/step")), "state=").await).await;
+        assert!(asked.contains("Which models may Upleveler use?"), "{asked}");
+        let at = asked.find("name=\"state\" value=\"").unwrap() + 20;
+        let st = unescape(&asked[at..at + asked[at..].find('"').unwrap()]);
+
+        // An empty answer asks again.
+        let empty = send(
+            &state,
+            same(Request::post("/policy/step")),
+            &format!("state={}&answer=", ui::query_escape(&st)),
+        )
+        .await;
+        assert_eq!(empty.status(), StatusCode::UNPROCESSABLE_ENTITY);
+
+        let done = body(
+            send(
+                &state,
+                same(Request::post("/policy/step")),
+                &format!(
+                    "state={}&answer={}",
+                    ui::query_escape(&st),
+                    ui::query_escape("Only models on the laptop")
+                ),
+            )
+            .await,
+        )
+        .await;
+        assert!(done.contains("mode = &quot;local&quot;"), "{done}");
+        assert!(done.contains("Use it on this computer"));
+        let at = done.find("spellcheck=\"false\">").unwrap() + 19;
+        let text = unescape(&done[at..at + done[at..].find("</textarea>").unwrap()]);
+
+        // Download: a valid file as an attachment.
+        let file = send(
+            &state,
+            same(Request::post("/policy/download")),
+            &format!("text={}", ui::query_escape(&text)),
+        )
+        .await;
+        assert_eq!(file.status(), StatusCode::OK);
+        assert!(file.headers()[header::CONTENT_DISPOSITION]
+            .to_str()
+            .unwrap()
+            .contains("policy.toml"));
+
+        // A text that does not parse is shown again, not saved.
+        let bad = send(
+            &state,
+            same(Request::post("/policy/save")),
+            &format!("text={}", ui::query_escape("[ai]\nmode = \"sometimes\"\n")),
+        )
+        .await;
+        assert_eq!(bad.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(!paths.policy.exists());
+
+        let saved = send(
+            &state,
+            same(Request::post("/policy/save")),
+            &format!("text={}", ui::query_escape(&text)),
+        )
+        .await;
+        assert_eq!(saved.status(), StatusCode::SEE_OTHER);
+        let policy = crate::policy::Policy::load_from(std::slice::from_ref(&paths.policy)).unwrap();
+        assert_eq!(policy.ai.mode, crate::policy::AiMode::Local);
+        let after = body(send(&state, Request::get("/policy?saved=1"), "").await).await;
+        assert!(after.contains("Acme: local models only"), "{after}");
+
+        // Pasted rules, with what they leave open.
+        let read = body(
+            send(
+                &state,
+                same(Request::post("/policy/document")),
+                "text=No+AI+tools+at+work.",
+            )
+            .await,
+        )
+        .await;
+        assert!(read.contains("No contact is named."), "{read}");
+        assert!(read.contains("mode = &quot;off&quot;"), "{read}");
+
+        // Posting from another site is refused.
+        let forged = send(
+            &state,
+            Request::post("/policy/save").header("origin", "https://evil.example"),
+            "text=",
+        )
+        .await;
+        assert_eq!(forged.status(), StatusCode::FORBIDDEN);
     }
 }

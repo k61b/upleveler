@@ -10,7 +10,9 @@ use crate::import::workbook::{Choices, GoalDraft};
 use crate::import::{self, Collected, ImportedFile, Plan};
 use crate::ladder::{Ladder, SheetPlan, SheetRole};
 use crate::llm::{HttpLlm, Llm};
+use crate::mask::Masks;
 use crate::people::{normalize_handle, Note, NoteKind, NoteStore, People, Person};
+use crate::policy::Policy;
 use crate::store::{Entry, Filter, Store};
 use crate::Progress;
 use anyhow::{bail, Context, Result};
@@ -53,6 +55,9 @@ fn clip(text: &str, max: usize) -> String {
 pub struct Session {
     pub paths: Paths,
     pub cfg: Config,
+    /// The company AI policy in force, loaded at start. `config.toml` and the
+    /// person's own choices cannot loosen it.
+    pub policy: Policy,
     pub store: Store,
 }
 
@@ -139,10 +144,19 @@ impl Session {
         Self::at(Paths::resolve()?)
     }
 
+    /// Opens a session, loading the company AI policy too. A policy file that
+    /// exists but cannot be read or parsed stops the app here (fail closed), so
+    /// the terminal app, the browser dashboard and the CLI all see it.
     pub fn at(paths: Paths) -> Result<Self> {
         let cfg = Config::load(&paths)?;
+        let policy = Policy::load(&paths)?;
         let store = Store::new(&paths.logs);
-        Ok(Self { paths, cfg, store })
+        Ok(Self {
+            paths,
+            cfg,
+            policy,
+            store,
+        })
     }
 
     pub fn configured(&self) -> bool {
@@ -153,16 +167,55 @@ impl Session {
         self.cfg.save(&self.paths)
     }
 
-    /// False when the person chose to use Upleveler without AI.
+    /// False when the person chose to use Upleveler without AI, or when the
+    /// company policy turns AI off. `config.toml` is left as written; the
+    /// policy is applied at run time only.
     pub fn ai_enabled(&self) -> bool {
-        self.cfg.llm.enabled
+        self.cfg.llm.enabled && self.policy.ai_allowed()
+    }
+
+    /// True when notes about people may go to this endpoint: the person's own
+    /// setting and the company policy both have to allow it.
+    pub fn notes_allowed(&self) -> bool {
+        self.cfg.llm.notes_allowed() && self.policy.notes_allowed()
+    }
+
+    /// What `text` looks like it contains, including the extra sensitive words
+    /// the company's policy lists. Deterministic, no model involved.
+    pub fn scan(&self, text: &str) -> Vec<crate::sensitive::Finding> {
+        crate::sensitive::scan_with(text, &self.policy.data.sensitive_words)
+    }
+
+    /// True when a `#tag` in `text` keeps an entry on this computer, including
+    /// the extra private tags the company's policy lists.
+    pub fn marks_private(&self, text: &str) -> bool {
+        crate::store::text_marks_private_with(text, &self.policy.data.private_tags)
+    }
+
+    /// What a model that is not on this computer must not see: the people in
+    /// `people.yaml` (handle and name), the configured `mask_words` and the
+    /// extra ones from the company policy. A people file that cannot be read
+    /// is an error, so a remote request never goes out with an empty mask by
+    /// accident.
+    pub fn masks(&self) -> Result<Masks> {
+        let people = self.people()?;
+        let pairs: Vec<(String, String)> = people
+            .people
+            .iter()
+            .map(|p| (p.handle.clone(), p.name.clone()))
+            .collect();
+        let mut words = self.cfg.llm.mask_words.clone();
+        words.extend(self.policy.data.mask_words.iter().cloned());
+        Ok(Masks::new(&pairs, &words))
     }
 
     pub fn llm(&self) -> Result<HttpLlm> {
         if !self.ai_enabled() {
             bail!("{AI_OFF}");
         }
-        HttpLlm::new(&self.cfg.llm)
+        Ok(HttpLlm::new_with_policy(&self.cfg.llm, &self.policy)?
+            .audited(self.paths.audit.clone())
+            .masked(self.masks()?))
     }
 
     /// The model, or `None` when AI is turned off; the analyses then write
@@ -171,7 +224,12 @@ impl Session {
         if !self.ai_enabled() {
             return Ok(None);
         }
-        HttpLlm::new(&self.cfg.llm).map(Some)
+        let masks = self.masks()?;
+        Ok(Some(
+            HttpLlm::new_with_policy(&self.cfg.llm, &self.policy)?
+                .audited(self.paths.audit.clone())
+                .masked(masks),
+        ))
     }
 
     pub fn ladder(&self) -> Result<Option<Ladder>> {
@@ -180,6 +238,74 @@ impl Session {
 
     pub fn entries(&self) -> Result<Vec<Entry>> {
         self.store.load()
+    }
+
+    /// Entries a model that is not on this computer may see. When the model is
+    /// on this computer, or AI is off, this is every entry; when it is not on
+    /// this computer, the private ones are left out so their text never gets
+    /// into a prompt.
+    pub fn model_entries(&self) -> Result<Vec<Entry>> {
+        let entries = self.store.load()?;
+        if self.ai_enabled() && self.cfg.llm.is_remote() {
+            Ok(entries.into_iter().filter(|e| !e.private).collect())
+        } else {
+            Ok(entries)
+        }
+    }
+
+    /// What a file to import looks like it contains, when a model that is not
+    /// on this computer would read it. Empty for a model on this computer, or
+    /// with AI off. Any finding means the import runs without the model.
+    pub fn import_findings(&self, file: &Path) -> Vec<crate::sensitive::Finding> {
+        if self.ai_enabled() && self.cfg.llm.is_remote() {
+            self.scan(&import::incoming_text(file))
+        } else {
+            Vec::new()
+        }
+    }
+
+    /// Sets (or clears) the "kept on this computer" flag on one entry. Returns
+    /// the changed entry if it existed, the same shape as [`Session::edit_entry`]
+    /// so the TUI can undo it.
+    pub fn set_private(&self, id: &str, private: bool) -> Result<Option<Entry>> {
+        self.store.update_entry(id, |entry| {
+            entry.private = private;
+        })
+    }
+
+    /// How many entries are kept on this computer (never sent to the model).
+    /// Zero unless a model that is not on this computer is in use.
+    pub fn kept_count(&self) -> usize {
+        if !(self.ai_enabled() && self.cfg.llm.is_remote()) {
+            return 0;
+        }
+        self.store
+            .load()
+            .map(|es| es.iter().filter(|e| e.private).count())
+            .unwrap_or(0)
+    }
+
+    /// The line an AI report gets when private entries were left out.
+    fn kept_note(&self) -> Option<String> {
+        let kept = self.kept_count();
+        (kept > 0).then(|| crate::analyze::kept_entries_note(&self.cfg, kept))
+    }
+
+    /// Inserts the "kept on this computer" note into an AI report, right after
+    /// its header's intro line. Plain (no-AI) reports are unchanged.
+    fn with_kept_note(&self, md: String) -> String {
+        let Some(note) = self.kept_note() else {
+            return md;
+        };
+        let line = format!("_{note}_");
+        if let Some(blank) = md.find("\n\n") {
+            let intro = blank + 2;
+            if let Some(rel) = md[intro..].find('\n') {
+                let at = intro + rel + 1;
+                return format!("{}{line}\n{}", &md[..at], &md[at..]);
+            }
+        }
+        format!("{line}\n\n{md}")
     }
 
     pub fn status(&self) -> Result<Status> {
@@ -206,18 +332,39 @@ impl Session {
     /// Adds an entry; `None` means the same text was already logged that day.
     /// `#tags` in the text become tags; a tag that is an expectation id of
     /// the ladder (`#L3.mentoring.1`) ties the entry to that expectation.
-    pub fn add_log(
+    pub fn add_log(&self, text: &str, date: NaiveDate, tags: Vec<String>) -> Result<Option<Entry>> {
+        self.add_log_with(text, date, tags, false)
+    }
+
+    /// Adds an entry kept on this computer: it is never sent to a model that
+    /// is not on this computer. Otherwise the same as [`Session::add_log`].
+    pub fn add_log_private(
+        &self,
+        text: &str,
+        date: NaiveDate,
+        tags: Vec<String>,
+    ) -> Result<Option<Entry>> {
+        self.add_log_with(text, date, tags, true)
+    }
+
+    fn add_log_with(
         &self,
         text: &str,
         date: NaiveDate,
         mut tags: Vec<String>,
+        private: bool,
     ) -> Result<Option<Entry>> {
         use crate::limits::{LOG_EMPTY, LOG_LONG, TEXT};
         let (text, found) = crate::intent::hashtags(text);
         let text = crate::limits::text(&text, TEXT, LOG_EMPTY, LOG_LONG)?;
         tags.extend(found);
         let (tags, linked) = self.split_links(tags);
+        // `#private` / `#özel` and the company's extra private tags set the
+        // flag and vanish from the tags, for entries added here too.
+        let (tags, private_tag) =
+            crate::store::normalize_tags_with(tags, &self.policy.data.private_tags);
         let mut entry = Entry::new(date, text, tags, "manual");
+        entry.private = entry.private || private_tag || private;
         entry.expectations = linked.clone();
         entry.linked = linked;
         Ok(self.store.add_new(vec![entry])?.into_iter().next())
@@ -320,7 +467,14 @@ impl Session {
             if tags_given || !found.is_empty() {
                 let mut all = std::mem::take(&mut entry.tags);
                 all.extend(found);
-                entry.tags = crate::store::normalize_tags(all);
+                let (normalized, private_tag) =
+                    crate::store::normalize_tags_with(all, &self.policy.data.private_tags);
+                entry.tags = normalized;
+                // `#private` / `#özel` (and the policy's tags) in the text
+                // always keeps it here, even when a form tried to clear the flag.
+                if private_tag {
+                    entry.private = true;
+                }
             }
             entry.expectations.retain(|x| !old_links.contains(x));
             entry.expectations.extend(entry.linked.iter().cloned());
@@ -640,6 +794,11 @@ impl Session {
             bail!("{} does not exist", file.display());
         }
         let staged = import::is_staging(file);
+        // When the model is not on this computer, an import whose text looks
+        // sensitive runs without the model, so none of it leaves. Its sensitive
+        // entries are kept on this computer.
+        let sensitive = self.import_findings(file);
+        let llm = if sensitive.is_empty() { llm } else { None };
         // Say so before reading anything with the model, which can take minutes.
         let given = choices.person.as_deref().and_then(normalize_handle);
         if given.is_none() && !staged && import::sheet::is_sheet(file) {
@@ -652,13 +811,26 @@ impl Session {
             }
         }
         let mut collected = import::collect(file, llm, &self.cfg, today(), choices, progress)?;
+        if !sensitive.is_empty() {
+            collected.warnings.push(format!(
+                "{} looks like it contains {}; imported without the model so it stays on this computer",
+                file.file_name().and_then(|n| n.to_str()).unwrap_or("the file"),
+                crate::sensitive::describe_all(&sensitive, "en"),
+            ));
+        }
         let target = into.unwrap_or_else(|| self.paths.logs.clone());
         let existing: HashSet<String> = Store::new(&target)
             .load()?
             .into_iter()
             .map(|e| e.id)
             .collect();
-        let plan = import::plan(&collected.drafts, &existing, default_date);
+        let plan = import::plan_with(
+            &collected.drafts,
+            &existing,
+            default_date,
+            !sensitive.is_empty(),
+            &self.policy.data.sensitive_words,
+        );
         let staging = if staged {
             file.to_path_buf()
         } else {
@@ -927,17 +1099,34 @@ impl Session {
             .unwrap_or("")
             .to_lowercase();
         if ext == "yaml" || ext == "yml" {
+            // Taken as written: no file text is sent to a model.
             let raw =
                 fs::read_to_string(file).with_context(|| format!("reading {}", file.display()))?;
             return Ok((Ladder::from_yaml(&raw)?, Vec::new()));
         }
-        crate::ladder::read(
+        // When the model is not on this computer, a ladder document whose text
+        // looks sensitive is read without the model, so none of it leaves.
+        let mut warnings = Vec::new();
+        let findings = self.import_findings(file);
+        let llm = if findings.is_empty() {
+            llm
+        } else {
+            warnings.push(format!(
+                "{} looks like it contains {}; imported without the model so it stays on this computer",
+                file.file_name().and_then(|n| n.to_str()).unwrap_or("the file"),
+                crate::sensitive::describe_all(&findings, "en"),
+            ));
+            None
+        };
+        let (ladder, more) = crate::ladder::read(
             file,
             roles,
             llm,
             self.cfg.llm.input_budget_chars(),
             progress,
-        )
+        )?;
+        warnings.extend(more);
+        Ok((ladder, warnings))
     }
 
     /// The sheets of a ladder workbook with the role each most likely has;
@@ -996,7 +1185,8 @@ impl Session {
     ) -> Result<(Ladder, Vec<Entry>, Vec<String>)> {
         let ladder = Ladder::require(&self.paths.ladder)?;
         let levels = Levels::resolve(&self.cfg, &ladder)?;
-        let mut entries = self.store.load()?;
+        // A model that is not on this computer never sees private entries.
+        let mut entries = self.model_entries()?;
         if entries.is_empty() {
             bail!("{NO_ENTRIES}");
         }
@@ -1036,7 +1226,7 @@ impl Session {
         let (ladder, entries, warnings) = self.prepare(llm, range, progress)?;
         let levels = Levels::resolve(&self.cfg, &ladder)?;
         let background = self.background(&entries)?;
-        let report = analyze::gap(
+        let mut report = analyze::gap(
             llm,
             &self.cfg,
             &levels,
@@ -1051,6 +1241,7 @@ impl Session {
         if !rows.is_empty() && report.summary.count("unknown") == rows.len() {
             bail!("the model could not rate any expectation, so no gap report was saved. Check the model with /model and try again.");
         }
+        report.markdown = self.with_kept_note(std::mem::take(&mut report.markdown));
         self.save_gap(report, warnings)
     }
 
@@ -1100,7 +1291,7 @@ impl Session {
         let mut background = self.background(&entries)?;
         // The promotion document is about the developer's own work.
         background.goals.clear();
-        let md = analyze::brag(
+        let md = self.with_kept_note(analyze::brag(
             llm,
             &self.cfg,
             &levels,
@@ -1108,7 +1299,7 @@ impl Session {
             range,
             &background,
             progress,
-        )?;
+        )?);
         let path = self.save_report(&format!("brag-{name}"), &md)?;
         Ok(Analysis {
             output: md,
@@ -1123,10 +1314,13 @@ impl Session {
         range: Range,
         progress: Progress,
     ) -> Result<Analysis<String>> {
-        let entries = self.store.load()?;
         let md = match llm {
-            Some(llm) => analyze::summary(llm, &self.cfg, &entries, range, progress)?,
-            None => analyze::summary_plain(&self.cfg, &entries, range)?,
+            Some(llm) => {
+                // A model that is not on this computer never sees private entries.
+                let entries = self.model_entries()?;
+                self.with_kept_note(analyze::summary(llm, &self.cfg, &entries, range, progress)?)
+            }
+            None => analyze::summary_plain(&self.cfg, &self.store.load()?, range)?,
         };
         let path = self.save_report(&format!("summary-{}_{}", range.0, range.1), &md)?;
         Ok(Analysis {
@@ -1186,23 +1380,30 @@ impl Session {
         let budget = self.cfg.llm.input_budget_chars() / 3;
         let mut parts = Vec::new();
         let people = self.people_in(question)?;
+        let notes_allowed = self.notes_allowed();
         if !people.is_empty() {
-            let notes = self.notes()?;
-            let entries = self.entries()?;
+            let notes = if notes_allowed {
+                self.notes()?
+            } else {
+                Vec::new()
+            };
+            let entries = self.model_entries()?;
             let share = budget / people.len().min(3);
             for p in people.iter().take(3) {
-                let about: Vec<&Note> = notes.iter().filter(|n| n.person == p.handle).collect();
                 let mut block = format!("About @{}: {}", p.handle, p.label());
                 if let Some(team) = &p.team {
                     block.push_str(&format!(", team {team}"));
                 }
-                if let Some(text) = &p.about {
-                    block.push_str(&format!(". {text}"));
+                if notes_allowed {
+                    if let Some(text) = &p.about {
+                        block.push_str(&format!(". {text}"));
+                    }
+                    let about: Vec<&Note> = notes.iter().filter(|n| n.person == p.handle).collect();
+                    block.push_str(&format!(
+                        "\nMy notes about them (newest first):\n{}",
+                        analyze::note_lines(&about, share / 2)
+                    ));
                 }
-                block.push_str(&format!(
-                    "\nMy notes about them (newest first):\n{}",
-                    analyze::note_lines(&about, share / 2)
-                ));
                 let mentioned: Vec<String> = entries
                     .iter()
                     .rev()
@@ -1225,7 +1426,7 @@ impl Session {
         });
         if about_goals {
             let goals = self.goals()?;
-            let entries = self.entries()?;
+            let entries = self.model_entries()?;
             let gap = self.latest_gap();
             let lines: Vec<String> = goals
                 .active()
@@ -1265,16 +1466,39 @@ impl Session {
         };
         let notes = self.notes()?;
         let about: Vec<&Note> = notes.iter().filter(|n| n.person == person.handle).collect();
-        let entries = self.entries()?;
+        // A model that is not on this computer never sees private entries.
+        let entries = self.model_entries()?;
         let mentioned: Vec<&Entry> = entries
             .iter()
             .filter(|e| e.mentions().contains(&person.handle))
             .collect();
         progress("Preparing your 1:1", 0, 1)?;
         let md = match llm {
-            Some(llm) => analyze::prep(llm, &self.cfg, person, &about, &mentioned, today())?,
+            Some(llm) if self.notes_allowed() => {
+                analyze::prep(llm, &self.cfg, person, &about, &mentioned, today())?
+            }
+            Some(llm) => {
+                // Notes about people are not allowed at this endpoint. The
+                // model sees only the entries that mention the person (if
+                // there are none, it is not asked at all); the notes are
+                // written into the report here, never sent.
+                let base = if mentioned.is_empty() {
+                    None
+                } else {
+                    Some(analyze::prep(
+                        llm,
+                        &self.cfg,
+                        person,
+                        &[],
+                        &mentioned,
+                        today(),
+                    )?)
+                };
+                analyze::prep_kept(&self.cfg, person, base, &about, &mentioned)?
+            }
             None => analyze::prep_plain(&self.cfg, person, &about, &mentioned)?,
         };
+        let md = self.with_kept_note(md);
         progress("Preparing your 1:1", 1, 1)?;
         let path = self.save_report(&format!("prep-{}-{}", person.handle, today()), &md)?;
         Ok(Analysis {
@@ -1595,6 +1819,100 @@ mod tests {
             .ask_about("hedeflerim nasıl gidiyor")
             .unwrap()
             .contains("Speak at a meetup"));
+    }
+
+    /// Notes about people (and their profile's `about`) reach a model that is
+    /// not on this computer only when `share_notes` is set. Otherwise they are
+    /// kept here but still written into a 1:1 prep.
+    #[test]
+    fn remote_endpoints_get_notes_only_when_allowed() {
+        use crate::llm::{FakeLlm, Format, Message};
+        use crate::people::Relation;
+        use std::sync::Mutex;
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut s = Session::at(Paths::at(dir.path().to_path_buf())).unwrap();
+        s.add_person(Person {
+            handle: "ada".into(),
+            name: "Ada".into(),
+            role: Some("Junior developer".into()),
+            team: Some("Payments".into()),
+            relation: Relation::Mentee,
+            about: Some("PRIVATE-ABOUT prefers written feedback".into()),
+            since: None,
+        })
+        .unwrap();
+        s.add_note(
+            "ada",
+            NoteKind::OneOnOne,
+            d(10, 2),
+            "PRIVATE-NOTE nervous about on-call",
+        )
+        .unwrap();
+        s.add_log("Paired with @ada on the ledger retries", d(10, 1), vec![])
+            .unwrap();
+
+        s.cfg.llm.provider = crate::config::Provider::Openai;
+        s.cfg.llm.base_url = "https://llm.example.com/v1".into();
+        s.cfg.llm.model = "gemma-x".into();
+        s.cfg.llm.allow_remote = true;
+        s.cfg.llm.share_notes = false;
+        assert!(s.cfg.llm.is_remote());
+        assert!(!s.cfg.llm.notes_allowed());
+
+        let sent = Mutex::new(Vec::<String>::new());
+        let llm = FakeLlm {
+            reply: |messages: &[Message], _| {
+                let all = messages
+                    .iter()
+                    .map(|m| m.content.as_str())
+                    .collect::<Vec<_>>()
+                    .join("\n---\n");
+                sent.lock().unwrap().push(all);
+                "- a prepared answer".to_string()
+            },
+        };
+        let take = || std::mem::take(&mut *sent.lock().unwrap()).join("\n===\n");
+
+        let question = "What should I discuss with @ada?";
+        let about = s.ask_about(question).unwrap();
+        // Who they are is kept, but neither the notes nor the profile text.
+        assert!(about.contains("Junior developer") && about.contains("team Payments"));
+        assert!(about.contains("Paired with @ada"));
+        assert!(!about.contains("PRIVATE-NOTE"), "{about}");
+        assert!(!about.contains("PRIVATE-ABOUT"), "{about}");
+        let entries = s.entries().unwrap();
+        let context =
+            analyze::retrieve(&entries, question, today(), s.cfg.llm.input_budget_chars());
+        let messages = analyze::ask_messages(&s.cfg, question, &context, &[], &about, today());
+        llm.complete(&messages, &Format::Text).unwrap();
+        let captured = take();
+        assert!(!captured.contains("PRIVATE-NOTE"), "{captured}");
+        assert!(!captured.contains("PRIVATE-ABOUT"), "{captured}");
+
+        let prep = s.prep(Some(&llm), "ada", &mut crate::no_progress).unwrap();
+        let captured = take();
+        assert!(!captured.contains("PRIVATE-NOTE"), "{captured}");
+        assert!(!captured.contains("PRIVATE-ABOUT"), "{captured}");
+        // The notes stay in the saved report, with a line saying they were kept here.
+        assert!(prep.output.contains("PRIVATE-NOTE"), "{}", prep.output);
+        assert!(
+            prep.output
+                .contains("kept on this computer, not sent to the model"),
+            "{}",
+            prep.output
+        );
+
+        // With permission, the notes are sent as before.
+        s.cfg.llm.share_notes = true;
+        assert!(s.cfg.llm.notes_allowed());
+        let about = s.ask_about(question).unwrap();
+        assert!(about.contains("PRIVATE-NOTE") && about.contains("PRIVATE-ABOUT"));
+        let messages = analyze::ask_messages(&s.cfg, question, &context, &[], &about, today());
+        llm.complete(&messages, &Format::Text).unwrap();
+        assert!(take().contains("PRIVATE-NOTE"));
+        s.prep(Some(&llm), "ada", &mut crate::no_progress).unwrap();
+        assert!(take().contains("PRIVATE-NOTE"));
     }
 
     /// With AI turned off nothing builds a model: the summary, promotion
@@ -2034,5 +2352,404 @@ mod tests {
         let goals = s.goals().unwrap();
         assert_eq!(goals.get(goal.id).unwrap().checkins.len(), 1);
         assert_eq!(goals.active().count(), 0);
+    }
+
+    /// `Session::masks()` hides the people in `people.yaml`, the configured
+    /// `mask_words` and email addresses, and a people file that cannot be read
+    /// is an error rather than an empty mask (fail closed).
+    #[test]
+    fn masks_come_from_people_and_config() {
+        use crate::people::Relation;
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut s = Session::at(Paths::at(dir.path().to_path_buf())).unwrap();
+        s.add_person(Person {
+            handle: "ada".into(),
+            name: "Ada Lovelace".into(),
+            role: None,
+            team: None,
+            relation: Relation::Mentee,
+            about: None,
+            since: None,
+        })
+        .unwrap();
+        s.cfg.llm.mask_words = vec!["Acme".into()];
+
+        let masks = s.masks().unwrap();
+        let mut text = "Met @ada (Ada Lovelace) at Acme; ada@example.com".to_string();
+        let mapping = masks.apply(&mut [&mut text]);
+        assert_eq!(
+            text,
+            "Met @person1 (Person1) at Term1; email1@example.invalid"
+        );
+        assert_eq!(mapping.len(), 3, "one person, one word, one email");
+
+        // A people file that cannot be read is not silently an empty mask.
+        std::fs::write(&s.paths.people, [0xff, 0xfe, 0xfd]).unwrap();
+        assert!(s.masks().is_err());
+    }
+
+    /// A private entry's text never reaches a model that is not on this
+    /// computer, in a summary, promotion document, gap analysis, question or
+    /// 1:1 prep. The plain (no-AI) versions still list it, and a model on this
+    /// computer is sent it as before.
+    #[test]
+    fn private_entries_never_reach_a_remote_model() {
+        use crate::config::Provider;
+        use crate::llm::{FakeLlm, Format, Message};
+        use std::sync::Mutex;
+
+        const SECRET: &str = "CONFIDENTIAL-SECRET-8842";
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut s = Session::at(Paths::at(dir.path().to_path_buf())).unwrap();
+        let ladder = Ladder::from_yaml(include_str!("../ladder.example.yaml")).unwrap();
+        s.save_ladder(&ladder).unwrap();
+        s.set_levels(Some("L2"), Some("L3")).unwrap();
+        s.add_person(Person {
+            handle: "ada".into(),
+            name: "Ada".into(),
+            role: Some("Junior developer".into()),
+            team: None,
+            relation: crate::people::Relation::Mentee,
+            about: None,
+            since: None,
+        })
+        .unwrap();
+        s.add_note("ada", NoteKind::OneOnOne, d(10, 2), "Discussed the roadmap")
+            .unwrap();
+
+        // A private entry that mentions @ada, so prep and ask would include it
+        // if it were not filtered out.
+        let private = s
+            .add_log_private(&format!("{SECRET} paired with @ada"), d(10, 1), vec![])
+            .unwrap()
+            .unwrap();
+        assert!(private.private);
+        s.add_log("Led the payment outage incident call", d(10, 2), vec![])
+            .unwrap();
+
+        // A model that is not on this computer.
+        s.cfg.llm.provider = Provider::Openai;
+        s.cfg.llm.base_url = "https://llm.example.com/v1".into();
+        s.cfg.llm.model = "gemma-x".into();
+        s.cfg.llm.allow_remote = true;
+        s.cfg.llm.share_notes = true; // prep and ask use notes too
+        assert!(s.cfg.llm.is_remote());
+
+        let sent = Mutex::new(Vec::<String>::new());
+        let llm = FakeLlm {
+            reply: |messages: &[Message], _| {
+                let all: Vec<String> = messages.iter().map(|m| m.content.clone()).collect();
+                sent.lock().unwrap().push(all.join("\n---\n"));
+                let system = &messages[0].content;
+                let user = &messages[messages.len() - 1].content;
+                if system.starts_with("You map") {
+                    let mappings: Vec<_> = user
+                        .lines()
+                        .filter_map(|l| l.split_once(". ")?.0.parse::<usize>().ok())
+                        .map(|n| {
+                            serde_json::json!({ "entry": n, "expectations": ["L3.mentoring.1"] })
+                        })
+                        .collect();
+                    serde_json::json!({ "mappings": mappings }).to_string()
+                } else if system.contains("per-expectation assessment") {
+                    r#"{"overview":"On track.","priorities":["Mentor more"]}"#.into()
+                } else if system.contains("ONE expectation") {
+                    r#"{"rating":"partial","assessment":"Some.","evidence":[],"next_steps":["More"]}"#.into()
+                } else if system.contains("promotion document") {
+                    r#"{"statements":[{"text":"Led the outage call","evidence":[]}]}"#.into()
+                } else {
+                    "- A prepared answer".into()
+                }
+            },
+        };
+        let take = || std::mem::take(&mut *sent.lock().unwrap()).join("\n===\n");
+        let range = (d(10, 1), d(10, 31));
+
+        // The model is given the entries without the private one.
+        let model = s.model_entries().unwrap();
+        assert!(model.iter().all(|e| !e.private));
+        assert!(!model.iter().any(|e| e.text.contains(SECRET)));
+
+        s.summary(Some(&llm), range, &mut crate::no_progress)
+            .unwrap();
+        assert!(!take().contains(SECRET), "summary sent the secret");
+        s.brag(Some(&llm), None, "test", &mut crate::no_progress)
+            .unwrap();
+        assert!(!take().contains(SECRET), "brag sent the secret");
+        s.gap(Some(&llm), None, &mut crate::no_progress).unwrap();
+        assert!(!take().contains(SECRET), "gap sent the secret");
+        s.prep(Some(&llm), "ada", &mut crate::no_progress).unwrap();
+        assert!(!take().contains(SECRET), "prep sent the secret");
+
+        // Ask: retrieve's context and ask_about's "entries that mention them".
+        let entries = s.model_entries().unwrap();
+        let context = analyze::retrieve(&entries, "what about @ada", today(), 100_000);
+        let about = s.ask_about("what about @ada").unwrap();
+        let messages =
+            analyze::ask_messages(&s.cfg, "what about @ada", &context, &[], &about, today());
+        llm.complete(&messages, &Format::Text).unwrap();
+        assert!(!take().contains(SECRET), "ask sent the secret");
+
+        // The plain (no-AI) versions still list private entries.
+        let plain = s.summary(None, range, &mut crate::no_progress).unwrap();
+        assert!(plain.output.contains(SECRET));
+        let answer = analyze::plain_answer(&s.entries().unwrap(), "confidential", today());
+        assert!(answer.contains(SECRET));
+
+        // With a model on this computer, the private entry is sent as before.
+        s.cfg.llm.provider = Provider::Llamacpp;
+        s.cfg.llm.base_url = "http://127.0.0.1:4748".into();
+        s.cfg.llm.allow_remote = false;
+        assert!(!s.cfg.llm.is_remote());
+        assert!(s.model_entries().unwrap().iter().any(|e| e.private));
+        s.summary(Some(&llm), range, &mut crate::no_progress)
+            .unwrap();
+        assert!(
+            take().contains(SECRET),
+            "a local model still gets the entry"
+        );
+    }
+
+    /// `#private`, `#özel` and `#ozel` set the flag and vanish from the text
+    /// and tags; `set_private` round-trips; an entry's id does not depend on
+    /// the flag.
+    #[test]
+    fn private_tags_and_set_private_round_trip() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = Session::at(Paths::at(dir.path().to_path_buf())).unwrap();
+
+        for tag in ["#private", "#özel", "#ozel"] {
+            let e = s
+                .add_log(&format!("Met with the team {tag} #ops"), d(10, 1), vec![])
+                .unwrap()
+                .unwrap();
+            assert!(e.private, "{tag} sets the flag");
+            assert!(!e.text.contains(tag), "{tag} removed from text: {}", e.text);
+            assert_eq!(e.tags, vec!["ops"]);
+            s.remove_entry(&e.id).unwrap(); // same text+date: clear it for the next tag
+        }
+
+        let e = s
+            .add_log("Ordinary entry", d(10, 2), vec![])
+            .unwrap()
+            .unwrap();
+        assert!(!e.private);
+        assert!(s.set_private(&e.id, true).unwrap().unwrap().private);
+        assert!(
+            s.entries()
+                .unwrap()
+                .iter()
+                .find(|x| x.id == e.id)
+                .unwrap()
+                .private
+        );
+        assert!(!s.set_private(&e.id, false).unwrap().unwrap().private);
+        assert!(s.set_private("missing", true).unwrap().is_none());
+
+        // Flipping the flag never changes the id.
+        let mut flipped = e.clone();
+        flipped.private = true;
+        assert_eq!(flipped.id, e.id);
+    }
+
+    /// At a remote endpoint, a file whose text looks sensitive is imported
+    /// without the model, and its sensitive entries are kept on this computer.
+    #[test]
+    fn sensitive_import_runs_without_the_model() {
+        use crate::config::Provider;
+        use crate::llm::{FakeLlm, Message};
+        use std::sync::Mutex;
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut s = Session::at(Paths::at(dir.path().to_path_buf())).unwrap();
+        s.cfg.llm.provider = Provider::Openai;
+        s.cfg.llm.base_url = "https://llm.example.com/v1".into();
+        s.cfg.llm.model = "gemma-x".into();
+        s.cfg.llm.allow_remote = true;
+
+        let file = dir.path().join("notes.txt");
+        // An invented but checksum-valid ID number.
+        let content = "Fixed the deploy.\nMy TCKN is 12345678950.\n"; // gitleaks:allow
+        fs::write(&file, content).unwrap();
+
+        let called = Mutex::new(false);
+        let llm = FakeLlm {
+            reply: |_: &[Message], _| {
+                *called.lock().unwrap() = true;
+                "{}".into()
+            },
+        };
+        let preview = s
+            .import_preview(
+                &file,
+                Some(&llm),
+                None,
+                Some(d(10, 1)),
+                &Choices::default(),
+                &mut crate::no_progress,
+            )
+            .unwrap();
+        assert!(
+            !*called.lock().unwrap(),
+            "the model must not read a sensitive file"
+        );
+        assert!(preview
+            .collected
+            .warnings
+            .iter()
+            .any(|w| w.contains("imported without the model")));
+        assert!(
+            preview.plan.new.iter().any(|e| e.private),
+            "sensitive entries are kept private"
+        );
+        assert!(
+            preview
+                .plan
+                .new
+                .iter()
+                .any(|e| e.text.contains("12345678950")),
+            "the sensitive line is kept as written"
+        );
+    }
+
+    // ---- company AI policy ------------------------------------------------
+
+    /// An "off" policy turns AI off at run time; config.toml stays as written.
+    #[test]
+    fn an_off_policy_disables_ai_without_rewriting_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut s = Session::at(Paths::at(dir.path().to_path_buf())).unwrap();
+        assert!(s.cfg.llm.enabled);
+        s.policy.ai.mode = crate::policy::AiMode::Off;
+        assert!(!s.ai_enabled());
+        assert!(s.cfg.llm.enabled, "config.toml is not rewritten");
+        assert!(!s.policy.ai_allowed());
+        assert!(s.llm_if_on().unwrap().is_none());
+        assert!(s.llm().is_err());
+    }
+
+    /// `share_notes = false` in the policy beats `share_notes = true` in
+    /// config.toml, so notes about people never reach a remote endpoint.
+    #[test]
+    fn a_policy_forbidding_notes_beats_a_permissive_config() {
+        use crate::people::Relation;
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut s = Session::at(Paths::at(dir.path().to_path_buf())).unwrap();
+        s.cfg.llm.provider = crate::config::Provider::Openai;
+        s.cfg.llm.base_url = "https://llm.example.com/v1".into();
+        s.cfg.llm.allow_remote = true;
+        s.cfg.llm.share_notes = true;
+        assert!(s.cfg.llm.notes_allowed());
+        s.add_person(Person {
+            handle: "ada".into(),
+            name: "Ada".into(),
+            role: None,
+            team: None,
+            relation: Relation::Mentee,
+            about: Some("PRIVATE-ABOUT prefers written feedback".into()),
+            since: None,
+        })
+        .unwrap();
+        s.add_note(
+            "ada",
+            NoteKind::Note,
+            d(10, 2),
+            "PRIVATE-NOTE nervous about on-call",
+        )
+        .unwrap();
+
+        s.policy.data.share_notes = Some(false);
+        assert!(!s.policy.notes_allowed());
+        assert!(!s.notes_allowed(), "the policy wins over config.toml");
+        let about = s.ask_about("What should I discuss with @ada?").unwrap();
+        assert!(!about.contains("PRIVATE-NOTE"), "{about}");
+        assert!(!about.contains("PRIVATE-ABOUT"), "{about}");
+
+        // With a policy that says nothing, the person's setting applies again.
+        s.policy.data.share_notes = None;
+        assert!(s.notes_allowed());
+        assert!(s
+            .ask_about("What should I discuss with @ada?")
+            .unwrap()
+            .contains("PRIVATE-NOTE"));
+    }
+
+    /// The policy's mask_words are added to the person's own for a remote
+    /// request.
+    #[test]
+    fn policy_mask_words_are_masked() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut s = Session::at(Paths::at(dir.path().to_path_buf())).unwrap();
+        s.policy.data.mask_words = vec!["Project Falcon".into(), "Acme".into()];
+        let masks = s.masks().unwrap();
+        let mut text = "Acme shipped the Project Falcon build".to_string();
+        let mapping = masks.apply(&mut [&mut text]);
+        assert!(
+            !text.contains("Acme") && !text.contains("Project Falcon"),
+            "{text}"
+        );
+        assert_eq!(mapping.len(), 2);
+        assert_eq!(
+            mapping.restore(&text),
+            "Acme shipped the Project Falcon build"
+        );
+    }
+
+    /// The policy's sensitive_words produce a `PolicyWord` finding everywhere
+    /// the session scans, including imported files.
+    #[test]
+    fn policy_sensitive_words_produce_a_finding() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut s = Session::at(Paths::at(dir.path().to_path_buf())).unwrap();
+        s.policy.data.sensitive_words = vec!["Project Falcon".into()];
+        let word = crate::sensitive::Finding::PolicyWord;
+        assert!(s.scan("Shipped Project Falcon").contains(&word));
+        assert!(!s.scan("Shipped the ledger").contains(&word));
+
+        s.cfg.llm.provider = crate::config::Provider::Openai;
+        s.cfg.llm.base_url = "https://llm.example.com/v1".into();
+        s.cfg.llm.allow_remote = true;
+        let file = dir.path().join("notes.txt");
+        fs::write(&file, "Notes about Project Falcon").unwrap();
+        assert!(s.import_findings(&file).contains(&word));
+    }
+
+    /// The policy's private tags mark an entry private and vanish from its tags,
+    /// when adding and when editing.
+    #[test]
+    fn policy_private_tags_mark_entries_private() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut s = Session::at(Paths::at(dir.path().to_path_buf())).unwrap();
+        s.policy.data.private_tags = vec!["confidential".into()];
+        let added = s
+            .add_log("Roadmap #confidential #ops", d(10, 1), vec![])
+            .unwrap()
+            .unwrap();
+        assert!(added.private);
+        assert_eq!(added.tags, vec!["ops"]);
+        assert!(s.marks_private("Notes #confidential"));
+        assert!(!s.marks_private("Notes #ops"));
+
+        let edited = s
+            .edit_entry(&added.id, Some("Notes #confidential"), None, None)
+            .unwrap()
+            .unwrap();
+        assert!(edited.private);
+        assert!(!edited.tags.iter().any(|t| t == "confidential"));
+    }
+
+    /// A policy file that exists but cannot be parsed stops `Session::at`, so
+    /// the TUI, web and CLI all fail closed rather than running unprotected.
+    #[test]
+    fn a_broken_policy_file_stops_session_at() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths::at(dir.path().to_path_buf());
+        fs::write(&paths.policy, "[ai]\nmode = \"local\"\ntypo = true\n").unwrap();
+        let err = format!("{:#}", Session::at(paths).err().unwrap());
+        assert!(err.contains("could not be read"), "{err}");
+        assert!(err.contains("policy.toml"), "{err}");
     }
 }

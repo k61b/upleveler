@@ -6,6 +6,7 @@
 //! endpoint the user explicitly allows.
 
 pub mod analyze;
+pub mod audit;
 pub mod config;
 pub mod dates;
 pub mod export;
@@ -17,8 +18,12 @@ pub mod ladder;
 pub mod limits;
 pub mod llama;
 pub mod llm;
+pub mod mask;
 pub mod people;
+pub mod policy;
+pub mod policy_draft;
 pub mod prompts;
+pub mod sensitive;
 pub mod session;
 pub mod store;
 pub mod tui;

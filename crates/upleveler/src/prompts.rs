@@ -13,6 +13,9 @@ pub const SUMMARY: &str = include_str!("prompts/summary.md");
 pub const ASK: &str = include_str!("prompts/ask.md");
 pub const ROUTE: &str = include_str!("prompts/route.md");
 pub const PREP: &str = include_str!("prompts/prep.md");
+pub const POLICY_FIELDS: &str = include_str!("prompts/policy_fields.md");
+pub const POLICY_INTERVIEW: &str = include_str!("prompts/policy_interview.md");
+pub const POLICY_DOCUMENT: &str = include_str!("prompts/policy_document.md");
 
 /// Replaces `{{name}}` placeholders.
 pub fn render(template: &str, vars: &[(&str, &str)]) -> String {

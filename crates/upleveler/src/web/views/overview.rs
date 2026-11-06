@@ -97,6 +97,36 @@ fn goals_card(data: &DashboardData) -> Markup {
     )
 }
 
+fn audit_card(line: &str) -> Markup {
+    ui::card(
+        Card::Raised,
+        html! {
+            h2.card-title { "Sent to your model" }
+            p.muted { (line) }
+        },
+    )
+}
+
+/// The company AI policy in force: who wrote it, what it allows, the endpoint
+/// terms and the contact. The same card style as the audit card.
+fn policy_card(policy: &crate::web::data::PolicyCard) -> Markup {
+    ui::card(
+        Card::Raised,
+        html! {
+            h2.card-title { "Your company's AI policy" }
+            p.muted { (policy.name) }
+            p { (policy.allows) }
+            @if let Some(terms) = &policy.terms {
+                p.muted { "Your company says: " (terms) }
+            }
+            @if let Some(contact) = &policy.contact {
+                p.muted { "Contact: " (contact) }
+            }
+            a.card-link href=(super::policy::PAGE) { "Policy details" }
+        },
+    )
+}
+
 fn people_card(data: &DashboardData) -> Markup {
     let open = data.open_follow_ups();
     ui::card(
@@ -174,6 +204,12 @@ pub fn overview_body(data: &DashboardData) -> Markup {
         section.view.container.stack {
             (view_header(Tab::Overview.title(), lead, aside))
             (body)
+            @if let Some(policy) = &data.policy {
+                (policy_card(policy))
+            }
+            @if let Some(line) = &data.audit {
+                (audit_card(line))
+            }
         }
     }
 }

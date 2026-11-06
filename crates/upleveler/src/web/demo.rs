@@ -210,6 +210,8 @@ pub fn data(today: NaiveDate) -> DashboardData {
         ai: true,
         model: "gemma-4-E4B-it-qat-q4_0".into(),
         model_local: true,
+        audit: None,
+        policy: None,
         people: people(),
         notes: notes(today),
         goals: goals(today),

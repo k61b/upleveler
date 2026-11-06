@@ -17,6 +17,11 @@ pub struct Paths {
     /// Dated notes about them (1:1s, feedback, follow-ups).
     pub notes: PathBuf,
     pub goals: PathBuf,
+    /// What was sent to a model that is not on this computer: when, where and
+    /// how much, never the text.
+    pub audit: PathBuf,
+    /// The person's own copy of the company AI policy.
+    pub policy: PathBuf,
 }
 
 impl Paths {
@@ -41,6 +46,8 @@ impl Paths {
             people: root.join("people.yaml"),
             notes: root.join("notes.jsonl"),
             goals: root.join("goals.yaml"),
+            audit: root.join("audit.jsonl"),
+            policy: root.join("policy.toml"),
             root,
         }
     }
@@ -93,6 +100,16 @@ pub struct LlmConfig {
     /// Must be set explicitly before any log text is sent to a non-local host.
     #[serde(default)]
     pub allow_remote: bool,
+    /// Notes about people, and the `about` text of their profiles, go to a
+    /// non-local endpoint only when this is true; a model on this computer
+    /// always gets them.
+    #[serde(default)]
+    pub share_notes: bool,
+    /// Extra words never sent as written to an endpoint that is not on this
+    /// computer (your company's name, customers, internal hosts). People and
+    /// email addresses are always hidden there.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mask_words: Vec<String>,
     #[serde(default = "default_context_tokens")]
     pub context_tokens: usize,
     #[serde(default = "default_timeout_secs")]
@@ -113,6 +130,10 @@ struct StoredLlmConfig {
     api_key_env: Option<String>,
     #[serde(default)]
     allow_remote: bool,
+    #[serde(default)]
+    share_notes: bool,
+    #[serde(default)]
+    mask_words: Vec<String>,
     #[serde(default = "default_context_tokens")]
     context_tokens: usize,
     #[serde(default = "default_timeout_secs")]
@@ -146,6 +167,8 @@ impl From<StoredLlmConfig> for LlmConfig {
             model: s.model,
             api_key_env: s.api_key_env,
             allow_remote: s.allow_remote,
+            share_notes: s.share_notes,
+            mask_words: s.mask_words,
             context_tokens: s.context_tokens,
             timeout_secs: s.timeout_secs,
         }
@@ -177,6 +200,8 @@ impl Default for LlmConfig {
             model: Provider::Llamacpp.recommended_model().into(),
             api_key_env: None,
             allow_remote: false,
+            share_notes: false,
+            mask_words: Vec::new(),
             context_tokens: default_context_tokens(),
             timeout_secs: default_timeout_secs(),
         }
@@ -200,6 +225,17 @@ impl LlmConfig {
     /// room for instructions and the model's answer.
     pub fn input_budget_chars(&self) -> usize {
         (self.context_tokens * 2).max(2000)
+    }
+
+    /// True when the configured endpoint is not on this computer.
+    pub fn is_remote(&self) -> bool {
+        !is_local_url(&self.base_url)
+    }
+
+    /// True when notes about people may go to this endpoint: always for a model
+    /// on this computer, and for another endpoint only with `share_notes`.
+    pub fn notes_allowed(&self) -> bool {
+        !self.is_remote() || self.share_notes
     }
 }
 
@@ -355,6 +391,70 @@ mod tests {
         let loaded = Config::load(&paths).unwrap();
         assert_eq!(loaded.target_level.as_deref(), Some("L3"));
         assert_eq!(loaded.llm.provider, Provider::Openai);
+    }
+
+    #[test]
+    fn notes_default_to_local_only() {
+        let local = LlmConfig::default();
+        assert!(!local.share_notes);
+        assert!(!local.is_remote());
+        assert!(
+            local.notes_allowed(),
+            "a model on this computer always gets notes"
+        );
+
+        let remote = LlmConfig {
+            provider: Provider::Openai,
+            base_url: "https://llm.example.com/v1".into(),
+            allow_remote: true,
+            ..LlmConfig::default()
+        };
+        assert!(remote.is_remote());
+        assert!(
+            !remote.notes_allowed(),
+            "off by default for a remote endpoint"
+        );
+
+        // A config written before `share_notes` existed stays off.
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths::at(dir.path().to_path_buf());
+        std::fs::write(
+            &paths.config,
+            "[llm]\nprovider = \"openai\"\nbase_url = \"https://llm.example.com/v1\"\nmodel = \"m\"\nallow_remote = true\n",
+        )
+        .unwrap();
+        let loaded = Config::load(&paths).unwrap();
+        assert!(!loaded.llm.share_notes);
+        assert!(!loaded.llm.notes_allowed());
+        assert_eq!(paths.audit, dir.path().join("audit.jsonl"));
+
+        let mut shared = remote.clone();
+        shared.share_notes = true;
+        assert!(shared.notes_allowed());
+    }
+
+    #[test]
+    fn mask_words_roundtrip_and_default() {
+        assert!(LlmConfig::default().mask_words.is_empty());
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths::at(dir.path().to_path_buf());
+        let cfg = Config {
+            llm: LlmConfig {
+                mask_words: vec!["Acme".into(), "build.acme.example".into()],
+                ..LlmConfig::default()
+            },
+            ..Config::default()
+        };
+        cfg.save(&paths).unwrap();
+        let loaded = Config::load(&paths).unwrap();
+        assert_eq!(loaded.llm.mask_words, vec!["Acme", "build.acme.example"]);
+
+        // An empty list is not written, and a config without the key still loads.
+        Config::default().save(&paths).unwrap();
+        assert!(!fs::read_to_string(&paths.config)
+            .unwrap()
+            .contains("mask_words"));
+        assert!(Config::load(&paths).unwrap().llm.mask_words.is_empty());
     }
 
     #[test]

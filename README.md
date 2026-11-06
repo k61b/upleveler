@@ -77,6 +77,9 @@ Run `upleveler`. The first time, a short setup asks for the model or "No AI" (an
 | `/goals`, `/goal …`, `/checkin` | Your goals: list, add (`/goal Speak at a meetup`, or end with an expectation id like `L3.mentoring.1` to tie it to your ladder), change (`/goal edit 2 due: 2026-12-31`), finish (`/goal done 2`), record progress; `/goal show 2` and `/checkin delete 2 1` to see and delete check-ins |
 | `/dashboard` | Progress, activity heatmap, logs, ladder, reports, people and goals |
 | `/web` | The same dashboard in your browser |
+| `/audit` | What was sent to a model that is not on this computer |
+| `/policy` | Your company's AI policy, if one is installed, and where it was read from; `/policy new` or `/policy draft @rules.md` writes one with the model's help |
+| `/private <id>`, `/share <id>` | Keep a log entry on this computer (never sent to a model that is not on this computer), or let it be sent again; `p` in `/dashboard` → Logs toggles it; `/undo` takes it back |
 | `/edit <id> <text>`, `/delete <id>` | Change or delete a log entry; in `/dashboard` → Logs, press `e` or `d` on it |
 | `/undo` | Undo the last entry, note, check-in, edit, deletion, import or removed import |
 
@@ -218,7 +221,9 @@ Reports written without AI say so.
 
 - Your data is plain files in `~/.upleveler/`, including what you note about other people (`people.yaml`, `notes.jsonl`) and your goals (`goals.yaml`). Edit or delete them any time.
 - Notes about a person go to your model only for a 1:1 prep or a question about that person. They never go into the gap analysis, the promotion document or a summary.
-- Nothing is sent anywhere. To use your company's own LLM instead of a model on your computer, choose "OpenAI-compatible endpoint" in the setup (`/init`) and confirm that the endpoint is approved.
+- Nothing is sent anywhere by default. To use your company's own LLM instead of a model on your computer, choose "OpenAI-compatible endpoint" in the setup (`/init`) and confirm that the endpoint is approved. When the model is not on this computer, the names and `@handles` of the people you work with, email addresses and the words in `mask_words` are replaced with placeholders (`@person1`, `Person1`) before anything is sent and put back in the answer, so the server does not see who an entry is about. It does not hide names written in lowercase, or of people not in your people list, and the rest of the text still goes as written. Every request is recorded in `~/.upleveler/audit.jsonl` (when, where, how many characters, never the text; `/audit` or `upleveler audit` shows it, including how many things were masked), and notes about people stay on this computer unless you allow them in the setup (`share_notes = true`).
+- An entry can be **kept on this computer** so it is never sent to a model that is not on this computer: write `#private` or `#özel` in the text, tick "Keep on this computer" when adding or editing in the browser, use `/private <id>` in the app (and `/share <id>` to send it again), press `p` in `/dashboard` → Logs, or pass `--private` / `--share` to `upleveler log` / `upleveler edit`. Private entries are marked in lists (`upleveler list` shows a marker) and left out of every AI report, question and 1:1 prep; a report says how many were left out. When the model is not on this computer, text that looks sensitive — an ID number, a bank account (IBAN), card or phone number, a pasted e-mail or chat message, or health, religious, political, union, criminal or salary information — is flagged: it is kept on this computer unless you choose to send it anyway, and an import whose content looks sensitive is brought in without the model. Detection is word- and pattern-based, so it can miss things and can occasionally flag something harmless; e-mails are already replaced with placeholders. A model on this computer, or AI off, is unchanged: the private flag is still saved and shown, but nothing leaves the computer anyway.
+- Your company can install an AI policy that Upleveler enforces; see [Company AI policy](#company-ai-policy).
 - No account, no cloud, no telemetry. The browser dashboard (`upleveler web`) loads nothing from the internet.
 - With AI off, nothing goes to any model and no model is downloaded.
 - The only download is the model, from Hugging Face, when you choose it in the setup.
@@ -226,11 +231,38 @@ Reports written without AI say so.
 
 ## Scripts
 
-Every feature is also a plain command, for example `upleveler log "..."`, `upleveler gap` or `upleveler export -f xlsx -o worklog.xlsx`. `upleveler list --ids` shows each entry's short id for `upleveler edit <id>` and `upleveler remove <id>`. Run `upleveler --help` to see them all; `upleveler <command> --help` shows examples. The commands take the names the app uses too (`upleveler people`, `upleveler goals`, `--kind 1:1`).
+Every feature is also a plain command, for example `upleveler log "..."`, `upleveler gap`, `upleveler export -f xlsx -o worklog.xlsx`, `upleveler audit` (what was sent to a model that is not on this computer) or `upleveler policy check policy.toml` (check a company AI policy before installing it). `upleveler list --ids` shows each entry's short id for `upleveler edit <id>` and `upleveler remove <id>`. Run `upleveler --help` to see them all; `upleveler <command> --help` shows examples. The commands take the names the app uses too (`upleveler people`, `upleveler goals`, `--kind 1:1`).
 
 Tab completion for your shell: `upleveler completions zsh > "${fpath[1]}/_upleveler"` (zsh), `upleveler completions bash > ~/.local/share/bash-completion/completions/upleveler` (bash) or `upleveler completions fish > ~/.config/fish/completions/upleveler.fish` (fish), then open a new terminal.
 
 `upleveler import --list` shows the files you imported and how many entries each added. `upleveler import --remove notes.xlsx` removes the entries that came from that file and keeps a copy in `~/.upleveler/staging/`; `upleveler import` on that copy puts them back. Entries you logged yourself are never touched.
+
+### Company AI policy
+
+A security team can write one `policy.toml` and put it on every computer (with MDM or config management). Upleveler reads it at start and enforces it: `config.toml`, the setup and the person's own choices cannot loosen it, and nothing a model returns can change it, because the checks are in Upleveler's code, before anything is sent. A copy of Upleveler built from modified source is outside its reach.
+
+Where it goes:
+
+| System | Path |
+|---|---|
+| macOS | `/Library/Application Support/Upleveler/policy.toml` |
+| Linux | `/etc/upleveler/policy.toml` |
+| Windows | `%ProgramData%\Upleveler\policy.toml` |
+
+A copy in `~/.upleveler/policy.toml` is read too. When both exist, the stricter value of each rule wins. A policy file that exists but cannot be read or parsed stops Upleveler at start with a message naming it, and an unknown key is an error, so a typo cannot quietly weaken it.
+
+What it can say ([full example](crates/upleveler/policy.example.toml); more in [`examples/policies/`](crates/upleveler/examples/policies)):
+
+- `[ai] mode`: `any` (no limit beyond the person's settings), `local` (only a model on this computer), `approved` (a model on this computer or one of `endpoints`), or `off` (no model at all). The setup offers only what the policy allows.
+- `[endpoint]`: what your company agreed with the provider of the approved endpoint (`no_training`, `retention`, `agreement`). Upleveler cannot check these; it shows them in the setup, `/policy` and the dashboard.
+- `[data] share_notes = false`: notes about people never go to a remote endpoint, whatever `config.toml` says.
+- `[data] mask_words`: added to the person's own, replaced with placeholders before a request leaves.
+- `[data] sensitive = "keep"`: text that looks sensitive is always kept on this computer; "Send it to the model anyway", `/share`, `--share` and the dashboard buttons are refused for it. `"warn"` (the default) lets the person choose.
+- `[data] private_tags` and `sensitive_words`: extra `#tags` that keep an entry on this computer, and extra words that count as sensitive.
+
+`/policy`, `upleveler policy` and the browser Overview show the policy in force. Before installing one, check it with `upleveler policy check policy.toml`.
+
+You do not have to write the file by hand. With a model, `/policy new` in the app, `upleveler policy new` or **Start with questions** on the browser's policy page (`/policy`, linked from the Overview card) asks about your rules one question at a time, in your own words, and fills in the file from your answers. `/policy draft @rules.md`, `upleveler policy draft rules.md` or pasting the rules on that page reads your company's written rules about AI use instead and lists what they leave open. Either way you read the result (and can change it in the browser) before it is saved: as this computer's own `~/.upleveler/policy.toml`, which can only make Upleveler stricter, or as a file to check and put on every computer. A draft that would not load is never saved. Without AI, these start from the commented example instead.
 
 ## Settings and files
 
@@ -244,6 +276,8 @@ Everything Upleveler keeps is in `~/.upleveler/` (or the folder `UPLEVELER_HOME`
 | `goals.yaml` | Your goals and check-ins |
 | `ladder.yaml` | Your company's career ladder; you can edit it by hand |
 | `reports/` | Every report Upleveler writes, as Markdown |
+| `policy.toml` | Optional: a copy of your company's AI policy (see [Company AI policy](#company-ai-policy)) |
+| `audit.jsonl` | What was sent to a model that is not on this computer: when, where, how much, never the text (`/audit` or `upleveler audit`) |
 | `staging/` | Files being imported, and copies of removed imports |
 | `llama/` | Downloaded models (or the folder `UPLEVELER_LLAMA_DIR` names) |
 
@@ -261,6 +295,8 @@ base_url = "http://127.0.0.1:4748"
 model = "google/gemma-4-E4B-it-qat-q4_0-gguf"
 api_key_env = "COMPANY_LLM_KEY"  # name of the environment variable holding the key; the key itself is never stored
 allow_remote = false       # must be true before log text goes to a server that is not this computer
+share_notes = false        # true: notes about people also go to an endpoint that is not on this computer
+mask_words = ["Acme", "build.acme.example"]  # also hidden from an endpoint that is not on this computer
 context_tokens = 8192      # the model's context size
 timeout_secs = 300         # how long to wait for an answer
 ```

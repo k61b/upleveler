@@ -1,0 +1,53 @@
+# A company AI policy for Upleveler. Copy this to the managed location (see
+# README), or to ~/.upleveler/policy.toml, and edit it. Every key is shown here;
+# the values below are an invented "Acme" example. Check a file before you put
+# it on every computer: upleveler policy check policy.toml
+#
+# The person's config.toml and their own choices cannot loosen this file, and
+# nothing a model returns can change it. When a managed file and a personal
+# copy both exist, the stricter value of each rule wins. A file that exists but
+# cannot be read or parsed stops Upleveler at start (fail closed); an unknown
+# key is an error too, so a typo cannot silently weaken the policy.
+
+# Who wrote this policy, shown to people so they know where it comes from.
+name = "Acme engineering: AI use"
+# Optional, shown in messages and on the dashboard.
+contact = "security@acme.example"
+# Optional free text, shown so people know how current it is.
+updated = "2026-10-01"
+
+[ai]
+# "any": no limit beyond the person's own settings (default)
+# "local": only a model on this computer; remote endpoints are refused
+# "approved": a model on this computer, or one of `endpoints` below
+# "off": no model at all; Upleveler works without AI
+mode = "approved"
+# base_url prefixes that are allowed when mode = "approved". A configured
+# base_url must equal an entry or start with it followed by "/", so
+# https://llm.acme.example.evil.com is not a match for this one.
+endpoints = ["https://llm.acme.example/v1"]
+
+[endpoint]
+# What the company agreed with the provider of the approved endpoint. Upleveler
+# cannot check these; it shows them so people know (setup, /policy, dashboard).
+no_training = true
+# Free text: "none", "30 days", …
+retention = "none"
+# Optional free text, shown with the endpoint terms.
+agreement = "Zero data retention, DPA signed 2026-09"
+
+[data]
+# false: notes about people never go to a remote endpoint, whatever config says.
+share_notes = false
+# Added to the person's own mask_words; hidden from an endpoint that is not on
+# this computer.
+mask_words = ["Acme", "Project Falcon", "build.acme.example"]
+# "warn": as today, the person may send it anyway
+# "keep": text that looks sensitive is always kept on this computer; "Send it to
+#         the model anyway", --share, /share and the dashboard buttons are
+#         refused for it
+sensitive = "keep"
+# Extra #tags that mark an entry private (besides #private / #özel / #ozel).
+private_tags = ["confidential", "gizli"]
+# Extra words that count as sensitive, in any word or phrase, case-insensitive.
+sensitive_words = ["Project Falcon", "layoff", "işten çıkarma"]

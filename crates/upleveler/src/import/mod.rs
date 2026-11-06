@@ -54,6 +54,28 @@ pub fn is_staging(path: &Path) -> bool {
     path.extension().and_then(|e| e.to_str()) == Some("jsonl")
 }
 
+/// The text of a file that an import would put in front of the model, used to
+/// decide whether it looks sensitive. For a workbook this is every cell; for a
+/// text file the whole file; a staging `.jsonl` is read as text too (it is
+/// never sent to the model, but its entries may still be sensitive).
+pub fn incoming_text(path: &Path) -> String {
+    if sheet::is_sheet(path) {
+        let mut out = String::new();
+        if let Ok(tables) = sheet::read_tables(path) {
+            for table in tables {
+                for (_, cells) in &table.rows {
+                    for cell in cells {
+                        out.push_str(cell);
+                        out.push('\n');
+                    }
+                }
+            }
+        }
+        return out;
+    }
+    fs::read_to_string(path).unwrap_or_default()
+}
+
 /// Reads a source file into drafts. `.jsonl` files (staging files or another
 /// Upleveler store) are taken as-is; everything else goes through extraction.
 /// In a workbook, `choices` says which sheets are log, notes, goals or skipped.
@@ -161,8 +183,28 @@ pub struct Plan {
     pub undated: Vec<Draft>,
 }
 
-/// Turns drafts into entries that are not already in `existing`.
-pub fn plan(drafts: &[Draft], existing: &HashSet<String>, default_date: Option<NaiveDate>) -> Plan {
+/// Turns drafts into entries that are not already in `existing`. When
+/// `mark_sensitive` is set (an import whose text looks sensitive and therefore
+/// ran without the model), each entry whose own text looks sensitive is kept
+/// on this computer.
+pub fn plan(
+    drafts: &[Draft],
+    existing: &HashSet<String>,
+    default_date: Option<NaiveDate>,
+    mark_sensitive: bool,
+) -> Plan {
+    plan_with(drafts, existing, default_date, mark_sensitive, &[])
+}
+
+/// The same as [`plan`], but the company's extra `sensitive_words` also count
+/// when deciding which entries are kept on this computer.
+pub fn plan_with(
+    drafts: &[Draft],
+    existing: &HashSet<String>,
+    default_date: Option<NaiveDate>,
+    mark_sensitive: bool,
+    sensitive_words: &[String],
+) -> Plan {
     let mut undated = Vec::new();
     let mut entries = Vec::new();
     for d in drafts {
@@ -171,6 +213,9 @@ pub fn plan(drafts: &[Draft], existing: &HashSet<String>, default_date: Option<N
             continue;
         };
         let mut e = Entry::new(date, &d.text, d.tags.clone(), &d.source);
+        if mark_sensitive && !crate::sensitive::scan_with(&e.text, sensitive_words).is_empty() {
+            e.private = true;
+        }
         for link in &d.links {
             if !e.links.contains(link) {
                 e.links.push(link.clone());
@@ -390,13 +435,13 @@ mod tests {
             draft(day, "C"),
         ];
         let existing: HashSet<String> = [crate::store::make_id(day.unwrap(), "C")].into();
-        let p = plan(&drafts, &existing, None);
+        let p = plan(&drafts, &existing, None, false);
         assert_eq!(p.new.len(), 1);
         assert_eq!(p.new[0].links, vec!["https://x.io/1"]);
         assert_eq!(p.duplicates, 2);
         assert_eq!(p.undated.len(), 1);
 
-        let with_default = plan(&drafts, &existing, day);
+        let with_default = plan(&drafts, &existing, day, false);
         assert_eq!(with_default.new.len(), 2);
     }
 }

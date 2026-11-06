@@ -1,0 +1,21 @@
+# Example: AI may use a model on this computer or the company's approved
+# endpoint, with the provider's terms shown to people. Invented "Acme" data.
+name = "Acme engineering: AI use"
+contact = "security@acme.example"
+updated = "2026-10-01"
+
+[ai]
+mode = "approved"
+endpoints = ["https://llm.acme.example/v1", "https://llm2.acme.example/v1"]
+
+[endpoint]
+no_training = true
+retention = "none"
+agreement = "Zero data retention, DPA signed 2026-09"
+
+[data]
+share_notes = false
+mask_words = ["Acme", "Project Falcon", "build.acme.example"]
+sensitive = "warn"
+private_tags = ["confidential", "gizli"]
+sensitive_words = ["Project Falcon", "layoff", "işten çıkarma"]

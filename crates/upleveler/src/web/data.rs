@@ -13,6 +13,21 @@ use chrono::{Datelike, Duration, NaiveDate};
 use std::collections::{BTreeMap, HashMap};
 use std::fs;
 
+/// What the Overview shows about the company's AI policy in force. `None` when
+/// there is no policy on this computer (and in the demo data).
+pub struct PolicyCard {
+    pub name: String,
+    /// What the AI mode allows, as one sentence.
+    pub allows: String,
+    /// The endpoint terms in one line, when the company wrote any.
+    pub terms: Option<String>,
+    pub contact: Option<String>,
+    /// Whether text that looks sensitive is always kept on this computer.
+    pub keeps_sensitive: bool,
+    /// The policy's extra sensitive words, for the "send to the model" buttons.
+    pub sensitive_words: Vec<String>,
+}
+
 pub struct DashboardData {
     pub today: NaiveDate,
     /// Newest first.
@@ -30,6 +45,11 @@ pub struct DashboardData {
     pub model: String,
     /// Whether that model runs on this computer.
     pub model_local: bool,
+    /// The "Sent to your model" line, when the endpoint is remote or anything
+    /// was ever recorded (see `audit`).
+    pub audit: Option<String>,
+    /// The company's AI policy, when one is in force.
+    pub policy: Option<PolicyCard>,
     pub people: People,
     /// Notes about people, oldest first.
     pub notes: Vec<Note>,
@@ -154,6 +174,14 @@ impl DashboardData {
         crate::import::imported_files(&self.entries, &self.notes, &self.goals.goals)
     }
 
+    /// True when the company policy keeps this text on this computer, so the
+    /// "send to the model" buttons are not offered for it.
+    pub fn policy_keeps(&self, text: &str) -> bool {
+        self.policy.as_ref().is_some_and(|p| {
+            p.keeps_sensitive && !crate::sensitive::scan_with(text, &p.sensitive_words).is_empty()
+        })
+    }
+
     pub fn load(session: &Session) -> Result<Self> {
         let mut entries = session.entries()?;
         entries.reverse();
@@ -176,6 +204,27 @@ impl DashboardData {
             ai: session.ai_enabled(),
             model: session.cfg.llm.model_name().to_string(),
             model_local: crate::config::is_local_url(&session.cfg.llm.base_url),
+            audit: crate::audit::card(
+                &session.cfg,
+                &crate::audit::load(&session.paths.audit).unwrap_or_default(),
+                session.kept_count(),
+            ),
+            policy: if session.policy.is_empty() {
+                None
+            } else {
+                let p = &session.policy;
+                Some(PolicyCard {
+                    name: p
+                        .name
+                        .clone()
+                        .unwrap_or_else(|| "Your company's AI policy".into()),
+                    allows: p.ai_allowance(),
+                    terms: p.terms_line(),
+                    contact: p.contact.clone(),
+                    keeps_sensitive: p.keeps_sensitive(),
+                    sensitive_words: p.data.sensitive_words.clone(),
+                })
+            },
             people: session.people()?,
             notes: session.notes()?,
             goals: session.goals()?,
@@ -260,6 +309,7 @@ impl DashboardData {
                     || e.text.to_lowercase().contains(&q)
                     || e.tags.iter().any(|t| t.contains(&q))
                     || e.date.to_string().contains(&q)
+                    || (q == "private" && e.private)
             })
             .collect()
     }

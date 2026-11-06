@@ -89,6 +89,18 @@ pub const COMMANDS: &[Command] = &[
         runs_bare: false,
     },
     Command {
+        name: "private",
+        args: "<id>",
+        help: "keep a log entry on this computer (never send it to a model that is not on this computer)",
+        runs_bare: false,
+    },
+    Command {
+        name: "share",
+        args: "<id>",
+        help: "let a private log entry be sent to the model again",
+        runs_bare: false,
+    },
+    Command {
         name: "undo",
         args: "",
         help: "remove the last entry you logged here",
@@ -146,6 +158,18 @@ pub const COMMANDS: &[Command] = &[
         name: "reports",
         args: "",
         help: "browse saved reports",
+        runs_bare: true,
+    },
+    Command {
+        name: "audit",
+        args: "",
+        help: "what was sent to a model that is not on this computer",
+        runs_bare: true,
+    },
+    Command {
+        name: "policy",
+        args: "[new | draft @file | stop]",
+        help: "your company's AI policy; new or draft writes one with the model's help",
         runs_bare: true,
     },
     Command {
